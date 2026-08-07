@@ -235,7 +235,6 @@ pub struct SettlementBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{OrderSide, SettlementRequester};
 
     fn make_match(tier: SettlementPreference, id_seed: u8) -> Match {
         Match {

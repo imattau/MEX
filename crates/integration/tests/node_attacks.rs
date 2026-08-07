@@ -16,7 +16,7 @@ mod node_attacks {
     use protocol::flood::DeterministicFlood;
     use protocol::types::{FloodSchedule, Peer, RoutingTable};
     use prover::{TradeBatch, BACKEND, ProverBackend};
-    use watchtower::{WatchtowerClient, MockOnChainState, OnChainClient};
+    use watchtower::{WatchtowerClient, MockOnChainState};
     use topology::{NetworkTopology, TopologyNode};
 
     use ed25519_dalek::Signer;
@@ -47,7 +47,7 @@ mod node_attacks {
         };
 
         // This order enters the mesh as a FloodMessage
-        let flood_msg = FloodMessage {
+        let _flood_msg = FloodMessage {
             order: victim_order.clone(), hop_count: 0, path: vec![NodeId(1)],
             timestamp: 0.0, source_region: Region::UsEast1,
         };
@@ -58,7 +58,7 @@ mod node_attacks {
         // BEFORE forwarding, the attacker submits their OWN buy order at 2999
         // to get ahead in the queue!
 
-        let attacker_order = Order {
+        let _attacker_order = Order {
             id: [9u8; 32], trader: pk_attacker, symbol: "ETH-USD".to_string(),
             side: OrderSide::Buy, price: 3001, amount: 10,  // Slightly better price
             signature: vec![], nonce: 99, expiry: 0,
@@ -97,7 +97,7 @@ mod node_attacks {
         };
         order.signature = sk.sign(&OrderValidator::serialize_order_message(&order)).to_vec();
 
-        let mut rt = RoutingTable {
+        let rt = RoutingTable {
             upstream_peers: vec![Peer {
                 id: NodeId(1), latency_ms: 10.0,
                 last_heartbeat: 0.0, health_score: 1.0,
@@ -302,7 +302,7 @@ mod node_attacks {
         ];
 
         // Attacker creates a node claiming to be in LA
-        let honest_pos = (37.7, -122.4);  // Actually in SF
+        let _honest_pos = (37.7, -122.4);  // Actually in SF
         let claimed_pos = (34.05, -118.24);  // Claims LA
         let nodes = vec![
             TopologyNode { id: NodeId(99), region: Region::UsEast1,

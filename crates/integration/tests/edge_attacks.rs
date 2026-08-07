@@ -7,7 +7,6 @@ mod edge_cases {
     use common::{Order, OrderSide, Region, FloodMessage, NodeId, SettlementPreference, SettlementRequester};
     use engine::OrderBook;
     use prover::{TradeBatch, BACKEND, ProverBackend};
-    use watchtower::{WatchtowerClient, MockOnChainState, OnChainClient};
     use validation::OrderValidator;
 
     use ed25519_dalek::{Signer, SigningKey};

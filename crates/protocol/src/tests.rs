@@ -13,7 +13,7 @@ mod tests {
         let mut order_id = [0u8; 32];
         order_id[0] = id;
         let msg = Order::serialize_for_signing(&order_id, &pk, "ETH-USD", 3000, 5, id as u64, 0);
-        let mut order = Order {
+        let order = Order {
             id: order_id,
             trader: pk,
             symbol: "ETH-USD".to_string(),

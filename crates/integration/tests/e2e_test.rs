@@ -139,7 +139,6 @@ fn test_e2e_trade_lifecycle() {
     // 7. ZK Proving and Watchtower Fraud Disputes
     let maker_balance = 1_000_000u64;
     let taker_balance = 1_000_000u64;
-    let total_value: u64 = matches.iter().map(|m| m.price * m.amount).sum();
     let post_root_val = maker_balance + taker_balance;
     let batch = TradeBatch {
         trades: matches.clone(),

@@ -208,7 +208,7 @@ impl ClientScoreAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{OrderSide, SettlementPreference, SettlementRequester};
+    use common::SettlementPreference;
 
     fn make_match(id_seed: u8, tier: SettlementPreference) -> Match {
         Match {

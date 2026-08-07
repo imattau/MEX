@@ -191,6 +191,10 @@ impl MultiWatchtower {
     }
 }
 
+// ark_ff_macros' MontConfig derive (used below) expands to an impl the
+// `non_local_definitions` lint flags when the struct lives inside this `mod`;
+// it's an upstream macro-hygiene quirk, not an issue with this code.
+#[allow(non_local_definitions)]
 #[cfg(test)]
 pub mod tests {
     use super::*;

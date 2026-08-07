@@ -226,7 +226,7 @@ mod tests {
         let mut dst_buf = vec![0u8; 1024];
         let dst_mr = device.register_memory(&dst_buf).unwrap();
 
-        let (qp0, qp1) = device.create_qp_pair().expect("QP pair creation failed");
+        let (qp0, _qp1) = device.create_qp_pair().expect("QP pair creation failed");
 
         qp0.rdma_read(
             &mut dst_buf,

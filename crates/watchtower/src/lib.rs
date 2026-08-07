@@ -147,7 +147,6 @@ impl WatchtowerClient {
 mod tests {
     use super::*;
     use engine::Match;
-    use common::SettlementRequester;
 
     fn u64_to_bytes32(val: u64) -> [u8; 32] {
         let mut result = [0u8; 32];
