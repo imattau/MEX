@@ -26,7 +26,7 @@ pub enum OrderSide {
     Sell,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Order {
     pub id: [u8; 32],
     pub trader: [u8; 32],

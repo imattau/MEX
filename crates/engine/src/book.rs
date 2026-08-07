@@ -45,6 +45,15 @@ impl OrderBook {
                             timestamp_us,
                         });
 
+                        tracing::info!(
+                            symbol = %self.symbol,
+                            maker_id = ?maker_order.id,
+                            taker_id = ?order.id,
+                            price = ask_price,
+                            amount = match_amount,
+                            "Order matched successfully"
+                        );
+
                         if maker_order.amount == 0 {
                             filled_indices.push(idx);
                         }
@@ -64,6 +73,7 @@ impl OrderBook {
                 }
 
                 if order.amount > 0 {
+                    tracing::debug!(symbol = %self.symbol, price = order.price, amount = order.amount, "Adding remaining buy order to book");
                     self.bids.entry(order.price).or_default().push(order);
                 }
             }
