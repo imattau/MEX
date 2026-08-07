@@ -26,6 +26,49 @@ pub enum OrderSide {
     Sell,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SettlementPreference {
+    Standard,
+    Express,
+    Instant,
+}
+
+impl Default for SettlementPreference {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SettlementRequester {
+    Seller,
+    Buyer,
+}
+
+impl Default for SettlementRequester {
+    fn default() -> Self {
+        Self::Seller
+    }
+}
+
+impl SettlementPreference {
+    pub fn fee_basis_points(&self) -> u32 {
+        match self {
+            SettlementPreference::Standard => 5,
+            SettlementPreference::Express => 15,
+            SettlementPreference::Instant => 50,
+        }
+    }
+
+    pub fn deadline_seconds(&self) -> u64 {
+        match self {
+            SettlementPreference::Standard => 86_400,
+            SettlementPreference::Express => 600,
+            SettlementPreference::Instant => 60,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Order {
     pub id: [u8; 32],
@@ -37,6 +80,8 @@ pub struct Order {
     pub signature: Vec<u8>,
     pub nonce: u64,
     pub expiry: u64,
+    pub settlement_preference: SettlementPreference,
+    pub settlement_requester: SettlementRequester,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

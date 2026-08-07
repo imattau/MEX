@@ -19,5 +19,11 @@ members = [
     "crates/security_tests",
     "crates/benchmarks",
     "crates/stress_tests",
-    "crates/storage"
+    "crates/storage",
+    "crates/chain",
+    "crates/chain-ethereum",
+    "crates/chain-solana",
+    "crates/chain-cosmwasm",
+    "crates/batcher",
+    "crates/reputation"
 ]

@@ -6,16 +6,29 @@ edition = "2021"
 [dependencies]
 common = { path = "../common" }
 engine = { path = "../engine" }
+batcher = { path = "../batcher" }
 rdma = { path = "../rdma" }
 sandbox = { path = "../sandbox" }
 validation = { path = "../validation" }
 topology = { path = "../topology" }
 security = { path = "../security" }
 heartbeat = { path = "../heartbeat" }
+protocol = { path = "../protocol" }
 prover = { path = "../prover" }
 tss = { path = "../tss" }
 watchtower = { path = "../watchtower" }
+storage = { path = "../storage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
+tokio = { version = "1.0", features = ["net", "sync", "macros", "rt", "time"] }
+hex = "0.4"
+
+[[bin]]
+name = "integration"
+path = "src/main.rs"
+
+[[bin]]
+name = "settlement_demo"
+path = "src/settlement_demo.rs"

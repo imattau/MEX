@@ -1,4 +1,4 @@
-use common::{Order, OrderSide};
+use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
 
 use rand_distr::{Distribution, Normal};
@@ -74,6 +74,8 @@ fn run_gbm_market_realism() {
                 signature: Vec::new(),
                 nonce: i as u64,
                 expiry: 0,
+                settlement_preference: SettlementPreference::Standard,
+                settlement_requester: SettlementRequester::Seller,
             };
             book.add_order(order);
         }
@@ -107,6 +109,8 @@ fn run_throughput_scaling() {
                 signature: Vec::new(),
                 nonce: i as u64,
                 expiry: 0,
+                settlement_preference: SettlementPreference::Standard,
+                settlement_requester: SettlementRequester::Seller,
             };
             book.add_order(order);
         }

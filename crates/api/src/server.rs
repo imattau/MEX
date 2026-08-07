@@ -7,47 +7,123 @@ use axum::{
 };
 use common::Order;
 use engine::{Match, OrderBook};
-use std::sync::{Arc, Mutex};
+use metrics::{counter, gauge, histogram};
+use std::sync::{Arc, RwLock, OnceLock};
+use std::time::Instant;
 use tokio::sync::broadcast;
+use tower::limit::ConcurrencyLimitLayer;
+use axum::http::{HeaderMap, StatusCode, Request};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use tracing::{info, warn, debug, error, instrument};
 use validation::OrderValidator;
 
+static API_KEY: OnceLock<String> = OnceLock::new();
+
+fn get_api_key() -> &'static str {
+    API_KEY.get_or_init(|| {
+        std::env::var("MEX_API_KEY").unwrap_or_else(|_| {
+            eprintln!("WARNING: MEX_API_KEY not set, using development default");
+            "dev-default-key".to_string()
+        })
+    })
+}
+
+async fn check_auth(headers: HeaderMap, request: Request<axum::body::Body>, next: Next) -> Result<Response, StatusCode> {
+    let valid_key = headers
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == get_api_key())
+        .unwrap_or(false);
+
+    if !valid_key {
+        warn!("Unauthorized API request");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
 pub struct AppState {
+    pub node_id: common::NodeId,
     pub order_book: OrderBook,
     pub validator: OrderValidator,
     pub ws_broadcast: broadcast::Sender<Match>,
+    pub reputation: reputation::ReputationEngine,
 }
 
-pub fn app(state: Arc<Mutex<AppState>>) -> Router {
+fn setup_metrics() {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        PrometheusBuilder::new()
+            .install_recorder()
+            .expect("Failed to install Prometheus recorder");
+    });
+}
+
+pub fn app(state: Arc<RwLock<AppState>>) -> Router {
+    setup_metrics();
+
     Router::new()
         .route("/api/v1/order", post(submit_order))
         .route("/api/v1/orderbook", get(get_orderbook))
+        .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
+        .layer(middleware::from_fn(check_auth))
+        .layer(ConcurrencyLimitLayer::new(256))
         .with_state(state)
 }
 
+async fn metrics_handler() -> impl IntoResponse {
+    use metrics_exporter_prometheus::PrometheusHandle;
+    use std::sync::OnceLock;
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    let handle = HANDLE.get_or_init(|| {
+        setup_metrics();
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("Metrics already installed")
+    });
+    handle.render()
+}
+
+#[instrument(skip(state, payload), fields(
+    symbol = %payload.symbol,
+    side = ?payload.side,
+    price = payload.price,
+    amount = payload.amount
+))]
 async fn submit_order(
-    State(state): State<Arc<Mutex<AppState>>>,
+    State(state): State<Arc<RwLock<AppState>>>,
     Json(payload): Json<SubmitOrderRequest>,
 ) -> Json<SubmitOrderResponse> {
-    // Generate order ID from nonce and details
+    let start = Instant::now();
+    counter!("api.orders.received").increment(1);
+
     let mut order_id = [0u8; 32];
-    order_id[0..8].copy_from_slice(&payload.nonce.to_be_bytes());
+    order_id[0..16].copy_from_slice(&payload.trader[0..16]);
+    order_id[16..24].copy_from_slice(&payload.nonce.to_be_bytes());
 
     let order = Order {
         id: order_id,
         trader: payload.trader,
-        symbol: payload.symbol,
+        symbol: payload.symbol.clone(),
         side: payload.side,
         price: payload.price,
         amount: payload.amount,
         signature: payload.signature,
         nonce: payload.nonce,
         expiry: payload.expiry,
+        settlement_preference: payload.settlement_preference,
+        settlement_requester: payload.settlement_requester,
     };
-    let mut guard = state.lock().unwrap();
 
-    // 1. Validate signature using validation cache
+    let mut guard = state.write().unwrap();
+
     if !guard.validator.validate_order(&order) {
+        counter!("api.orders.invalid_signature").increment(1);
+        warn!(nonce = order.nonce, "Invalid signature for order");
         return Json(SubmitOrderResponse {
             success: false,
             order_id,
@@ -56,12 +132,32 @@ async fn submit_order(
         });
     }
 
-    // 2. Insert order into matching engine book
     let matches = guard.order_book.add_order(order);
+    counter!("api.orders.matched").increment(matches.len() as u64);
+    histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
 
-    // 3. Broadcast matches via WebSocket
     for m in &matches {
         let _ = guard.ws_broadcast.send(m.clone());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let node_id = guard.node_id;
+        reputation::integration::on_order_matched(
+            &mut guard.reputation,
+            node_id,
+            m,
+            now,
+        );
+    }
+
+    gauge!("orderbook.bids.depth").set(guard.order_book.bids.len() as f64);
+    gauge!("orderbook.asks.depth").set(guard.order_book.asks.len() as f64);
+
+    if matches.is_empty() {
+        debug!(order_id = ?order_id, symbol = %payload.symbol, "Order added to book with no matches");
+    } else {
+        info!(matches = matches.len(), "Order matched successfully");
     }
 
     Json(SubmitOrderResponse {
@@ -72,10 +168,12 @@ async fn submit_order(
     })
 }
 
+#[instrument(skip(state))]
 async fn get_orderbook(
-    State(state): State<Arc<Mutex<AppState>>>,
+    State(state): State<Arc<RwLock<AppState>>>,
 ) -> Json<OrderBookResponse> {
-    let guard = state.lock().unwrap();
+    counter!("api.orderbook.requests").increment(1);
+    let guard = state.read().unwrap();
 
     let bids = guard
         .order_book
@@ -106,22 +204,31 @@ async fn get_orderbook(
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<Mutex<AppState>>>,
+    State(state): State<Arc<RwLock<AppState>>>,
 ) -> impl IntoResponse {
+    counter!("api.ws.connections").increment(1);
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<Mutex<AppState>>) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<RwLock<AppState>>) {
     let mut rx = {
-        let guard = state.lock().unwrap();
+        let guard = state.read().unwrap();
         guard.ws_broadcast.subscribe()
     };
 
     while let Ok(msg) = rx.recv().await {
-        if let Ok(serialized) = serde_json::to_string(&msg) {
-            if socket.send(Message::Text(serialized)).await.is_err() {
-                break; // Connection closed
+        match serde_json::to_string(&msg) {
+            Ok(serialized) => {
+                if socket.send(Message::Text(serialized)).await.is_err() {
+                    debug!("WebSocket connection closed");
+                    break;
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to serialize match for WebSocket");
             }
         }
     }
+
+    gauge!("api.ws.connections").decrement(1.0);
 }

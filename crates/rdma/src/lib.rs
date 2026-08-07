@@ -1,3 +1,8 @@
+mod verbs;
+
+#[cfg(soft_rdma_available)]
+pub mod soft_rdma;
+
 use common::Order;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -22,7 +27,6 @@ impl TraderMemoryRegion {
         if serialized.len() > self.buffer.len() {
             return Err("Data exceeds memory region size".to_string());
         }
-        // Write size prefix
         let len_bytes = (serialized.len() as u32).to_be_bytes();
         self.buffer[0..4].copy_from_slice(&len_bytes);
         self.buffer[4..4 + serialized.len()].copy_from_slice(&serialized);
@@ -39,8 +43,8 @@ impl TraderMemoryRegion {
         if len + 4 > self.buffer.len() {
             return Err("Invalid size prefix".to_string());
         }
-        let orders: Vec<Order> = serde_json::from_slice(&self.buffer[4..4 + len])
-            .map_err(|e| e.to_string())?;
+        let orders: Vec<Order> =
+            serde_json::from_slice(&self.buffer[4..4 + len]).map_err(|e| e.to_string())?;
         Ok(orders)
     }
 }
@@ -107,14 +111,12 @@ impl PullScheduler {
         let start = Instant::now();
         let mut pulled_orders = Vec::new();
 
-        // High-frequency pulling: pull from the next trader in round-robin fashion
         if let Some(trader_id) = self.active_traders.pop_front() {
             if let Some(region) = manager.regions.get(&trader_id) {
                 if let Ok(orders) = region.read_orders() {
                     pulled_orders.extend(orders);
                 }
             }
-            // Put trader back to the end of queue
             self.active_traders.push_back(trader_id);
         }
 
@@ -124,10 +126,26 @@ impl PullScheduler {
     }
 }
 
+#[cfg(soft_rdma_available)]
+pub mod real_rdma {
+    use crate::soft_rdma::SoftRdmaDevice;
+
+    pub struct RdmaPullEngine {
+        pub device: SoftRdmaDevice,
+    }
+
+    impl RdmaPullEngine {
+        pub fn new() -> Result<Self, String> {
+            let device = SoftRdmaDevice::open()?;
+            Ok(Self { device })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::OrderSide;
+    use common::{OrderSide, SettlementPreference, SettlementRequester};
 
     fn create_test_order(id: u8) -> Order {
         let mut order_id = [0u8; 32];
@@ -142,6 +160,8 @@ mod tests {
             signature: Vec::new(),
             nonce: id as u64,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         }
     }
 
@@ -149,7 +169,7 @@ mod tests {
     fn test_memory_region_write_read() {
         let trader_id = [1u8; 32];
         let mut region = TraderMemoryRegion::new(trader_id, 1024, 999);
-        
+
         let orders = vec![create_test_order(1), create_test_order(2)];
         region.write_orders(&orders).unwrap();
 
@@ -168,20 +188,60 @@ mod tests {
         manager.register(trader_a, 1024, 100);
         manager.register(trader_b, 1024, 200);
 
-        let mut scheduler = PullScheduler::new(100); // 100us
+        let mut scheduler = PullScheduler::new(100);
         scheduler.add_trader(trader_a);
         scheduler.add_trader(trader_b);
 
-        // Write order for A
-        manager.get_region_mut(&trader_a).unwrap().write_orders(&[create_test_order(10)]).unwrap();
+        manager
+            .get_region_mut(&trader_a)
+            .unwrap()
+            .write_orders(&[create_test_order(10)])
+            .unwrap();
 
-        // First pull should get Trader A's orders
         let (orders_a, _) = scheduler.perform_pull(&manager);
         assert_eq!(orders_a.len(), 1);
         assert_eq!(orders_a[0].nonce, 10);
 
-        // Second pull should check Trader B (empty)
         let (orders_b, _) = scheduler.perform_pull(&manager);
         assert!(orders_b.is_empty());
+    }
+
+
+    #[cfg(soft_rdma_available)]
+    #[test]
+    fn test_soft_rdma_self_read() {
+        use crate::soft_rdma::SoftRdmaDevice;
+
+        let device = match SoftRdmaDevice::open() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Skipping softRDMA test: {}", e);
+                return;
+            }
+        };
+
+        let src_buf = vec![0xAAu8; 1024];
+        let src_mr = device.register_memory(&src_buf).unwrap();
+
+        let mut dst_buf = vec![0u8; 1024];
+        let dst_mr = device.register_memory(&dst_buf).unwrap();
+
+        let (qp0, qp1) = device.create_qp_pair().expect("QP pair creation failed");
+
+        qp0.rdma_read(
+            &mut dst_buf,
+            &dst_mr,
+            src_mr.remote_addr(),
+            src_mr.rkey(),
+            1024,
+        )
+        .unwrap();
+
+        let wc = qp0
+            .poll_completion(device.cq)
+            .expect("No completion received");
+        assert_eq!(wc.byte_len, 1024);
+        assert_eq!(dst_buf[0], 0xAA);
+        assert_eq!(dst_buf[1023], 0xAA);
     }
 }

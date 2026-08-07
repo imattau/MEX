@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::types::{FloodMessage, NodeId, Order, OrderSide, Region};
+    use crate::types::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
 
     #[test]
     fn test_order_serialization() {
@@ -14,6 +14,8 @@ mod tests {
             signature: vec![1, 2, 3],
             nonce: 1001,
             expiry: 2000,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let serialized = serde_json::to_string(&order).unwrap();
@@ -42,6 +44,8 @@ mod tests {
             signature: vec![0xAA; 64],
             nonce: 42,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let msg = FloodMessage {

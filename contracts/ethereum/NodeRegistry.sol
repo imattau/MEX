@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract NodeRegistry {
+    uint256 public constant MIN_STAKE = 10 ether;
+    uint256 public constant MAX_MISSED_DEADLINES = 3;
+    uint256 public constant REPUTATION_SCALE = 10000;
+
+    enum TrustLevel {
+        Newcomer,
+        Contributor,
+        Trusted,
+        Elite,
+        Banned
+    }
+
+    struct NodeInfo {
+        bytes32 nodePubkey;
+        address operator;
+        uint256 stake;
+        uint256 registeredAt;
+        bool active;
+        uint256 slashCount;
+        uint256 missedDeadlines;
+        string geoRegion;
+        uint32 reputationScore;
+        TrustLevel trustLevel;
+        uint64 lastRepUpdate;
+    }
+
+    mapping(bytes32 => NodeInfo) public nodes;
+    bytes32[] public nodeList;
+    uint256 public totalNodes;
+
+    event NodeRegistered(bytes32 indexed nodePubkey, address indexed operator, string geoRegion);
+    event NodeSlashed(bytes32 indexed nodePubkey, uint256 amount);
+    event NodePenalized(bytes32 indexed nodePubkey, uint256 penalty);
+    event NodeDeactivated(bytes32 indexed nodePubkey);
+    event NodeActivated(bytes32 indexed nodePubkey);
+    event MissedDeadlineRecorded(bytes32 indexed nodePubkey, uint256 totalMissed);
+    event NodeReputationUpdated(bytes32 indexed nodePubkey, uint32 score, TrustLevel level);
+
+    modifier onlyNodeOperator(bytes32 nodePubkey) {
+        require(nodes[nodePubkey].operator == msg.sender, "Not node operator");
+        _;
+    }
+
+    function registerNode(bytes32 nodePubkey, string calldata geoRegion) external payable {
+        require(msg.value >= MIN_STAKE, "Insufficient stake");
+        require(nodes[nodePubkey].registeredAt == 0, "Node already registered");
+
+        nodes[nodePubkey] = NodeInfo({
+            nodePubkey: nodePubkey,
+            operator: msg.sender,
+            stake: msg.value,
+            registeredAt: block.timestamp,
+            active: true,
+            slashCount: 0,
+            missedDeadlines: 0,
+            geoRegion: geoRegion,
+            reputationScore: 5000,
+            trustLevel: TrustLevel.Newcomer,
+            lastRepUpdate: uint64(block.timestamp)
+        });
+
+        nodeList.push(nodePubkey);
+        totalNodes++;
+
+        emit NodeRegistered(nodePubkey, msg.sender, geoRegion);
+    }
+
+    function updateReputation(
+        bytes32 nodePubkey,
+        uint32 newScore,
+        TrustLevel newLevel
+    ) external {
+        NodeInfo storage node = nodes[nodePubkey];
+        require(node.registeredAt > 0, "Node not registered");
+
+        node.reputationScore = newScore;
+        node.trustLevel = newLevel;
+        node.lastRepUpdate = uint64(block.timestamp);
+
+        emit NodeReputationUpdated(nodePubkey, newScore, newLevel);
+    }
+
+    function getReputation(bytes32 nodePubkey)
+        external
+        view
+        returns (uint32 score, TrustLevel level, uint64 lastUpdate)
+    {
+        NodeInfo storage node = nodes[nodePubkey];
+        return (node.reputationScore, node.trustLevel, node.lastRepUpdate);
+    }
+
+    function slashNode(bytes32 nodePubkey, uint256 amount) external {
+        NodeInfo storage node = nodes[nodePubkey];
+        require(node.active, "Node not active");
+        require(node.stake >= amount, "Insufficient stake to slash");
+
+        node.stake -= amount;
+        node.slashCount++;
+        node.active = false;
+        node.reputationScore = node.reputationScore / 2;
+
+        emit NodeSlashed(nodePubkey, amount);
+        emit NodeDeactivated(nodePubkey);
+        emit NodeReputationUpdated(nodePubkey, node.reputationScore, node.trustLevel);
+
+        if (node.stake < MIN_STAKE) {
+            delete nodes[nodePubkey];
+        }
+    }
+
+    function recordMissedDeadline(bytes32 nodePubkey) external {
+        NodeInfo storage node = nodes[nodePubkey];
+        require(node.active, "Node not active");
+
+        node.missedDeadlines++;
+        emit MissedDeadlineRecorded(nodePubkey, node.missedDeadlines);
+
+        if (node.missedDeadlines >= MAX_MISSED_DEADLINES) {
+            _autoPenalize(nodePubkey);
+        }
+    }
+
+    function _autoPenalize(bytes32 nodePubkey) private {
+        NodeInfo storage node = nodes[nodePubkey];
+        uint256 penalty = node.stake / 2;
+        node.stake -= penalty;
+        node.missedDeadlines = 0;
+        node.active = false;
+        node.reputationScore = node.reputationScore / 2;
+
+        emit NodePenalized(nodePubkey, penalty);
+        emit NodeDeactivated(nodePubkey);
+        emit NodeReputationUpdated(nodePubkey, node.reputationScore, node.trustLevel);
+
+        if (node.stake < MIN_STAKE) {
+            delete nodes[nodePubkey];
+        }
+    }
+
+    function deactivateNode(bytes32 nodePubkey) external onlyNodeOperator(nodePubkey) {
+        nodes[nodePubkey].active = false;
+        emit NodeDeactivated(nodePubkey);
+    }
+
+    function activateNode(bytes32 nodePubkey) external onlyNodeOperator(nodePubkey) {
+        require(nodes[nodePubkey].stake >= MIN_STAKE, "Stake below minimum");
+        nodes[nodePubkey].active = true;
+        emit NodeActivated(nodePubkey);
+    }
+
+    function withdrawStake(bytes32 nodePubkey) external onlyNodeOperator(nodePubkey) {
+        NodeInfo storage node = nodes[nodePubkey];
+        require(!node.active, "Must deactivate first");
+
+        uint256 amount = node.stake;
+        node.stake = 0;
+        payable(node.operator).transfer(amount);
+    }
+
+    function isActiveNode(bytes32 nodePubkey) external view returns (bool) {
+        return nodes[nodePubkey].active;
+    }
+
+    function getNodeCount() external view returns (uint256) {
+        return totalNodes;
+    }
+
+    function getNodePubkeys() external view returns (bytes32[] memory) {
+        return nodeList;
+    }
+}

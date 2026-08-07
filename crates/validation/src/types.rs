@@ -1,4 +1,5 @@
 use lru::LruCache;
+use std::collections::HashMap;
 
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct ValidationKey {
@@ -8,4 +9,5 @@ pub struct ValidationKey {
 
 pub struct OrderValidator {
     pub cache: LruCache<ValidationKey, bool>,
+    pub nonces: HashMap<[u8; 32], u64>,
 }

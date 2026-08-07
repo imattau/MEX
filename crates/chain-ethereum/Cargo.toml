@@ -1,0 +1,11 @@
+[package]
+name = "chain-ethereum"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chain = { path = "../chain" }
+prover = { path = "../prover" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"

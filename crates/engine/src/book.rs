@@ -1,5 +1,5 @@
 use crate::types::{Match, OrderBook};
-use common::{Order, OrderSide};
+use common::{FeeCalculator, Order, OrderSide, SettlementPreference, SettlementRequester};
 use std::collections::BTreeMap;
 
 impl OrderBook {
@@ -8,15 +8,27 @@ impl OrderBook {
             symbol,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
+            node_rewards: 0,
         }
     }
 
     pub fn add_order(&mut self, mut order: Order) -> Vec<Match> {
+        if order.amount == 0 {
+            return Vec::new();
+        }
+        if order.price == 0 || order.price > 1_000_000_000_000 {
+            return Vec::new();
+        }
+        if order.amount as u128 * order.price as u128 > u64::MAX as u128 {
+            return Vec::new();
+        }
+
         let mut matches = Vec::new();
         let timestamp_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
+        let now_secs = timestamp_us / 1_000_000;
 
         match order.side {
             OrderSide::Buy => {
@@ -33,16 +45,34 @@ impl OrderBook {
                             break;
                         }
 
+                        if maker_order.trader == order.trader {
+                            continue;
+                        }
+
                         let match_amount = std::cmp::min(order.amount, maker_order.amount);
                         order.amount -= match_amount;
                         maker_order.amount -= match_amount;
 
+                        let (tier, fee_bps, seller, deadline) =
+                            Self::resolve_settlement_params(&order, maker_order, now_secs);
+
+                        let fee = FeeCalculator::compute_fee_amount(
+                            match_amount, ask_price, tier,
+                        );
+                        self.node_rewards += fee as u64;
+
                         matches.push(Match {
                             maker_order_id: maker_order.id,
                             taker_order_id: order.id,
+                            maker_trader: maker_order.trader,
+                            taker_trader: order.trader,
                             price: ask_price,
                             amount: match_amount,
                             timestamp_us,
+                            settlement_tier: tier,
+                            fee_basis_points: fee_bps,
+                            seller,
+                            settlement_deadline: deadline,
                         });
 
                         tracing::info!(
@@ -100,16 +130,34 @@ impl OrderBook {
                                 break;
                             }
 
+                            if maker_order.trader == order.trader {
+                                continue;
+                            }
+
                             let match_amount = std::cmp::min(order.amount, maker_order.amount);
                             order.amount -= match_amount;
                             maker_order.amount -= match_amount;
 
+                            let (tier, fee_bps, seller, deadline) =
+                                Self::resolve_settlement_params(&order, maker_order, now_secs);
+
+                            let fee = FeeCalculator::compute_fee_amount(
+                                match_amount, bid_price, tier,
+                            );
+                            self.node_rewards += fee as u64;
+
                             matches.push(Match {
                                 maker_order_id: maker_order.id,
                                 taker_order_id: order.id,
+                                maker_trader: maker_order.trader,
+                                taker_trader: order.trader,
                                 price: bid_price,
                                 amount: match_amount,
                                 timestamp_us,
+                                settlement_tier: tier,
+                                fee_basis_points: fee_bps,
+                                seller,
+                                settlement_deadline: deadline,
                             });
 
                             if maker_order.amount == 0 {
@@ -138,6 +186,38 @@ impl OrderBook {
         }
 
         matches
+    }
+
+    fn resolve_settlement_params(
+        taker_order: &Order,
+        maker_order: &Order,
+        now_secs: u64,
+    ) -> (SettlementPreference, u32, [u8; 32], u64) {
+        let sell_order = if taker_order.side == OrderSide::Sell {
+            taker_order
+        } else {
+            maker_order
+        };
+
+        let buy_order = if taker_order.side == OrderSide::Buy {
+            taker_order
+        } else {
+            maker_order
+        };
+
+        let (tier, fee_payer) = match &sell_order.settlement_requester {
+            SettlementRequester::Buyer => {
+                (buy_order.settlement_preference, buy_order.trader)
+            }
+            SettlementRequester::Seller => {
+                (sell_order.settlement_preference, sell_order.trader)
+            }
+        };
+
+        let fee_bps = tier.fee_basis_points();
+        let deadline = now_secs + tier.deadline_seconds();
+
+        (tier, fee_bps, fee_payer, deadline)
     }
 
     pub fn cancel_order(&mut self, order_id: [u8; 32]) -> bool {

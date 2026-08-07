@@ -1,4 +1,4 @@
-use common::OrderSide;
+use common::{OrderSide, SettlementPreference, SettlementRequester};
 use engine::Match;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,10 @@ pub struct SubmitOrderRequest {
     pub signature: Vec<u8>,
     pub nonce: u64,
     pub expiry: u64,
+    #[serde(default)]
+    pub settlement_preference: SettlementPreference,
+    #[serde(default)]
+    pub settlement_requester: SettlementRequester,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

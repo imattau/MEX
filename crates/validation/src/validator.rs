@@ -1,7 +1,9 @@
 use crate::types::{OrderValidator, ValidationKey};
 use common::Order;
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::time::{SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 
 impl OrderValidator {
@@ -9,6 +11,7 @@ impl OrderValidator {
         let cap = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
         Self {
             cache: LruCache::new(cap),
+            nonces: HashMap::new(),
         }
     }
 
@@ -25,6 +28,31 @@ impl OrderValidator {
     }
 
     pub fn validate_order(&mut self, order: &Order) -> bool {
+        if order.amount == 0 {
+            return false;
+        }
+
+        let max_value = order.amount as u128 * order.price as u128;
+        if max_value > u64::MAX as u128 {
+            return false;
+        }
+
+        if order.expiry > 0 {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now > order.expiry {
+                return false;
+            }
+        }
+
+        if let Some(&last_nonce) = self.nonces.get(&order.trader) {
+            if order.nonce <= last_nonce {
+                return false;
+            }
+        }
+
         if order.signature.is_empty() || order.trader == [0u8; 32] {
             return false;
         }
@@ -35,9 +63,8 @@ impl OrderValidator {
             signature: order.signature.clone(),
         };
 
-        // Check verification cache
         if self.cache.contains(&key) {
-            return true;
+            return false;
         }
 
         let verifying_key = match VerifyingKey::from_bytes(&order.trader) {
@@ -53,7 +80,8 @@ impl OrderValidator {
         let is_valid = verifying_key.verify(&msg, &signature).is_ok();
 
         if is_valid {
-            self.cache.put(key, true);
+            self.cache.put(key, false);
+            self.nonces.insert(order.trader, order.nonce);
         }
 
         is_valid

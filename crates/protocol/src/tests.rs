@@ -3,21 +3,53 @@ mod tests {
     use crate::flood::DeterministicFlood;
     use crate::heartbeat::HeartbeatTracker;
     use crate::types::{FloodError, FloodSchedule, Peer, RoutingTable};
-    use common::{FloodMessage, NodeId, Order, OrderSide, Region};
+    use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+    use ed25519_dalek::{Signer, SigningKey};
 
-    fn test_order(id: u8) -> Order {
+    fn make_signed_order(id: u8) -> Order {
+        let mut csprng = rand::thread_rng();
+        let sk = SigningKey::generate(&mut csprng);
+        let pk = sk.verifying_key().to_bytes();
         let mut order_id = [0u8; 32];
         order_id[0] = id;
-        Order {
+        let msg = Order::serialize_for_signing(&order_id, &pk, "ETH-USD", 3000, 5, id as u64, 0);
+        let mut order = Order {
             id: order_id,
-            trader: [0u8; 32],
+            trader: pk,
             symbol: "ETH-USD".to_string(),
             side: OrderSide::Buy,
             price: 3000,
             amount: 5,
-            signature: Vec::new(),
+            signature: sk.sign(&msg).to_vec(),
             nonce: id as u64,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        order
+    }
+
+    trait OrderSigning {
+        fn serialize_for_signing(
+            id: &[u8; 32], trader: &[u8; 32], symbol: &str,
+            price: u64, amount: u64, nonce: u64, expiry: u64,
+        ) -> Vec<u8>;
+    }
+
+    impl OrderSigning for Order {
+        fn serialize_for_signing(
+            id: &[u8; 32], trader: &[u8; 32], symbol: &str,
+            price: u64, amount: u64, nonce: u64, expiry: u64,
+        ) -> Vec<u8> {
+            let mut msg = Vec::new();
+            msg.extend_from_slice(id);
+            msg.extend_from_slice(trader);
+            msg.extend_from_slice(symbol.as_bytes());
+            msg.extend_from_slice(&price.to_be_bytes());
+            msg.extend_from_slice(&amount.to_be_bytes());
+            msg.extend_from_slice(&nonce.to_be_bytes());
+            msg.extend_from_slice(&expiry.to_be_bytes());
+            msg
         }
     }
 
@@ -41,7 +73,7 @@ mod tests {
             FloodSchedule::default(),
         );
 
-        let order = test_order(1);
+        let order = make_signed_order(1);
 
         // 1. Success validation
         let msg = FloodMessage {
@@ -62,7 +94,7 @@ mod tests {
         assert_eq!(res_dup.unwrap_err(), FloodError::DuplicatePacket);
 
         // 3. Reject early packet (future timestamp)
-        let order_2 = test_order(2);
+        let order_2 = make_signed_order(2);
         let msg_early = FloodMessage {
             order: order_2.clone(),
             hop_count: 0,
@@ -70,11 +102,11 @@ mod tests {
             timestamp: 200.0,
             source_region: Region::UsEast1,
         };
-        let res_early = flood.on_receive(msg_early, 180.0); // 20ms before threshold -> rejected
+        let res_early = flood.on_receive(msg_early, 180.0);
         assert_eq!(res_early.unwrap_err(), FloodError::EarlyPacket);
 
         // 4. Reject late packet
-        let order_3 = test_order(3);
+        let order_3 = make_signed_order(3);
         let msg_late = FloodMessage {
             order: order_3.clone(),
             hop_count: 1,
@@ -82,22 +114,20 @@ mod tests {
             timestamp: 200.0,
             source_region: Region::UsEast1,
         };
-        let res_late = flood.on_receive(msg_late, 600.0); // 400ms delay (> max 350ms) -> rejected
+        let res_late = flood.on_receive(msg_late, 600.0);
         assert_eq!(res_late.unwrap_err(), FloodError::LatePacket);
     }
 
     #[test]
     fn test_heartbeat_timeout_tracking() {
-        let mut tracker = HeartbeatTracker::new(10.0, 3); // 10ms interval, 3 missed limit
+        let mut tracker = HeartbeatTracker::new(10.0, 3);
 
         tracker.on_heartbeat(NodeId(1), 10.0);
         tracker.on_heartbeat(NodeId(2), 10.0);
 
-        // Checks at 20ms (interval is 10ms, max_missed is 3, i.e. limit is 30ms elapsed, so 10 + 30 = 40ms threshold)
         let dead = tracker.check_health(20.0);
         assert!(dead.is_empty());
 
-        // Checks at 50ms (elapsed is 40ms > 30ms limit) -> Node 1 and Node 2 are dead
         let dead = tracker.check_health(50.0);
         assert_eq!(dead.len(), 2);
         assert!(dead.contains(&NodeId(1)));

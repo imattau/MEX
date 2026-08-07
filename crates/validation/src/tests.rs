@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::types::OrderValidator;
-    use common::{Order, OrderSide};
+    use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
     use ed25519_dalek::Signer;
     use rand::rngs::OsRng;
 
@@ -22,6 +22,8 @@ mod tests {
             signature: Vec::new(),
             nonce: 42,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let msg = OrderValidator::serialize_order_message(&order);
@@ -30,24 +32,25 @@ mod tests {
 
         let mut validator = OrderValidator::new(100);
 
-        // 1. Initial validation (should perform crypto verify and succeed)
-        let start = std::time::Instant::now();
         assert!(validator.validate_order(&order));
-        let initial_duration = start.elapsed();
 
-        // 2. Cache hit validation (should bypass crypto verification)
-        let start_cached = std::time::Instant::now();
-        assert!(validator.validate_order(&order));
-        let cached_duration = start_cached.elapsed();
+        let mut order2 = order.clone();
+        order2.nonce = 43;
+        let msg2 = OrderValidator::serialize_order_message(&order2);
+        order2.signature = signing_key.sign(&msg2).to_vec();
 
-        println!("Initial verification: {:?}", initial_duration);
-        println!("Cached verification: {:?}", cached_duration);
-        assert!(cached_duration < initial_duration);
+        assert!(validator.validate_order(&order2));
 
-        // 3. Fails when order contents are tampered
         let mut tampered_order = order.clone();
-        tampered_order.price = 3001; // Tamper price
+        tampered_order.price = 3001;
         assert!(!validator.validate_order(&tampered_order));
+
+        let mut low_nonce = order.clone();
+        low_nonce.nonce = 41;
+        let msg3 = OrderValidator::serialize_order_message(&low_nonce);
+        low_nonce.signature = signing_key.sign(&msg3).to_vec();
+        assert!(!validator.validate_order(&low_nonce),
+            "Nonce sequencing blocks lower nonces");
     }
 
     #[test]
@@ -78,6 +81,8 @@ mod tests {
             signature: vec![0u8; 64],
             nonce: 999,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let msg = OrderValidator::serialize_order_message(&order);

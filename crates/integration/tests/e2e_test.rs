@@ -1,16 +1,22 @@
-use common::{Order, OrderSide, NodeId, Region};
+use common::{Order, OrderSide, NodeId, Region, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
 use rdma::{TraderMemoryRegionManager, PullScheduler};
 use validation::OrderValidator;
 use topology::{NetworkTopology, TopologyNode};
 use security::{encrypt_packet, decrypt_packet};
 use heartbeat::DeterministicHeartbeat;
-use prover::{TradeBatch, ZKProver};
+use prover::{TradeBatch, BACKEND, ProverBackend};
 use watchtower::{WatchtowerClient, MockOnChainState};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
+
+fn u64_to_bytes32(val: u64) -> [u8; 32] {
+    let mut result = [0u8; 32];
+    result[24..32].copy_from_slice(&val.to_be_bytes());
+    result
+}
 
 #[test]
 fn test_e2e_trade_lifecycle() {
@@ -72,6 +78,8 @@ fn test_e2e_trade_lifecycle() {
         signature: Vec::new(),
         nonce: 101,
         expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
     };
     let mut order_a_signed = order_a.clone();
     let msg_a = OrderValidator::serialize_order_message(&order_a);
@@ -87,6 +95,8 @@ fn test_e2e_trade_lifecycle() {
         signature: Vec::new(),
         nonce: 202,
         expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
     };
     let mut order_b_signed = order_b.clone();
     let msg_b = OrderValidator::serialize_order_message(&order_b);
@@ -127,15 +137,21 @@ fn test_e2e_trade_lifecycle() {
     assert_eq!(decrypted_match.price, 3000);
 
     // 7. ZK Proving and Watchtower Fraud Disputes
+    let maker_balance = 1_000_000u64;
+    let taker_balance = 1_000_000u64;
+    let total_value: u64 = matches.iter().map(|m| m.price * m.amount).sum();
+    let post_root_val = maker_balance + taker_balance;
     let batch = TradeBatch {
         trades: matches.clone(),
-        pre_state_root: [0x10u8; 32],
-        post_state_root: [0x20u8; 32],
+        maker_balance,
+        taker_balance,
+        pre_state_root: [0u8; 32],
+        post_state_root: u64_to_bytes32(post_root_val),
     };
 
-    let proof = ZKProver::prove_batch(&batch).unwrap();
+    let proof = BACKEND.prove_batch(&batch).unwrap();
     let mut blockchain_state = MockOnChainState::new();
     let watchtower = WatchtowerClient;
-    let audit_passed = watchtower.monitor_batch(&batch, &proof, &mut blockchain_state);
+    let audit_passed = watchtower.monitor_batch(&batch, &proof, &BACKEND, &mut blockchain_state);
     assert!(audit_passed);
 }

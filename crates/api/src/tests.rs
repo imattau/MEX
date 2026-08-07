@@ -8,17 +8,19 @@ mod tests {
     };
     use common::OrderSide;
     use engine::OrderBook;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
     use tokio::sync::broadcast;
     use tower::ServiceExt;
     use validation::OrderValidator;
 
-    fn test_state() -> Arc<Mutex<AppState>> {
+    fn test_state() -> Arc<RwLock<AppState>> {
         let (tx, _) = broadcast::channel(100);
-        Arc::new(Mutex::new(AppState {
+        Arc::new(RwLock::new(AppState {
+            node_id: common::NodeId(0),
             order_book: OrderBook::new("ETH-USD".to_string()),
             validator: OrderValidator::new(100),
             ws_broadcast: tx,
+            reputation: reputation::ReputationEngine::new(),
         }))
     }
 
@@ -31,6 +33,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/orderbook")
+                    .header("X-API-Key", "dev-default-key")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -59,6 +62,8 @@ mod tests {
             signature: vec![0u8; 64], // Invalid signature
             nonce: 999,
             expiry: 0,
+            settlement_preference: Default::default(),
+            settlement_requester: Default::default(),
         };
 
         let body = serde_json::to_vec(&req).unwrap();
@@ -68,6 +73,7 @@ mod tests {
                     .method(http::Method::POST)
                     .uri("/api/v1/order")
                     .header(http::header::CONTENT_TYPE, "application/json")
+                    .header("X-API-Key", "dev-default-key")
                     .body(Body::from(body))
                     .unwrap(),
             )

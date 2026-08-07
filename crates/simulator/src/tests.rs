@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::types::{Event, ScheduledEvent};
-    use common::{NodeId, Order, OrderSide};
+    use common::{NodeId, Order, OrderSide, SettlementPreference, SettlementRequester};
     use std::collections::BinaryHeap;
 
     #[test]
@@ -16,6 +16,8 @@ mod tests {
             signature: Vec::new(),
             nonce: 0,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let mut queue = BinaryHeap::new();

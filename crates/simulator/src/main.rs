@@ -1,4 +1,4 @@
-use common::{FloodMessage, NodeId, Order, OrderSide, Region};
+use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
 use protocol::{DeterministicFlood, FloodSchedule, Peer, RoutingTable, HeartbeatTracker};
 use rand::Rng;
 use simulator::types::{Event, ScheduledEvent, NodeInfo, Measurement, SimulationResultJson};
@@ -142,6 +142,8 @@ fn main() {
             signature: Vec::new(),
             nonce: o as u64,
             expiry: 100000,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let source_node = match test_scenario {
@@ -336,9 +338,15 @@ fn main() {
     };
 
     if let Ok(serialized) = serde_json::to_string_pretty(&sim_result) {
-        if let Ok(mut file) = File::create("/home/lostcause/workspace/MEX/latency_matrix.json") {
+        let output_path = args.iter()
+            .position(|r| r == "--output")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.as_str())
+            .unwrap_or("latency_matrix.json");
+
+        if let Ok(mut file) = File::create(output_path) {
             let _ = file.write_all(serialized.as_bytes());
-            println!("Simulation report saved to /home/lostcause/workspace/MEX/latency_matrix.json");
+            println!("Simulation report saved to {}", output_path);
         }
     }
 }

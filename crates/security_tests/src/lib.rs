@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use common::{Order, OrderSide};
+    use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
     use validation::OrderValidator;
     use security::{encrypt_packet, decrypt_packet};
     use sandbox::WasmSandbox;
@@ -23,6 +23,8 @@ mod tests {
             signature: Vec::new(),
             nonce: 42,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let msg = OrderValidator::serialize_order_message(&order);
@@ -56,6 +58,8 @@ mod tests {
             signature: vec![0u8; 64], // Zero signature
             nonce: 999,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
 
         let mut validator = OrderValidator::new(100);

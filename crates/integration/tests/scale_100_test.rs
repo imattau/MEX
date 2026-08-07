@@ -1,16 +1,22 @@
-use common::{Order, OrderSide, NodeId, Region};
+use common::{Order, OrderSide, NodeId, Region, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
 use rdma::{TraderMemoryRegionManager, PullScheduler};
 use validation::OrderValidator;
 use topology::{NetworkTopology, TopologyNode};
 use security::{encrypt_packet, decrypt_packet};
 use heartbeat::DeterministicHeartbeat;
-use prover::{TradeBatch, ZKProver};
+use prover::{TradeBatch, BACKEND, ProverBackend};
 use watchtower::{WatchtowerClient, MockOnChainState};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
+
+fn u64_to_bytes32(val: u64) -> [u8; 32] {
+    let mut result = [0u8; 32];
+    result[24..32].copy_from_slice(&val.to_be_bytes());
+    result
+}
 
 #[test]
 fn test_scale_100_nodes_e2e() {
@@ -101,6 +107,8 @@ fn test_scale_100_nodes_e2e() {
         signature: Vec::new(),
         nonce: 777,
         expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
     };
     let mut order_a_signed = order_a.clone();
     let msg_a = OrderValidator::serialize_order_message(&order_a);
@@ -116,6 +124,8 @@ fn test_scale_100_nodes_e2e() {
         signature: Vec::new(),
         nonce: 888,
         expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
     };
     let mut order_b_signed = order_b.clone();
     let msg_b = OrderValidator::serialize_order_message(&order_b);
@@ -154,14 +164,16 @@ fn test_scale_100_nodes_e2e() {
     // 8. Generate ZK transition proof & settle batch
     let batch = TradeBatch {
         trades: matches.clone(),
-        pre_state_root: [0x55u8; 32],
-        post_state_root: [0x77u8; 32],
+        maker_balance: 1_000_000,
+        taker_balance: 1_000_000,
+        pre_state_root: [0u8; 32],
+        post_state_root: u64_to_bytes32(2_000_000),
     };
 
-    let proof = ZKProver::prove_batch(&batch).unwrap();
+    let proof = BACKEND.prove_batch(&batch).unwrap();
     let mut blockchain_state = MockOnChainState::new();
     let watchtower = WatchtowerClient;
-    assert!(watchtower.monitor_batch(&batch, &proof, &mut blockchain_state));
+    assert!(watchtower.monitor_batch(&batch, &proof, &BACKEND, &mut blockchain_state));
 
     println!("100+ Node Scale E2E Test successfully passed!");
 }

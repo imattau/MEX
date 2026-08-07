@@ -1,0 +1,11 @@
+[package]
+name = "batcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+engine = { path = "../engine" }
+prover = { path = "../prover" }
+tracing = "0.1"
+reputation = { path = "../reputation" }

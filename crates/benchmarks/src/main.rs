@@ -1,4 +1,4 @@
-use common::{Order, OrderSide};
+use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
 use rdma::{TraderMemoryRegionManager, PullScheduler};
 use validation::OrderValidator;
@@ -36,6 +36,8 @@ fn benchmark_matching_engine() {
             signature: Vec::new(),
             nonce: i as u64,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
         book.add_order(order);
     }
@@ -53,6 +55,8 @@ fn benchmark_matching_engine() {
             signature: Vec::new(),
             nonce: (i + 10000) as u64,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         };
         let tick = Instant::now();
         book.add_order(order);
@@ -89,6 +93,8 @@ fn benchmark_signature_cache() {
         signature: Vec::new(),
         nonce: 42,
         expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
     };
 
     let msg = OrderValidator::serialize_order_message(&order);

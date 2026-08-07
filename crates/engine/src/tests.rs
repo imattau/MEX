@@ -1,14 +1,16 @@
 #[cfg(test)]
 mod tests {
     use crate::types::OrderBook;
-    use common::{Order, OrderSide};
+    use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
 
     fn create_test_order(id: u8, side: OrderSide, price: u64, amount: u64) -> Order {
         let mut order_id = [0u8; 32];
         order_id[0] = id;
+        let mut trader = [0u8; 32];
+        trader[0] = id;
         Order {
             id: order_id,
-            trader: [0u8; 32],
+            trader,
             symbol: "ETH-USD".to_string(),
             side,
             price,
@@ -16,6 +18,8 @@ mod tests {
             signature: Vec::new(),
             nonce: id as u64,
             expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
         }
     }
 
@@ -81,6 +85,107 @@ mod tests {
         assert_eq!(matches[2].amount, 2);
 
         assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 3);
+    }
+
+    #[test]
+    fn test_self_trade_preserves_amounts() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        let mut trader = [0u8; 32];
+        trader[0] = 99;
+
+        let sell = Order {
+            id: [1u8; 32],
+            trader,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Sell,
+            price: 3000,
+            amount: 10,
+            signature: Vec::new(),
+            nonce: 1,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        book.add_order(sell);
+        assert_eq!(book.asks.get(&3000).unwrap()[0].amount, 10);
+
+        let buy = Order {
+            id: [2u8; 32],
+            trader,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 10,
+            signature: Vec::new(),
+            nonce: 2,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        let matches = book.add_order(buy);
+
+        assert!(matches.is_empty(), "Self-trade should produce no matches");
+        assert_eq!(book.asks.get(&3000).unwrap()[0].amount, 10, "Maker amount should be preserved");
+        assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 10, "Taker amount should be preserved");
+    }
+
+    #[test]
+    fn test_self_trade_partial_preserves_amounts() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        let mut trader_a = [0u8; 32];
+        trader_a[0] = 1;
+        let mut trader_b = [0u8; 32];
+        trader_b[0] = 2;
+
+        let sell_a = Order {
+            id: [1u8; 32],
+            trader: trader_a,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Sell,
+            price: 3000,
+            amount: 5,
+            signature: Vec::new(),
+            nonce: 1,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        let sell_b = Order {
+            id: [2u8; 32],
+            trader: trader_b,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Sell,
+            price: 3000,
+            amount: 5,
+            signature: Vec::new(),
+            nonce: 2,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        book.add_order(sell_a);
+        book.add_order(sell_b);
+
+        let buy_a = Order {
+            id: [3u8; 32],
+            trader: trader_a,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 10,
+            signature: Vec::new(),
+            nonce: 3,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        };
+        let matches = book.add_order(buy_a);
+
+        assert_eq!(matches.len(), 1, "Should only match against trader_b's order");
+        assert_eq!(matches[0].maker_trader, trader_b);
+        assert_eq!(matches[0].amount, 5);
+        assert_eq!(book.asks.get(&3000).unwrap()[0].amount, 5, "Trader A's sell should be preserved");
+        assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 5, "Remaining buy amount should rest");
     }
 
     #[test]

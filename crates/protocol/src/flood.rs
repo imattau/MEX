@@ -1,14 +1,19 @@
 use crate::types::{FloodError, FloodSchedule, RoutingTable};
 use common::{FloodMessage, NodeId, Order, Region};
-use std::collections::HashSet;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use validation::OrderValidator;
+
+const CACHE_SIZE: usize = 100_000;
 
 pub struct DeterministicFlood {
     pub node_id: NodeId,
     pub region: Region,
     pub routing_table: RoutingTable,
     pub schedule: FloodSchedule,
-    pub received_cache: HashSet<[u8; 32]>,
+    pub received_cache: LruCache<[u8; 32], ()>,
     pub order_book_orders: Vec<Order>,
+    pub sig_validator: OrderValidator,
 }
 
 impl DeterministicFlood {
@@ -18,8 +23,9 @@ impl DeterministicFlood {
             region,
             routing_table,
             schedule,
-            received_cache: HashSet::new(),
+            received_cache: LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap()),
             order_book_orders: Vec::new(),
+            sig_validator: OrderValidator::new(10_000),
         }
     }
 
@@ -32,6 +38,10 @@ impl DeterministicFlood {
             return Err(FloodError::DuplicatePacket);
         }
 
+        if !self.sig_validator.validate_order(&msg.order) {
+            return Err(FloodError::InvalidOrder);
+        }
+
         if current_time < msg.timestamp - self.schedule.retransmit_threshold_ms {
             return Err(FloodError::EarlyPacket);
         }
@@ -41,7 +51,7 @@ impl DeterministicFlood {
             return Err(FloodError::LatePacket);
         }
 
-        self.received_cache.insert(msg.order.id);
+        self.received_cache.put(msg.order.id, ());
         self.order_book_orders.push(msg.order.clone());
 
         if msg.hop_count >= self.schedule.max_hops {
