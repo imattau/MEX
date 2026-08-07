@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-const FIBER_LATENCY_MS_PER_100KM: f64 = 1.5;
 const GEO_VERIFY_THRESHOLD: f64 = 0.8;
 
 impl MeshNode {
@@ -44,8 +43,10 @@ impl MeshNode {
                 tokio::time::Duration::from_secs(2),
                 async {
                     loop {
-                        if let Ok((_from, WireMessage::SignedHeartbeat { .. })) = t.recv().await {
-                            break;
+                        if let Ok((from, WireMessage::SignedHeartbeat { .. })) = t.recv().await {
+                            if from == peer_id {
+                                break;
+                            }
                         }
                     }
                 },
@@ -53,6 +54,12 @@ impl MeshNode {
             .await
         };
         let rtt = start.elapsed().as_secs_f64() * 1000.0;
+
+        // No response from the claimed peer within the timeout window --
+        // there's nothing to verify, so this must not be reported as plausible.
+        if result.is_err() {
+            return (rtt, false);
+        }
 
         let plausible = rtt >= claimed_latency_ms * GEO_VERIFY_THRESHOLD;
         (rtt, plausible)

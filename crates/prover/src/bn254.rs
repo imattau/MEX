@@ -2,13 +2,8 @@ use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::PrimeField;
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey, Proof, prepare_verifying_key};
-use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable, LinearCombination,
-};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_snark::SNARK;
-use common::SettlementPreference;
-use engine::Match;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -276,6 +271,8 @@ impl ProverBackend for Bn254Groth16Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::SettlementPreference;
+    use engine::Match;
 
     fn u64_to_bytes32(val: u64) -> [u8; 32] {
         let mut result = [0u8; 32];

@@ -5,7 +5,6 @@ use ark_ff::PrimeField;
 use ark_relations::r1cs::{
     ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable, LinearCombination,
 };
-use common::SettlementPreference;
 use engine::Match;
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +195,7 @@ impl MultiWatchtower {
 pub mod tests {
     use super::*;
     use ark_ff::fields::{Fp64, MontBackend, MontConfig};
+    use common::SettlementPreference;
 
     #[derive(MontConfig)]
     #[modulus = "17"]
