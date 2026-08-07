@@ -223,6 +223,7 @@ mod tests {
             fee_basis_points: tier.fee_basis_points(),
             seller: [2u8; 32],
             fee_payer: [2u8; 32],
+            symbol: "BTC-USD".to_string(),
             settlement_deadline: 0,
         }
     }

@@ -307,6 +307,7 @@ mod tests {
                 fee_basis_points: 5,
                 seller: [0u8; 32],
                 fee_payer: [0u8; 32],
+                symbol: "BTC-USD".to_string(),
                 settlement_deadline: 0,
             }],
             maker_balance,

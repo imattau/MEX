@@ -74,6 +74,7 @@ impl OrderBook {
                             seller,
                             fee_payer,
                             settlement_deadline: deadline,
+                            symbol: self.symbol.clone(),
                         });
 
                         tracing::info!(
@@ -160,6 +161,7 @@ impl OrderBook {
                                 seller,
                                 fee_payer,
                                 settlement_deadline: deadline,
+                                symbol: self.symbol.clone(),
                             });
 
                             if maker_order.amount == 0 {

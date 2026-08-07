@@ -155,6 +155,13 @@ fn main() {
     println!("\n┌─ PHASE 3: SETTLEMENT BATCHER (3-TIER) ──────────────────┐");
     let mut batcher = SettlementBatcher::new();
 
+    // Seed the batcher's simulated balance ledger so its per-trade proofs are
+    // solvent -- see BalanceLedger docs: this stands in for a real deposit
+    // until on-chain event syncing exists.
+    for (_, pk) in &traders {
+        batcher.deposit(*pk, "ETH-USD", 1_000_000);
+    }
+
     for m in &all_matches {
         batcher.enqueue(m.clone());
     }
@@ -172,8 +179,9 @@ fn main() {
 
     if !batches.is_empty() {
         let first = &batches[0];
-        println!("  Sample batch: {} trades, value: {} USD, proof: {} bytes",
-            first.trades.len(), first.total_value, first.proof.len());
+        let proof_bytes: usize = first.proofs.iter().map(|p| p.len()).sum();
+        println!("  Sample batch: {} trades, value: {} USD, {} proofs ({} bytes total)",
+            first.trades.len(), first.total_value, first.proofs.len(), proof_bytes);
     }
 
     // ── Phase 4: ZK Proof ──

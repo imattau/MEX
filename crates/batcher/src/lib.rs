@@ -1,3 +1,7 @@
+mod ledger;
+
+pub use ledger::BalanceLedger;
+
 use common::{NodeId, SettlementPreference};
 use engine::Match;
 use prover::{TradeBatch, BACKEND, ProverBackend};
@@ -17,6 +21,7 @@ pub struct SettlementBatcher {
     prover: &'static dyn ProverBackend,
     node_id: NodeId,
     reputation: Option<reputation::ReputationEngine>,
+    ledger: BalanceLedger,
 }
 
 impl SettlementBatcher {
@@ -34,7 +39,19 @@ impl SettlementBatcher {
             prover: &BACKEND,
             node_id: NodeId(0),
             reputation: None,
+            ledger: BalanceLedger::new(),
         }
+    }
+
+    // Records a balance for a trader in the simulated ledger (e.g. standing in for an
+    // on-chain deposit until real chain event listening exists). Without a deposit, a
+    // trader's balance is 0 and any trade against it is treated as insolvent.
+    pub fn deposit(&mut self, trader: [u8; 32], symbol: &str, amount: u64) {
+        self.ledger.deposit(trader, symbol, amount);
+    }
+
+    pub fn balance_of(&self, trader: [u8; 32], symbol: &str) -> u64 {
+        self.ledger.balance_of(trader, symbol)
     }
 
     pub fn with_reputation(mut self, node_id: NodeId, engine: reputation::ReputationEngine) -> Self {
@@ -145,23 +162,57 @@ impl SettlementBatcher {
         }
     }
 
-    fn build_batch(&self, trades: Vec<Match>, _tier: SettlementPreference) -> SettlementBatch {
-        let total_value: u64 = trades.iter().map(|m| m.price as u64 * m.amount as u64).sum();
+    // The circuit backing prove_batch only supports one trade per proof (see
+    // crates/prover/src/bn254.rs), so batching here means proving each trade
+    // individually against its traders' real (simulated) balances, rather than
+    // amortizing a single proof over the whole batch. A trade that would be
+    // insolvent against the ledger is dropped from the batch with a warning
+    // instead of silently shipping an empty/invalid proof for it.
+    fn build_batch(&mut self, trades: Vec<Match>, _tier: SettlementPreference) -> SettlementBatch {
+        let mut proven_trades = Vec::with_capacity(trades.len());
+        let mut proofs = Vec::with_capacity(trades.len());
+        let mut total_value: u64 = 0;
 
-        let batch = TradeBatch {
-            trades: trades.clone(),
-            maker_balance: 0,
-            taker_balance: 0,
-            pre_state_root: [0u8; 32],
-            post_state_root: [0u8; 32],
-        };
+        for trade in trades {
+            let trade_value = trade.price as u64 * trade.amount as u64;
+            let maker_balance = self.ledger.balance_of(trade.maker_trader, &trade.symbol);
+            let taker_balance = self.ledger.balance_of(trade.taker_trader, &trade.symbol);
 
-        let proof = self.prover.prove_batch(&batch).unwrap_or_default();
+            let single_trade_batch = TradeBatch {
+                trades: vec![trade.clone()],
+                maker_balance,
+                taker_balance,
+                pre_state_root: [0u8; 32],
+                post_state_root: [0u8; 32],
+            };
+
+            match self.prover.prove_batch(&single_trade_batch) {
+                Ok(proof) => {
+                    // prove_batch already checked trade_value <= taker_balance, so
+                    // these ledger updates cannot fail.
+                    self.ledger.credit(trade.maker_trader, &trade.symbol, trade_value);
+                    self.ledger
+                        .debit(trade.taker_trader, &trade.symbol, trade_value)
+                        .expect("prove_batch already verified sufficient taker balance");
+
+                    total_value += trade_value;
+                    proven_trades.push(trade);
+                    proofs.push(proof);
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        trade_id = ?trade.maker_order_id,
+                        reason,
+                        "Dropping trade from settlement batch: proof generation failed"
+                    );
+                }
+            }
+        }
 
         SettlementBatch {
-            trades,
+            trades: proven_trades,
             total_value,
-            proof,
+            proofs,
         }
     }
 }
@@ -176,7 +227,9 @@ impl Default for SettlementBatcher {
 pub struct SettlementBatch {
     pub trades: Vec<Match>,
     pub total_value: u64,
-    pub proof: Vec<u8>,
+    // One proof per entry in `trades`, aligned by index. Trades that failed
+    // to prove (e.g. insolvent against the ledger) are omitted from both.
+    pub proofs: Vec<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -197,6 +250,7 @@ mod tests {
             fee_basis_points: tier.fee_basis_points(),
             seller: [2u8; 32],
             fee_payer: [2u8; 32],
+            symbol: "BTC-USD".to_string(),
             settlement_deadline: 0,
         }
     }
@@ -204,16 +258,32 @@ mod tests {
     #[test]
     fn test_instant_trade_flushes_immediately() {
         let mut batcher = SettlementBatcher::new();
+        batcher.deposit([2u8; 32], "BTC-USD", 1_000_000);
         batcher.enqueue(make_match(SettlementPreference::Instant, 1));
 
         let batches = batcher.process_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].trades.len(), 1);
+        assert_eq!(batches[0].proofs.len(), 1);
+        assert!(!batches[0].proofs[0].is_empty());
+    }
+
+    #[test]
+    fn test_insolvent_trade_is_dropped_not_faked() {
+        let mut batcher = SettlementBatcher::new();
+        // No deposit -- taker has a 0 balance, trade value is 1000.
+        batcher.enqueue(make_match(SettlementPreference::Instant, 1));
+
+        let batches = batcher.process_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].trades.len(), 0, "insolvent trade must be dropped, not proven with a fake balance");
+        assert_eq!(batches[0].proofs.len(), 0);
     }
 
     #[test]
     fn test_standard_batch_waits_for_size() {
         let mut batcher = SettlementBatcher::new();
+        batcher.deposit([2u8; 32], "BTC-USD", 1_000_000);
         batcher.standard_batch_size = 3;
 
         batcher.enqueue(make_match(SettlementPreference::Standard, 1));
@@ -232,6 +302,7 @@ mod tests {
     #[test]
     fn test_mixed_tiers_flush_correctly() {
         let mut batcher = SettlementBatcher::new();
+        batcher.deposit([2u8; 32], "BTC-USD", 1_000_000);
         batcher.express_batch_size = 2;
 
         batcher.enqueue(make_match(SettlementPreference::Standard, 1));

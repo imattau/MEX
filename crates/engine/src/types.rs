@@ -16,6 +16,7 @@ pub struct Match {
     pub seller: [u8; 32],
     pub fee_payer: [u8; 32],
     pub settlement_deadline: u64,
+    pub symbol: String,
 }
 
 pub struct OrderBook {
