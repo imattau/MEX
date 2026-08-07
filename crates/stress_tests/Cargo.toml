@@ -1,0 +1,16 @@
+[package]
+name = "stress_tests"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "stress_suite"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+engine = { path = "../engine" }
+rdma = { path = "../rdma" }
+validation = { path = "../validation" }
+rand = "0.8"
+rand_distr = "0.4"
