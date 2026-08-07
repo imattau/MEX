@@ -139,4 +139,20 @@ impl OrderBook {
 
         matches
     }
+
+    pub fn cancel_order(&mut self, order_id: [u8; 32]) -> bool {
+        for orders in self.bids.values_mut() {
+            if let Some(pos) = orders.iter().position(|o| o.id == order_id) {
+                orders.remove(pos);
+                return true;
+            }
+        }
+        for orders in self.asks.values_mut() {
+            if let Some(pos) = orders.iter().position(|o| o.id == order_id) {
+                orders.remove(pos);
+                return true;
+            }
+        }
+        false
+    }
 }

@@ -82,4 +82,21 @@ mod tests {
 
         assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 3);
     }
+
+    #[test]
+    fn test_order_cancellation() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        let buy = create_test_order(5, OrderSide::Buy, 3000, 10);
+        book.add_order(buy);
+        assert_eq!(book.bids.get(&3000).unwrap().len(), 1);
+
+        let mut cancel_id = [0u8; 32];
+        cancel_id[0] = 5;
+        let cancelled = book.cancel_order(cancel_id);
+        assert!(cancelled);
+        assert_eq!(book.bids.get(&3000).unwrap().len(), 0);
+
+        let cancel_non_existent = book.cancel_order([99u8; 32]);
+        assert!(!cancel_non_existent);
+    }
 }
