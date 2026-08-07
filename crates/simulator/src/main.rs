@@ -1,126 +1,11 @@
 use common::{FloodMessage, NodeId, Order, OrderSide, Region};
 use protocol::{DeterministicFlood, FloodSchedule, Peer, RoutingTable, HeartbeatTracker};
 use rand::Rng;
-use serde::Serialize;
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::cmp::Ordering;
+use simulator::types::{Event, ScheduledEvent, NodeInfo, Measurement, SimulationResultJson};
+use simulator::latency::LatencyModel;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::Write;
-
-#[derive(Debug, Clone)]
-enum Event {
-    OrderGenerated {
-        order: Order,
-        source_node: NodeId,
-    },
-    PacketDeliver {
-        to_node: NodeId,
-        msg: FloodMessage,
-    },
-    NodeStatusChange {
-        node_id: NodeId,
-        online: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct ScheduledEvent {
-    time: f64,
-    event: Event,
-}
-
-impl PartialEq for ScheduledEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.time == other.time
-    }
-}
-
-impl Eq for ScheduledEvent {}
-
-impl PartialOrd for ScheduledEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScheduledEvent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.time.partial_cmp(&self.time).unwrap_or(Ordering::Equal)
-    }
-}
-
-struct LatencyModel {
-    latencies: HashMap<(Region, Region), f64>,
-}
-
-impl LatencyModel {
-    fn new() -> Self {
-        let mut latencies = HashMap::new();
-        latencies.insert((Region::UsEast1, Region::UsEast1), 5.0);
-        latencies.insert((Region::EuWest1, Region::EuWest1), 5.0);
-        latencies.insert((Region::ApSoutheast1, Region::ApSoutheast1), 5.0);
-        
-        latencies.insert((Region::UsEast1, Region::EuWest1), 75.0);
-        latencies.insert((Region::EuWest1, Region::UsEast1), 75.0);
-
-        latencies.insert((Region::UsEast1, Region::ApSoutheast1), 150.0);
-        latencies.insert((Region::ApSoutheast1, Region::UsEast1), 150.0);
-
-        latencies.insert((Region::EuWest1, Region::ApSoutheast1), 220.0);
-        latencies.insert((Region::ApSoutheast1, Region::EuWest1), 220.0);
-
-        Self { latencies }
-    }
-
-    fn local() -> Self {
-        let mut latencies = HashMap::new();
-        latencies.insert((Region::UsEast1, Region::UsEast1), 2.0);
-        latencies.insert((Region::EuWest1, Region::EuWest1), 2.0);
-        latencies.insert((Region::ApSoutheast1, Region::ApSoutheast1), 2.0);
-        
-        latencies.insert((Region::UsEast1, Region::EuWest1), 25.0);
-        latencies.insert((Region::EuWest1, Region::UsEast1), 25.0);
-
-        latencies.insert((Region::UsEast1, Region::ApSoutheast1), 15.0);
-        latencies.insert((Region::ApSoutheast1, Region::UsEast1), 15.0);
-
-        latencies.insert((Region::EuWest1, Region::ApSoutheast1), 35.0);
-        latencies.insert((Region::ApSoutheast1, Region::EuWest1), 35.0);
-
-        Self { latencies }
-    }
-
-    fn get_latency(&self, from: Region, to: Region) -> f64 {
-        *self.latencies.get(&(from, to)).unwrap_or(&100.0)
-    }
-}
-
-struct NodeInfo {
-    id: NodeId,
-    region: Region,
-    online: bool,
-}
-
-#[derive(Serialize)]
-struct Measurement {
-    order_id: String,
-    latency_ms: f64,
-    hops: u8,
-    source_region: String,
-    dest_region: String,
-}
-
-#[derive(Serialize)]
-struct SimulationResultJson {
-    scenario: String,
-    total_orders_injected: usize,
-    total_deliveries: usize,
-    p50_latency_ms: f64,
-    p95_latency_ms: f64,
-    p99_9_latency_ms: f64,
-    t_max_ms: f64,
-    verified: bool,
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -259,9 +144,8 @@ fn main() {
             expiry: 100000,
         };
 
-        // Proposer node selection
         let source_node = match test_scenario {
-            "cold_start" | "churn" => NodeId(0), // Node 0 proposes
+            "cold_start" | "churn" => NodeId(0),
             _ => NodeId(rng.gen_range(0..node_count as u32)),
         };
         let generation_time = rng.gen_range(0.0..1000.0);
@@ -274,9 +158,7 @@ fn main() {
         });
     }
 
-    // Scenario-specific churn injection
     if test_scenario == "churn" {
-        // Node 2 goes offline at 200ms
         event_queue.push(ScheduledEvent {
             time: 200.0,
             event: Event::NodeStatusChange {
@@ -305,24 +187,21 @@ fn main() {
     let mut current_virtual_time = 0.0;
     let mut measurements = Vec::new();
     let mut total_deliveries = 0;
-    let mut heartbeat_tracker = HeartbeatTracker::new(100.0, 3); // 100ms interval, 3 missed limit
+    let mut heartbeat_tracker = HeartbeatTracker::new(100.0, 3);
 
-    // Configure bandwidth limits in KB/s
     let bandwidth_kbps = match test_scenario {
-        "bandwidth" => 5000.0, // 5 MB/sec constraint (delay ~100ms)
-        _ => 100000.0,      // Unlimited essentially
+        "bandwidth" => 5000.0,
+        _ => 100000.0,
     };
-    let message_size_kb = 500.0; // 500KB batch sizes
+    let message_size_kb = 500.0;
 
     println!("Simulation started...");
     while let Some(scheduled_event) = event_queue.pop() {
         current_virtual_time = scheduled_event.time;
 
-        // Perform heartbeat checking
         let dead_nodes = heartbeat_tracker.check_health(current_virtual_time);
         for dead_node in dead_nodes {
             if flood_nodes.contains_key(&dead_node) {
-                // Squelch downstream routes to dead nodes dynamically
                 for state in flood_nodes.values_mut() {
                     state.routing_table.downstream_peers.retain(|p| p.id != dead_node);
                 }
@@ -340,7 +219,6 @@ fn main() {
                     source_region: node_region,
                 };
 
-                // Record local proposer heartbeat tick
                 heartbeat_tracker.on_heartbeat(source_node, current_virtual_time);
 
                 if let Some(flood_state) = flood_nodes.get_mut(&source_node) {
@@ -348,10 +226,7 @@ fn main() {
                         for (to_peer, next_msg) in forwards {
                             let to_region = nodes[to_peer.0 as usize].region;
                             let base_lat = latency_model.get_latency(node_region, to_region);
-                            
-                            // Inject bandwidth bottleneck delay: size / bandwidth (in seconds) * 1000 (to ms)
                             let tx_delay = (message_size_kb / bandwidth_kbps) * 1000.0;
-                            
                             let jitter = rng.gen_range(-0.5..0.5);
                             let delay = base_lat + tx_delay + jitter;
 
@@ -373,7 +248,6 @@ fn main() {
                 let source_region = msg.source_region;
                 let to_region = nodes[to_node.0 as usize].region;
 
-                // Update peer heartbeat check
                 if let Some(&source) = msg.path.first() {
                     heartbeat_tracker.on_heartbeat(source, current_virtual_time);
                 }
@@ -424,7 +298,6 @@ fn main() {
 
     println!("Simulation finished at virtual time {:.2}ms.", current_virtual_time);
 
-    // 5. Gather Statistics
     if measurements.is_empty() {
         println!("No successful deliveries recorded.");
         return;
