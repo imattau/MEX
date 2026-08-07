@@ -150,7 +150,14 @@ impl UdpTransport {
 
         match &msg {
             WireMessage::SignedHeartbeat { node_id: hb_id, timestamp, node_public_key, signature } => {
-                if !self.verify_heartbeat_sig(*hb_id, *timestamp, *node_public_key, signature) {
+                let pinned_key = self
+                    .peer_keys
+                    .get(hb_id)
+                    .ok_or_else(|| format!("Unknown peer for heartbeat: {:?}", hb_id))?;
+                if pinned_key != node_public_key {
+                    return Err("Heartbeat public key does not match pinned peer key".to_string());
+                }
+                if !self.verify_heartbeat_sig(*hb_id, *timestamp, *pinned_key, signature) {
                     return Err("Invalid heartbeat signature".to_string());
                 }
             }

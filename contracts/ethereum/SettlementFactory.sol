@@ -75,6 +75,7 @@ contract SettlementFactory {
         uint256 fee;
         uint256 deadline;
         bytes32 tradeHash;
+        bytes32 assignedNode;
     }
 
     struct FeeConfig {
@@ -82,6 +83,39 @@ contract SettlementFactory {
         uint8 tier;
     }
 
+    // Commits a trader to a pending trade: locks the funds and records the deadline and
+    // the node responsible for settling it. This must happen *before* settlement so that
+    // there is an on-chain window in which the deadline can pass unsettled -- otherwise
+    // claimSlash could never observe a missed deadline, since recordSettlement and
+    // settlement would always happen atomically in the same transaction.
+    //
+    // Only the trader themselves can commit their own escrow to a trade.
+    function commitTrade(TradeEntry calldata trade) external {
+        require(msg.sender == trade.trader, "Only trader can commit own trade");
+        require(block.timestamp <= trade.deadline, "Trade deadline passed");
+        require(registry.isActiveNode(trade.assignedNode), "Assigned node not active");
+
+        address escrowA = traderEscrows[trade.trader];
+        address escrowB = traderEscrows[trade.counterparty];
+        require(
+            escrowA != address(0) && escrowB != address(0),
+            "Escrows must exist"
+        );
+
+        uint256 totalLocked = trade.amount + trade.fee;
+        TraderEscrow(escrowA).lock(trade.token, totalLocked);
+        TraderEscrow(escrowA).recordSettlement(
+            trade.tradeHash,
+            trade.deadline,
+            trade.assignedNode,
+            trade.token,
+            totalLocked
+        );
+    }
+
+    // Fulfills trades that were previously committed via commitTrade. Funds must already
+    // be locked and the settlement record already exist -- this function only moves the
+    // already-locked funds and marks the trade settled, it does not create new obligations.
     function settleBatchWithFees(
         TradeEntry[] calldata trades,
         uint256[2] calldata a,
@@ -101,18 +135,14 @@ contract SettlementFactory {
         for (uint256 i = 0; i < trades.length; i++) {
             TradeEntry calldata trade = trades[i];
 
-            require(block.timestamp <= trade.deadline, "Trade deadline passed");
-
             address escrowA = traderEscrows[trade.trader];
-            address escrowB = traderEscrows[trade.counterparty];
-            require(
-                escrowA != address(0) && escrowB != address(0),
-                "Escrows must exist"
-            );
+            require(escrowA != address(0), "Escrow must exist");
 
-            TraderEscrow(escrowA).lock(trade.token, trade.amount + trade.fee);
-
-            TraderEscrow(escrowA).recordSettlement(trade.tradeHash, trade.deadline);
+            TraderEscrow.Settlement memory s = TraderEscrow(escrowA).getSettlement(trade.tradeHash);
+            require(s.deadline > 0, "Trade not committed");
+            require(!s.settled, "Trade already settled");
+            require(!s.slashed, "Trade already slashed");
+            require(block.timestamp <= s.deadline, "Trade deadline passed");
 
             TraderEscrow(escrowA).settleWithFee(
                 trade.token,
@@ -128,44 +158,30 @@ contract SettlementFactory {
         emit BatchSettled(bytes32(input[0]), trades.length);
     }
 
-    function claimSlash(
-        bytes32 batchRoot,
-        bytes32[] calldata tradeHashes,
-        bytes32[] calldata nodePubkeys
-    ) external {
+    // Slashes only the node that was actually assigned to a trade at settlement-recording
+    // time (TradeEntry.assignedNode, stored via recordSettlement). The caller can only
+    // claim against trades belonging to their own escrow, and only the node on record for
+    // that trade can be slashed -- not an arbitrary caller-supplied node.
+    function claimSlash(bytes32[] calldata tradeHashes) external {
+        address escrow = traderEscrows[msg.sender];
+        require(escrow != address(0), "No escrow for caller");
+
         for (uint256 i = 0; i < tradeHashes.length; i++) {
             bytes32 tradeHash = tradeHashes[i];
 
-            bool nodeFailed = false;
-            for (uint256 j = 0; j < nodePubkeys.length; j++) {
-                bytes32 nodePubkey = nodePubkeys[j];
+            TraderEscrow.Settlement memory s = TraderEscrow(escrow).getSettlement(tradeHash);
 
-                for (uint256 k = 0; k < nodePubkeys.length; k++) {
-                    bytes32 checkHash = keccak256(abi.encodePacked(batchRoot, tradeHash, nodePubkeys[k]));
-                    address escrow = traderEscrows[msg.sender];
-                    if (escrow != address(0)) {
-                        try TraderEscrow(escrow).settlements(tradeHash) returns (
-                            TraderEscrow.Settlement memory s
-                        ) {
-                            if (s.deadline > 0 && block.timestamp > s.deadline && !s.settled) {
-                                nodeFailed = true;
-                                break;
-                            }
-                        } catch {
-                            continue;
-                        }
-                    }
-                }
-                if (nodeFailed) break;
-            }
+            require(s.deadline > 0, "Trade not recorded");
+            require(block.timestamp > s.deadline, "Deadline not passed");
+            require(!s.settled, "Trade was settled");
+            require(!s.slashed, "Already slashed");
+            require(s.assignedNode != bytes32(0), "No assigned node");
 
-            if (nodeFailed) {
-                for (uint256 j = 0; j < nodePubkeys.length; j++) {
-                    uint256 stake = registry.nodes(nodePubkeys[j]).stake;
-                    if (stake > 0) {
-                        registry.slashNode(nodePubkeys[j], stake / 2);
-                    }
-                }
+            TraderEscrow(escrow).markSettlementSlashed(tradeHash);
+
+            uint256 stake = registry.getNode(s.assignedNode).stake;
+            if (stake > 0) {
+                registry.slashNode(s.assignedNode, stake / 2);
             }
         }
     }

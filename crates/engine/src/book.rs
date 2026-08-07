@@ -53,7 +53,7 @@ impl OrderBook {
                         order.amount -= match_amount;
                         maker_order.amount -= match_amount;
 
-                        let (tier, fee_bps, seller, deadline) =
+                        let (tier, fee_bps, seller, fee_payer, deadline) =
                             Self::resolve_settlement_params(&order, maker_order, now_secs);
 
                         let fee = FeeCalculator::compute_fee_amount(
@@ -72,6 +72,7 @@ impl OrderBook {
                             settlement_tier: tier,
                             fee_basis_points: fee_bps,
                             seller,
+                            fee_payer,
                             settlement_deadline: deadline,
                         });
 
@@ -138,7 +139,7 @@ impl OrderBook {
                             order.amount -= match_amount;
                             maker_order.amount -= match_amount;
 
-                            let (tier, fee_bps, seller, deadline) =
+                            let (tier, fee_bps, seller, fee_payer, deadline) =
                                 Self::resolve_settlement_params(&order, maker_order, now_secs);
 
                             let fee = FeeCalculator::compute_fee_amount(
@@ -157,6 +158,7 @@ impl OrderBook {
                                 settlement_tier: tier,
                                 fee_basis_points: fee_bps,
                                 seller,
+                                fee_payer,
                                 settlement_deadline: deadline,
                             });
 
@@ -192,7 +194,7 @@ impl OrderBook {
         taker_order: &Order,
         maker_order: &Order,
         now_secs: u64,
-    ) -> (SettlementPreference, u32, [u8; 32], u64) {
+    ) -> (SettlementPreference, u32, [u8; 32], [u8; 32], u64) {
         let sell_order = if taker_order.side == OrderSide::Sell {
             taker_order
         } else {
@@ -217,7 +219,7 @@ impl OrderBook {
         let fee_bps = tier.fee_basis_points();
         let deadline = now_secs + tier.deadline_seconds();
 
-        (tier, fee_bps, fee_payer, deadline)
+        (tier, fee_bps, sell_order.trader, fee_payer, deadline)
     }
 
     pub fn cancel_order(&mut self, order_id: [u8; 32]) -> bool {

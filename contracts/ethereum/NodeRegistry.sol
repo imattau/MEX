@@ -32,6 +32,9 @@ contract NodeRegistry {
     bytes32[] public nodeList;
     uint256 public totalNodes;
 
+    address public admin;
+    address public slashingAuthority;
+
     event NodeRegistered(bytes32 indexed nodePubkey, address indexed operator, string geoRegion);
     event NodeSlashed(bytes32 indexed nodePubkey, uint256 amount);
     event NodePenalized(bytes32 indexed nodePubkey, uint256 penalty);
@@ -43,6 +46,29 @@ contract NodeRegistry {
     modifier onlyNodeOperator(bytes32 nodePubkey) {
         require(nodes[nodePubkey].operator == msg.sender, "Not node operator");
         _;
+    }
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Not admin");
+        _;
+    }
+
+    modifier onlySlashingAuthority() {
+        require(msg.sender == slashingAuthority, "Not slashing authority");
+        _;
+    }
+
+    constructor() {
+        admin = msg.sender;
+    }
+
+    function setSlashingAuthority(address _slashingAuthority) external onlyAdmin {
+        slashingAuthority = _slashingAuthority;
+    }
+
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "Invalid admin");
+        admin = newAdmin;
     }
 
     function registerNode(bytes32 nodePubkey, string calldata geoRegion) external payable {
@@ -73,7 +99,7 @@ contract NodeRegistry {
         bytes32 nodePubkey,
         uint32 newScore,
         TrustLevel newLevel
-    ) external {
+    ) external onlySlashingAuthority {
         NodeInfo storage node = nodes[nodePubkey];
         require(node.registeredAt > 0, "Node not registered");
 
@@ -93,7 +119,7 @@ contract NodeRegistry {
         return (node.reputationScore, node.trustLevel, node.lastRepUpdate);
     }
 
-    function slashNode(bytes32 nodePubkey, uint256 amount) external {
+    function slashNode(bytes32 nodePubkey, uint256 amount) external onlySlashingAuthority {
         NodeInfo storage node = nodes[nodePubkey];
         require(node.active, "Node not active");
         require(node.stake >= amount, "Insufficient stake to slash");
@@ -163,6 +189,10 @@ contract NodeRegistry {
 
     function isActiveNode(bytes32 nodePubkey) external view returns (bool) {
         return nodes[nodePubkey].active;
+    }
+
+    function getNode(bytes32 nodePubkey) external view returns (NodeInfo memory) {
+        return nodes[nodePubkey];
     }
 
     function getNodeCount() external view returns (uint256) {

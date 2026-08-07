@@ -114,16 +114,33 @@ impl ProverBackend for Bn254Groth16Backend {
         if batch.trades.is_empty() {
             return Err("Empty batch".to_string());
         }
+        // The circuit's trusted setup is fixed to a single (amount, price) witness pair,
+        // so it can only bind the witness to real trade data for a single trade. Batches
+        // with more than one trade would have to fall back to a placeholder witness (as
+        // before), which proves nothing about the individual trades -- reject them instead
+        // of silently proving over fake data.
+        if batch.trades.len() != 1 {
+            return Err(format!(
+                "Circuit only supports single-trade batches, got {} trades",
+                batch.trades.len()
+            ));
+        }
+        let trade = &batch.trades[0];
+
+        let total_value_u128 = trade.amount as u128 * trade.price as u128;
+        if total_value_u128 > batch.taker_balance as u128 {
+            return Err(format!(
+                "Insolvent trade: value {} exceeds taker balance {}",
+                total_value_u128, batch.taker_balance
+            ));
+        }
 
         let pre_balance = Fr::from(batch.maker_balance);
         let taker_pre_balance = Fr::from(batch.taker_balance);
 
-        let mut total_value = Fr::from(0u64);
-        for trade in &batch.trades {
-            let amount = Fr::from(trade.amount as u64);
-            let price = Fr::from(trade.price as u64);
-            total_value += amount * price;
-        }
+        let amount = Fr::from(trade.amount as u64);
+        let price = Fr::from(trade.price as u64);
+        let total_value = amount * price;
 
         let maker_post = pre_balance + total_value;
         let taker_post = taker_pre_balance - total_value;
@@ -133,8 +150,8 @@ impl ProverBackend for Bn254Groth16Backend {
         let circuit = DEXTradeCircuit::<Fr> {
             maker_balance_pre: Some(pre_balance),
             taker_balance_pre: Some(taker_pre_balance),
-            amount: Some(Fr::from(1u64)),
-            price: Some(total_value),
+            amount: Some(amount),
+            price: Some(price),
             maker_balance_post: Some(maker_post),
             taker_balance_post: Some(taker_post),
             pre_state_root: Some(pre_root),
@@ -181,6 +198,17 @@ impl ProverBackend for Bn254Groth16Backend {
         };
 
         if batch.trades.is_empty() {
+            return false;
+        }
+
+        let mut total_value_u128 = 0u128;
+        for trade in &batch.trades {
+            total_value_u128 += trade.amount as u128 * trade.price as u128;
+        }
+        if total_value_u128 > batch.taker_balance as u128 {
+            // Insolvent trade: taker_balance - total_value would wrap around the
+            // BN254 scalar field instead of underflowing, silently producing a
+            // huge-but-"valid" post-balance. Reject before that can happen.
             return false;
         }
 
@@ -278,6 +306,7 @@ mod tests {
                 settlement_tier: SettlementPreference::Standard,
                 fee_basis_points: 5,
                 seller: [0u8; 32],
+                fee_payer: [0u8; 32],
                 settlement_deadline: 0,
             }],
             maker_balance,

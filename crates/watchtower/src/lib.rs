@@ -123,7 +123,7 @@ impl WatchtowerClient {
             let expected_bps = trade.settlement_tier.fee_basis_points();
             if trade.fee_basis_points != expected_bps {
                 on_chain.raise_dispute(trade.maker_order_id);
-                on_chain.slash_signer(trade.seller);
+                on_chain.slash_signer(trade.fee_payer);
             }
         }
     }
@@ -177,6 +177,7 @@ mod tests {
                 settlement_tier: SettlementPreference::Standard,
                 fee_basis_points: 5,
                 seller: [4u8; 32],
+                fee_payer: [4u8; 32],
                 settlement_deadline: 0,
             }],
             pre_state_root: [0u8; 32],

@@ -265,6 +265,7 @@ pub mod tests {
                 settlement_tier: SettlementPreference::Standard,
                 fee_basis_points: 5,
                 seller: [0u8; 32],
+                fee_payer: [0u8; 32],
                 settlement_deadline: 0,
             }],
             maker_balance: 1_000_000,

@@ -14,6 +14,7 @@ pub struct Match {
     pub settlement_tier: SettlementPreference,
     pub fee_basis_points: u32,
     pub seller: [u8; 32],
+    pub fee_payer: [u8; 32],
     pub settlement_deadline: u64,
 }
 

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+interface IERC20 {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
 contract TraderEscrow {
     address public factory;
     address public owner;
@@ -12,6 +17,10 @@ contract TraderEscrow {
         uint256 deadline;
         bool refunded;
         bool settled;
+        bool slashed;
+        bytes32 assignedNode;
+        address token;
+        uint256 lockedAmount;
     }
 
     event Deposited(address indexed token, uint256 amount);
@@ -43,6 +52,11 @@ contract TraderEscrow {
             require(msg.value == amount, "Incorrect ETH value");
             balances[address(0)] += amount;
         } else {
+            require(msg.value == 0, "ETH not accepted for token deposit");
+            require(
+                IERC20(token).transferFrom(msg.sender, address(this), amount),
+                "Token transfer failed"
+            );
             balances[token] += amount;
         }
         emit Deposited(token, amount);
@@ -85,13 +99,20 @@ contract TraderEscrow {
 
     function recordSettlement(
         bytes32 tradeHash,
-        uint256 deadline
+        uint256 deadline,
+        bytes32 assignedNode,
+        address token,
+        uint256 lockedAmount
     ) external onlyFactory {
         require(settlements[tradeHash].deadline == 0, "Trade already recorded");
         settlements[tradeHash] = Settlement({
             deadline: deadline,
             refunded: false,
-            settled: false
+            settled: false,
+            slashed: false,
+            assignedNode: assignedNode,
+            token: token,
+            lockedAmount: lockedAmount
         });
     }
 
@@ -101,21 +122,32 @@ contract TraderEscrow {
         s.settled = true;
     }
 
-    function refundAfterDeadline(bytes32 tradeHash, address token) external onlyOwner {
+    function markSettlementSlashed(bytes32 tradeHash) external onlyFactory {
+        Settlement storage s = settlements[tradeHash];
+        require(s.deadline != 0, "Trade not recorded");
+        s.slashed = true;
+    }
+
+    function getSettlement(bytes32 tradeHash) external view returns (Settlement memory) {
+        return settlements[tradeHash];
+    }
+
+    function refundAfterDeadline(bytes32 tradeHash) external onlyOwner {
         Settlement storage s = settlements[tradeHash];
         require(s.deadline > 0, "Trade not recorded");
         require(block.timestamp > s.deadline, "Deadline not passed");
         require(!s.refunded, "Already refunded");
         require(!s.settled, "Already settled");
 
-        uint256 amount = lockedBalances[token];
+        uint256 amount = s.lockedAmount;
         require(amount > 0, "Nothing to refund");
+        require(lockedBalances[s.token] >= amount, "Insufficient locked balance");
 
-        lockedBalances[token] = 0;
-        balances[token] += amount;
+        lockedBalances[s.token] -= amount;
+        balances[s.token] += amount;
         s.refunded = true;
 
-        emit Refunded(tradeHash, token, amount);
+        emit Refunded(tradeHash, s.token, amount);
     }
 
     function unlock(address token, uint256 amount) external onlyFactory {
@@ -135,6 +167,8 @@ contract TraderEscrow {
     function _transfer(address token, address to, uint256 amount) private {
         if (token == address(0)) {
             payable(to).transfer(amount);
+        } else {
+            require(IERC20(token).transfer(to, amount), "Token transfer failed");
         }
     }
 }

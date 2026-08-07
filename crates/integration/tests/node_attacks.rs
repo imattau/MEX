@@ -204,6 +204,7 @@ mod node_attacks {
             settlement_tier: SettlementPreference::Standard,
             fee_basis_points: 5,
             seller: [0u8; 32],
+            fee_payer: [0u8; 32],
             settlement_deadline: 0,
         };
 
@@ -336,25 +337,34 @@ mod node_attacks {
         // If the watchtower operator is malicious or compromised,
         // ALL fraudulent batches are approved.
 
+        // The trade is solvent (total_value == taker_balance, so it clears the prover's
+        // insolvency guard) but the maker starts with zero balance -- there's still no
+        // economic stake behind the "sole arbiter" watchtower that approves it.
+        let trade_value = 1_000_000_000_000u64; // 1_000_000 * 1_000_000
         let fraud_batch = TradeBatch {
             trades: vec![engine::Match {
                 maker_order_id: [0xDEu8; 32], taker_order_id: [0xADu8; 32],
                 maker_trader: [0u8; 32], taker_trader: [0u8; 32],
-                price: u64::MAX, amount: u64::MAX,
+                price: 1_000_000, amount: 1_000_000,
                 timestamp_us: 0,
                 settlement_tier: SettlementPreference::Standard,
                 fee_basis_points: 5,
                 seller: [0u8; 32],
+                fee_payer: [0u8; 32],
                 settlement_deadline: 0,
             }],
             maker_balance: 0,  // Zero balance!
-            taker_balance: 0,  // Zero balance!
+            taker_balance: trade_value,
             pre_state_root: [0u8; 32],
-            post_state_root: [0u8; 32],
+            post_state_root: {
+                let mut result = [0u8; 32];
+                result[24..32].copy_from_slice(&trade_value.to_be_bytes());
+                result
+            },
         };
 
         // A valid proof for this fraud... it's mathematically correct
-        // (proves 0 + MAX*MAX ≈ 0 mod field)
+        // (proves 0 + trade_value, taker_value - trade_value = 0)
         let proof = BACKEND.prove_batch(&fraud_batch).unwrap();
 
         // Watchtower checks if proof is valid.
