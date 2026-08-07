@@ -82,6 +82,28 @@ impl LatencyModel {
         Self { latencies }
     }
 
+    fn local() -> Self {
+        let mut latencies = HashMap::new();
+        // Intra-region
+        latencies.insert((Region::UsEast1, Region::UsEast1), 2.0);
+        latencies.insert((Region::EuWest1, Region::EuWest1), 2.0);
+        latencies.insert((Region::ApSoutheast1, Region::ApSoutheast1), 2.0);
+        
+        // Inter-region (US-East <-> US-West represented by EU)
+        latencies.insert((Region::UsEast1, Region::EuWest1), 25.0);
+        latencies.insert((Region::EuWest1, Region::UsEast1), 25.0);
+
+        // Inter-region (US-East <-> US-Central represented by AP)
+        latencies.insert((Region::UsEast1, Region::ApSoutheast1), 15.0);
+        latencies.insert((Region::ApSoutheast1, Region::UsEast1), 15.0);
+
+        // Inter-region (US-West <-> US-Central)
+        latencies.insert((Region::EuWest1, Region::ApSoutheast1), 35.0);
+        latencies.insert((Region::ApSoutheast1, Region::EuWest1), 35.0);
+
+        Self { latencies }
+    }
+
     fn get_latency(&self, from: Region, to: Region) -> f64 {
         *self.latencies.get(&(from, to)).unwrap_or(&100.0)
     }
@@ -117,7 +139,15 @@ struct SimulationResultJson {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let use_local_profile = args.contains(&"--profile".to_string()) && args.contains(&"local".to_string());
+
     println!("Initializing Project Chronos Protocol Simulator...");
+    if use_local_profile {
+        println!("  Profile active: LOCAL MULTI-ZONE MESH");
+    } else {
+        println!("  Profile active: GLOBAL MULTI-REGION MESH");
+    }
 
     // 1. Setup Nodes
     let mut nodes = Vec::new();
@@ -143,11 +173,12 @@ fn main() {
     println!("Provisioned {} virtual nodes across 3 regions.", node_count);
 
     // 2. Setup Routing Tables for Deterministic Flooding
-    // In our simplified topology:
-    // - Nodes in the same region are fully connected (zone peers).
-    // - Node 0 (US), Node 3 (EU), Node 5 (AP) act as regional bridge gateways.
     let mut flood_nodes = HashMap::new();
-    let latency_model = LatencyModel::new();
+    let latency_model = if use_local_profile {
+        LatencyModel::local()
+    } else {
+        LatencyModel::new()
+    };
     let schedule = FloodSchedule::default();
 
     for i in 0..node_count {
