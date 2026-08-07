@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/protocol",
+    "crates/simulator",
+    "crates/engine",
+    "crates/rdma",
+    "crates/sandbox",
+    "crates/validation",
+    "crates/topology",
+    "crates/security",
+    "crates/heartbeat",
+    "crates/prover",
+    "crates/tss",
+    "crates/watchtower",
+    "crates/integration",
+    "crates/api",
+    "crates/security_tests",
+    "crates/benchmarks"
+]

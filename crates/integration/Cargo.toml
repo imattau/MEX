@@ -1,0 +1,21 @@
+[package]
+name = "integration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+engine = { path = "../engine" }
+rdma = { path = "../rdma" }
+sandbox = { path = "../sandbox" }
+validation = { path = "../validation" }
+topology = { path = "../topology" }
+security = { path = "../security" }
+heartbeat = { path = "../heartbeat" }
+prover = { path = "../prover" }
+tss = { path = "../tss" }
+watchtower = { path = "../watchtower" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"

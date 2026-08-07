@@ -1,0 +1,17 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "perf_suite"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+engine = { path = "../engine" }
+rdma = { path = "../rdma" }
+validation = { path = "../validation" }
+security = { path = "../security" }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"

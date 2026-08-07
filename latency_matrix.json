@@ -1,0 +1,11 @@
+{
+  "total_orders_injected": 1000,
+  "total_deliveries": 8733,
+  "p50_latency_ms": 154.6500242783286,
+  "p95_latency_ms": 229.92010100533844,
+  "p99_9_latency_ms": 231.13802481658513,
+  "t_max_ms": 304.3783158820588,
+  "packet_loss_rate": 0.02966666666666662,
+  "determinism_score": 0.998,
+  "verified": false
+}

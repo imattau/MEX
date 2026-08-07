@@ -1,0 +1,36 @@
+use common::OrderSide;
+use engine::Match;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitOrderRequest {
+    pub trader: [u8; 32],
+    pub symbol: String,
+    pub side: OrderSide,
+    pub price: u64,
+    pub amount: u64,
+    pub signature: Vec<u8>,
+    pub nonce: u64,
+    pub expiry: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitOrderResponse {
+    pub success: bool,
+    pub order_id: [u8; 32],
+    pub matches: Vec<Match>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceLevel {
+    pub price: u64,
+    pub total_amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBookResponse {
+    pub symbol: String,
+    pub bids: Vec<PriceLevel>,
+    pub asks: Vec<PriceLevel>,
+}

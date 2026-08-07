@@ -1,0 +1,13 @@
+[package]
+name = "security_tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+validation = { path = "../validation" }
+sandbox = { path = "../sandbox" }
+security = { path = "../security" }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+wat = "1.0"
