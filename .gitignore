@@ -1,3 +1,8 @@
 /target/
 .gemini/
 .DS_Store
+
+# Hardhat / npm
+/node_modules/
+/artifacts/
+/cache/

@@ -10,7 +10,7 @@ contract BatchVerifier {
         uint256[2][] ic;
     }
 
-    VerifyingKey public vk;
+    VerifyingKey private vk;
 
     event ProofVerified(bytes32 indexed batchRoot, bool valid);
 
@@ -35,7 +35,7 @@ contract BatchVerifier {
         uint256[2][2] calldata b,
         uint256[2] calldata c,
         uint256[] calldata input
-    ) public view returns (bool) {
+    ) public returns (bool) {
         require(input.length + 1 == vk.ic.length, "Input length mismatch");
 
         uint256 snark_scalar_field =
@@ -54,7 +54,7 @@ contract BatchVerifier {
         uint256[2][2] memory b,
         uint256[2] memory c,
         uint256[] memory input
-    ) private view returns (bool) {
+    ) private returns (bool) {
         uint256[2] memory acc = vk.ic[0];
         for (uint256 i = 0; i < input.length; i++) {
             uint256[2] memory scaled = _scalarMul(vk.ic[i + 1], input[i]);
@@ -145,7 +145,8 @@ contract BatchVerifier {
             abi.encodePacked(input)
         );
         require(success, "EC Add failed");
-        return [uint256(bytes32(result[0:32])), uint256(bytes32(result[32:64]))];
+        (uint256 x, uint256 y) = abi.decode(result, (uint256, uint256));
+        return [x, y];
     }
 
     function _scalarMul(
@@ -161,6 +162,7 @@ contract BatchVerifier {
             abi.encodePacked(input)
         );
         require(success, "Scalar mul failed");
-        return [uint256(bytes32(result[0:32])), uint256(bytes32(result[32:64]))];
+        (uint256 x, uint256 y) = abi.decode(result, (uint256, uint256));
+        return [x, y];
     }
 }
