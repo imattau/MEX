@@ -1,11 +1,10 @@
 {
-  "total_orders_injected": 1000,
-  "total_deliveries": 8732,
-  "p50_latency_ms": 18.546379731732486,
-  "p95_latency_ms": 38.87317652139836,
-  "p99_9_latency_ms": 61.88072557831856,
-  "t_max_ms": 64.36123198848873,
-  "packet_loss_rate": 0.029777777777777792,
-  "determinism_score": 0.998,
+  "scenario": "p2p",
+  "total_orders_injected": 10,
+  "total_deliveries": 7,
+  "p50_latency_ms": 30.099062029638162,
+  "p95_latency_ms": 30.478408204532286,
+  "p99_9_latency_ms": 30.478408204532286,
+  "t_max_ms": 30.478408204532286,
   "verified": true
 }
