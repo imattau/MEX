@@ -118,13 +118,26 @@ contract SettlementFactory {
             trade.deadline,
             trade.assignedNode,
             trade.token,
-            totalLocked
+            totalLocked,
+            trade.counterparty
         );
     }
 
     // Fulfills trades that were previously committed via commitTrade. Funds must already
     // be locked and the settlement record already exist -- this function only moves the
     // already-locked funds and marks the trade settled, it does not create new obligations.
+    //
+    // Every TradeEntry field the caller supplies here is cross-checked against the
+    // Settlement record commitTrade wrote (token, counterparty, amount+fee) before any
+    // funds move. Without that, this function -- callable by anyone, since settlement is
+    // meant to be submitted by whichever node was assigned, not restricted to a single
+    // fixed address -- would let a caller settle a real trader's real committed trade
+    // (identified only by its tradeHash, which is public) using an arbitrary amount,
+    // token, or recipient of the caller's own choosing: getSettlement only proves SOME
+    // trade with this hash was committed, not that the fields presented here match what
+    // was actually agreed. The ZK proof alone does not protect against this either -- it
+    // proves an off-chain arithmetic claim, not that this specific trades[] array is the
+    // one it was generated for.
     function settleBatchWithFees(
         TradeEntry[] calldata trades,
         uint256[2] calldata a,
@@ -144,6 +157,11 @@ contract SettlementFactory {
         for (uint256 i = 0; i < trades.length; i++) {
             TradeEntry calldata trade = trades[i];
 
+            require(
+                registry.getNode(trade.assignedNode).operator == msg.sender,
+                "Only the assigned node's operator can settle this trade"
+            );
+
             address escrowA = traderEscrows[trade.trader];
             require(escrowA != address(0), "Escrow must exist");
 
@@ -152,6 +170,9 @@ contract SettlementFactory {
             require(!s.settled, "Trade already settled");
             require(!s.slashed, "Trade already slashed");
             require(block.timestamp <= s.deadline, "Trade deadline passed");
+            require(trade.token == s.token, "Token does not match committed settlement");
+            require(trade.counterparty == s.counterparty, "Counterparty does not match committed settlement");
+            require(trade.amount + trade.fee == s.lockedAmount, "Amount/fee does not match committed settlement");
 
             TraderEscrow(escrowA).settleWithFee(
                 trade.token,

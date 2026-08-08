@@ -26,6 +26,12 @@ contract TraderEscrow {
         bytes32 assignedNode;
         address token;
         uint256 lockedAmount;
+        // Recorded at commitTrade time so settleBatchWithFees can verify
+        // the counterparty it's about to pay actually matches what this
+        // trader committed to -- without this, a caller-supplied
+        // TradeEntry.counterparty at settlement time is unverified and
+        // funds could be redirected to an arbitrary address.
+        address counterparty;
     }
 
     event Deposited(address indexed token, uint256 amount);
@@ -108,7 +114,8 @@ contract TraderEscrow {
         uint256 deadline,
         bytes32 assignedNode,
         address token,
-        uint256 lockedAmount
+        uint256 lockedAmount,
+        address counterparty
     ) external onlyFactory {
         require(settlements[tradeHash].deadline == 0, "Trade already recorded");
         settlements[tradeHash] = Settlement({
@@ -118,7 +125,8 @@ contract TraderEscrow {
             slashed: false,
             assignedNode: assignedNode,
             token: token,
-            lockedAmount: lockedAmount
+            lockedAmount: lockedAmount,
+            counterparty: counterparty
         });
     }
 

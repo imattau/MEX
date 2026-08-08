@@ -66,9 +66,10 @@ pub trait ChainAdapter: Send + Sync {
 
     // Submits a batch of already-committed trades (via commitTrade, by each
     // trader themselves) for settlement, alongside their ZK proof. Maps to
-    // SettlementFactory.settleBatchWithFees, which has no caller
-    // restriction -- this is the one write action a node operator's own key
-    // legitimately submits on behalf of the system.
+    // SettlementFactory.settleBatchWithFees, which requires msg.sender to
+    // be the registered operator of every trade's assignedNode -- callers
+    // must use the same key that registered as that node in NodeRegistry,
+    // not an arbitrary key.
     fn submit_settlement_batch(
         &self,
         trades: &[SettlementTrade],
