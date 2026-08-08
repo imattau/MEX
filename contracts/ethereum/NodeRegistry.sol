@@ -2,7 +2,11 @@
 pragma solidity ^0.8.20;
 
 contract NodeRegistry {
-    uint256 public constant MIN_STAKE = 10 ether;
+    // Set at deploy time (see scripts/deploy.js) rather than hardcoded, so a
+    // low-value test deployment (e.g. a public testnet, where faucet ETH is
+    // scarce) can use a realistic minimum without needing a different
+    // contract. Real deployments should still pass 10 ether.
+    uint256 public immutable MIN_STAKE;
     uint256 public constant MAX_MISSED_DEADLINES = 3;
     uint256 public constant REPUTATION_SCALE = 10000;
 
@@ -58,8 +62,10 @@ contract NodeRegistry {
         _;
     }
 
-    constructor() {
+    constructor(uint256 minStake_) {
+        require(minStake_ > 0, "minStake must be positive");
         admin = msg.sender;
+        MIN_STAKE = minStake_;
     }
 
     function setSlashingAuthority(address _slashingAuthority) external onlyAdmin {

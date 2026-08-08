@@ -15,6 +15,10 @@
 //                           BatchVerifier's constructor. Required unless
 //                           BATCH_VERIFIER_ADDRESS is set or you accept the
 //                           placeholder key described below.
+//   NODE_MIN_STAKE_ETH      NodeRegistry's minimum stake to register a node,
+//                           in whole ETH. Defaults to 10 (the real/production
+//                           value). Lower this for test networks where
+//                           faucet-issued ETH is scarce -- e.g. 0.1.
 const hre = require("hardhat");
 const fs = require("fs");
 
@@ -78,10 +82,14 @@ async function main() {
 
   const batchVerifier = await deployBatchVerifier();
 
+  const minStakeEth = process.env.NODE_MIN_STAKE_ETH || "10";
+  const minStake = hre.ethers.parseEther(minStakeEth);
   const NodeRegistry = await hre.ethers.getContractFactory("NodeRegistry");
-  const registry = await NodeRegistry.deploy();
+  const registry = await NodeRegistry.deploy(minStake);
   await registry.waitForDeployment();
-  console.log("NodeRegistry deployed to:", await registry.getAddress());
+  console.log(
+    `NodeRegistry deployed to: ${await registry.getAddress()} (MIN_STAKE = ${minStakeEth} ETH)`
+  );
 
   const SettlementFactory = await hre.ethers.getContractFactory("SettlementFactory");
   const settlementFactory = await SettlementFactory.deploy(
