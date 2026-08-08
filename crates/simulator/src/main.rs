@@ -224,7 +224,7 @@ fn main() {
                 heartbeat_tracker.on_heartbeat(source_node, current_virtual_time);
 
                 if let Some(flood_state) = flood_nodes.get_mut(&source_node) {
-                    if let Ok(forwards) = flood_state.on_receive(flood_msg, current_virtual_time) {
+                    if let Ok(forwards) = flood_state.on_receive(flood_msg, source_node, current_virtual_time) {
                         for (to_peer, next_msg) in forwards {
                             let to_region = nodes[to_peer.0 as usize].region;
                             let base_lat = latency_model.get_latency(node_region, to_region);
@@ -256,7 +256,12 @@ fn main() {
 
                 if let Some(flood_state) = flood_nodes.get_mut(&to_node) {
                     let rx_time = current_virtual_time;
-                    match flood_state.on_receive(msg, rx_time) {
+                    // The immediate sender of this specific arrival --
+                    // on_receive's forwarding loop pushes its own
+                    // node_id onto path before sending, so the last
+                    // entry is always who relayed it to to_node.
+                    let immediate_sender = msg.path.last().copied().unwrap_or(to_node);
+                    match flood_state.on_receive(msg, immediate_sender, rx_time) {
                         Ok(forwards) => {
                             total_deliveries += 1;
 

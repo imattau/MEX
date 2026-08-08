@@ -11,7 +11,16 @@ pub struct DeterministicFlood {
     pub region: Region,
     pub routing_table: RoutingTable,
     pub schedule: FloodSchedule,
-    pub received_cache: LruCache<[u8; 32], ()>,
+    // Was LruCache<[u8; 32], ()> -- pure membership, no memory of WHO an
+    // order arrived from or WHEN, beyond the first sighting. A second
+    // arrival of the same order via a different upstream path used to be
+    // silently discarded as FloodError::DuplicatePacket, throwing away
+    // exactly the redundant, independent evidence a real mesh (multiple
+    // paths from origin to any node) could use to cross-check one relay's
+    // claimed timing against what everyone else saw. Now records every
+    // arrival (from, current_time), not just the first -- see
+    // arrivals_for and on_receive's docs.
+    pub received_cache: LruCache<[u8; 32], Vec<(NodeId, f64)>>,
     pub order_book_orders: Vec<Order>,
     pub sig_validator: OrderValidator,
 }
@@ -29,12 +38,18 @@ impl DeterministicFlood {
         }
     }
 
+    // `from` is who this specific arrival came from (the immediate
+    // sender, not the order's ultimate origin) -- needed so a duplicate
+    // arrival's evidence (who else forwarded this, and when) can be
+    // recorded instead of discarded. See received_cache's docs.
     pub fn on_receive(
         &mut self,
         msg: FloodMessage,
+        from: NodeId,
         current_time: f64,
     ) -> Result<Vec<(NodeId, FloodMessage)>, FloodError> {
-        if self.received_cache.contains(&msg.order.id) {
+        if let Some(arrivals) = self.received_cache.get_mut(&msg.order.id) {
+            arrivals.push((from, current_time));
             return Err(FloodError::DuplicatePacket);
         }
 
@@ -51,7 +66,7 @@ impl DeterministicFlood {
             return Err(FloodError::LatePacket);
         }
 
-        self.received_cache.put(msg.order.id, ());
+        self.received_cache.put(msg.order.id, vec![(from, current_time)]);
         self.order_book_orders.push(msg.order.clone());
 
         if msg.hop_count >= self.schedule.max_hops {
@@ -69,6 +84,17 @@ impl DeterministicFlood {
         }
 
         Ok(forwards)
+    }
+
+    // Every independently-recorded arrival of `order_id` this node has
+    // seen -- the first (which passed full validation and was forwarded)
+    // plus every later duplicate (which wasn't forwarded again, but whose
+    // timing is still real evidence of when THAT peer had it). Used by
+    // Stage 2's cross-witness consistency checks. &mut self because
+    // LruCache::get touches recency ordering, same as everywhere else
+    // this cache is read.
+    pub fn arrivals_for(&mut self, order_id: &[u8; 32]) -> Option<&Vec<(NodeId, f64)>> {
+        self.received_cache.get(order_id)
     }
 
     #[allow(dead_code)]

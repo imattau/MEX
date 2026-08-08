@@ -1,7 +1,7 @@
 use crate::flood::DeterministicFlood;
 use crate::heartbeat::HeartbeatTracker;
 use crate::transport::{UdpTransport, WireMessage};
-use crate::types::{FloodSchedule, Peer, RoutingTable};
+use crate::types::{FloodError, FloodSchedule, Peer, RoutingTable};
 use common::{FloodMessage, NodeId, Region};
 use security::{encrypt_packet, decrypt_packet};
 use std::collections::{HashMap, VecDeque};
@@ -556,7 +556,7 @@ impl MeshNode {
                         }
                     }
 
-                    match self.flood.on_receive(flood_msg, now) {
+                    match self.flood.on_receive(flood_msg, from_node, now) {
                         Ok(forwards) => {
                             reputation::integration::on_flood_relayed(&mut self.reputation, from_node);
                             let t = &self.transport;
@@ -574,6 +574,16 @@ impl MeshNode {
                                 }
                                 let _ = t.send(target, WireMessage::Flood(fwd_msg)).await;
                             }
+                        }
+                        // A duplicate arrival via a genuinely different
+                        // upstream path is legitimate mesh redundancy,
+                        // not misbehavior -- penalizing it here would
+                        // punish exactly the honest multi-path forwarding
+                        // Stage 2's cross-witness checks depend on. The
+                        // arrival itself is already recorded (see
+                        // on_receive), just not re-forwarded.
+                        Err(FloodError::DuplicatePacket) => {
+                            tracing::trace!(?from_node, "Duplicate order arrival via alternate path (recorded, not penalized)");
                         }
                         Err(e) => {
                             reputation::integration::on_flood_dropped(&mut self.reputation, from_node);

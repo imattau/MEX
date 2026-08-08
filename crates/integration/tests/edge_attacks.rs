@@ -173,7 +173,7 @@ mod edge_cases {
             source_region: Region::EuWest1,  // Claim EU but actually in US
         };
 
-        let result = flood.on_receive(msg, 1.0);
+        let result = flood.on_receive(msg, NodeId(1), 1.0);
         let accepted = result.is_ok();
 
         eprintln!("\n┌─ EDGE CASE: SPOOFED SOURCE REGION ──────────────────────┐");

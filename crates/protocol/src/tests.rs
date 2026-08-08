@@ -83,14 +83,14 @@ mod tests {
             timestamp: 100.0,
             source_region: Region::UsEast1,
         };
-        let res = flood.on_receive(msg.clone(), 105.0);
+        let res = flood.on_receive(msg.clone(), NodeId(2), 105.0);
         assert!(res.is_ok());
         let forwards = res.unwrap();
         assert_eq!(forwards.len(), 1);
         assert_eq!(forwards[0].0, NodeId(1));
 
         // 2. Reject duplicate packet
-        let res_dup = flood.on_receive(msg.clone(), 106.0);
+        let res_dup = flood.on_receive(msg.clone(), NodeId(2), 106.0);
         assert_eq!(res_dup.unwrap_err(), FloodError::DuplicatePacket);
 
         // 3. Reject early packet (future timestamp)
@@ -102,7 +102,7 @@ mod tests {
             timestamp: 200.0,
             source_region: Region::UsEast1,
         };
-        let res_early = flood.on_receive(msg_early, 180.0);
+        let res_early = flood.on_receive(msg_early, NodeId(2), 180.0);
         assert_eq!(res_early.unwrap_err(), FloodError::EarlyPacket);
 
         // 4. Reject late packet
@@ -114,7 +114,7 @@ mod tests {
             timestamp: 200.0,
             source_region: Region::UsEast1,
         };
-        let res_late = flood.on_receive(msg_late, 600.0);
+        let res_late = flood.on_receive(msg_late, NodeId(2), 600.0);
         assert_eq!(res_late.unwrap_err(), FloodError::LatePacket);
     }
 

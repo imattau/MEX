@@ -17,7 +17,14 @@ const ANOMALY_STDDEV_MULTIPLIER: f64 = 4.0;
 // Applied on top of the stddev-based bound so a peer with very few
 // samples (or unrealistically tight/noiseless RTTs, as on loopback) still
 // gets a sane minimum tolerance instead of flagging normal jitter.
-const MIN_TOLERANCE_MS: f64 = 5.0;
+// Widened from an initial 5.0 after `cargo test --workspace` (many
+// processes contending for CPU, unlike this crate's tests run alone)
+// produced a real, reproducible false positive at ~31ms against a ~30ms
+// baseline bound -- a tolerance this tight was never going to survive
+// realistic scheduling jitter under load. 25ms is still 12x smaller than
+// the 300ms deliberate delay this experiment validates detecting, so it
+// costs essentially none of the real signal separation.
+const MIN_TOLERANCE_MS: f64 = 25.0;
 
 pub struct PeerLatencyStats {
     samples: HashMap<NodeId, VecDeque<f64>>,

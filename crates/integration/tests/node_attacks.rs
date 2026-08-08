@@ -118,7 +118,7 @@ mod node_attacks {
             timestamp: 0.0, source_region: Region::UsEast1,
         };
 
-        let result = flood.on_receive(msg, 0.0).unwrap();
+        let result = flood.on_receive(msg, NodeId(1), 0.0).unwrap();
 
         // Node gets forwarding targets but... just discards them
         eprintln!("\n┌─ ATTACK 2: CENSORSHIP ───────────────────────────────────┐");
@@ -168,7 +168,7 @@ mod node_attacks {
             order: order.clone(), hop_count: 0, path: vec![NodeId(1)],
             timestamp: 0.0, source_region: Region::UsEast1,
         };
-        let valid_result = flood.on_receive(valid_msg, 0.0).is_ok();
+        let valid_result = flood.on_receive(valid_msg, NodeId(1), 0.0).is_ok();
 
         let mut tampered = order.clone();
         tampered.id = [99u8; 32];
@@ -176,7 +176,7 @@ mod node_attacks {
             order: tampered, hop_count: 0, path: vec![NodeId(1)],
             timestamp: 0.0, source_region: Region::UsEast1,
         };
-        let tampered_result = flood.on_receive(tampered_msg, 0.0);
+        let tampered_result = flood.on_receive(tampered_msg, NodeId(1), 0.0);
 
         eprintln!("\n┌─ ATTACK 3: RELAY SIGNATURE VALIDATION (FIXED) ───────────┐");
         eprintln!("│  Valid signed order:   {}", if valid_result { "✓ Forwarded" } else { "✗ Rejected" });
@@ -425,7 +425,7 @@ mod node_attacks {
         };
 
         // Clock is hardcoded to 0.0 in MeshNode::run()
-        let result = flood.on_receive(real_msg, 0.0);
+        let result = flood.on_receive(real_msg, NodeId(1), 0.0);
 
         eprintln!("\n┌─ ATTACK 9: BROKEN TIMING WINDOW ─────────────────────────┐");
         eprintln!("│  Real timestamp:    1700000000.0 ms                    │");
