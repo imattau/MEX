@@ -4,18 +4,28 @@ pragma solidity ^0.8.20;
 import "./TraderEscrow.sol";
 import "./BatchVerifier.sol";
 import "./NodeRegistry.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-contract SettlementFactory {
+contract SettlementFactory is EIP712 {
+    using ECDSA for bytes32;
+
     BatchVerifier public verifier;
     NodeRegistry public registry;
     address public admin;
     mapping(address => address) public traderEscrows;
 
+    // Matches TradeEntry's field order/types exactly -- see
+    // commitTradeBatch's docs for why this exists at all.
+    bytes32 private constant TRADE_ENTRY_TYPEHASH = keccak256(
+        "TradeEntry(address trader,address counterparty,address token,uint256 amount,uint256 fee,uint256 deadline,bytes32 tradeHash,bytes32 assignedNode)"
+    );
+
     event EscrowCreated(address indexed trader, address escrowAddress, bytes32 offchainPubkey);
     event BatchSettled(bytes32 indexed batchRoot, uint256 tradeCount);
     event NodePenalized(bytes32 indexed nodePubkey, uint256 penalty);
 
-    constructor(address _verifier, address _registry) {
+    constructor(address _verifier, address _registry) EIP712("MEX-SettlementFactory", "1") {
         verifier = BatchVerifier(_verifier);
         registry = NodeRegistry(_registry);
         admin = msg.sender;
@@ -101,6 +111,48 @@ contract SettlementFactory {
     // Only the trader themselves can commit their own escrow to a trade.
     function commitTrade(TradeEntry calldata trade) external {
         require(msg.sender == trade.trader, "Only trader can commit own trade");
+        _commitTrade(trade);
+    }
+
+    // Batched form of commitTrade: instead of each trader submitting their
+    // own transaction (msg.sender == trade.trader), each trade here is
+    // authorized by an EIP-712 signature from that trade's own trader,
+    // letting a relayer (typically the settlement node itself) submit many
+    // traders' commits in one transaction. The on-chain EFFECT is
+    // identical to calling commitTrade once per trade -- same lock(),
+    // same recordSettlement(), same deadline -- this only changes how the
+    // trader's authorization is proven, not what it authorizes or the
+    // accountability commitTrade exists for. Replaying the same signature
+    // twice is already rejected by recordSettlement's own
+    // "Trade already recorded" check, so no separate nonce is needed here.
+    function commitTradeBatch(
+        TradeEntry[] calldata trades,
+        bytes[] calldata signatures
+    ) external {
+        require(trades.length == signatures.length, "trades/signatures length mismatch");
+
+        for (uint256 i = 0; i < trades.length; i++) {
+            TradeEntry calldata trade = trades[i];
+
+            bytes32 structHash = keccak256(abi.encode(
+                TRADE_ENTRY_TYPEHASH,
+                trade.trader,
+                trade.counterparty,
+                trade.token,
+                trade.amount,
+                trade.fee,
+                trade.deadline,
+                trade.tradeHash,
+                trade.assignedNode
+            ));
+            address signer = _hashTypedDataV4(structHash).recover(signatures[i]);
+            require(signer == trade.trader, "Invalid trader signature");
+
+            _commitTrade(trade);
+        }
+    }
+
+    function _commitTrade(TradeEntry calldata trade) private {
         require(block.timestamp <= trade.deadline, "Trade deadline passed");
         require(registry.isActiveNode(trade.assignedNode), "Assigned node not active");
 

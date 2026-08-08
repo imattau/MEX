@@ -2,7 +2,9 @@ use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer as _;
 use alloy::sol;
+use alloy::sol_types::{eip712_domain, SolStruct};
 use chain::{SettlementTrade, Token};
 use chain_ethereum::{account_to_address, address_to_account, compute_trade_hash, token_to_address, ChainSync, TokenRegistry};
 use engine::Match;
@@ -23,6 +25,7 @@ sol! {
         function createEscrow(address trader, bytes32 offchainPubkey) external returns (address);
         function getEscrow(address trader) external view returns (address);
         function commitTrade(TradeEntry calldata trade) external;
+        function commitTradeBatch(TradeEntry[] calldata trades, bytes[] calldata signatures) external;
         function claimSlash(bytes32[] calldata tradeHashes) external;
     }
 
@@ -39,6 +42,11 @@ sol! {
 // there) -- commitTrade and claimSlash.
 pub struct TraderClient {
     provider: DynProvider,
+    // Kept separately from `provider` (which wraps this same key inside an
+    // EthereumWallet, for submitting transactions) so this client can also
+    // sign an EIP-712 digest directly -- see sign_commit_authorization --
+    // without needing to submit a transaction at all.
+    signer: PrivateKeySigner,
     factory_address: Address,
     own_address: Address,
     own_pubkey: [u8; 32],
@@ -63,7 +71,7 @@ impl TraderClient {
             .parse()
             .map_err(|e| format!("invalid private key: {e}"))?;
         let own_address = signer.address();
-        let wallet = EthereumWallet::from(signer);
+        let wallet = EthereumWallet::from(signer.clone());
         let url = rpc_url
             .parse()
             .map_err(|e| format!("invalid RPC URL: {e}"))?;
@@ -86,6 +94,7 @@ impl TraderClient {
 
         Ok(Self {
             provider,
+            signer,
             factory_address,
             own_address,
             own_pubkey,
@@ -210,14 +219,15 @@ impl TraderClient {
             })
     }
 
-    // Commits this trader to a trade produced by the off-chain matching
-    // engine (delivered e.g. via GET /ws/trades/:trader). Only proceeds if
-    // this client's own pubkey is actually the trade's fee_payer -- a Match
-    // is broadcast to BOTH participants, but only the fee-paying side is
-    // the `trader` in SettlementFactory.TradeEntry (commitTrade locks and
-    // pays from `trader`'s escrow to `counterparty`; the other side isn't
-    // the one calling commitTrade for this particular trade at all).
-    pub async fn commit_trade(&mut self, m: &Match) -> Result<[u8; 32], String> {
+    // Shared by commit_trade and sign_commit_authorization: resolves the
+    // counterparty's address and builds the TradeEntry + trade_hash both
+    // paths need. Only proceeds if this client's own pubkey is actually
+    // the trade's fee_payer -- a Match is broadcast to BOTH participants,
+    // but only the fee-paying side is the `trader` in
+    // SettlementFactory.TradeEntry (commitTrade locks and pays from
+    // `trader`'s escrow to `counterparty`; the other side isn't the one
+    // committing this particular trade at all).
+    async fn build_trade_entry(&mut self, m: &Match) -> Result<(ISettlementFactoryTrader::TradeEntry, [u8; 32]), String> {
         if m.fee_payer != self.own_pubkey {
             return Err(format!(
                 "this client ({}) is not the fee_payer ({}) for this match -- nothing to commit",
@@ -268,6 +278,17 @@ impl TraderClient {
             assignedNode: FixedBytes::from(trade.assigned_node),
         };
 
+        Ok((entry, trade_hash))
+    }
+
+    // Commits this trader to a trade produced by the off-chain matching
+    // engine (delivered e.g. via GET /ws/trades/:trader) by submitting
+    // this trader's own commitTrade transaction. See
+    // sign_commit_authorization for the alternative that doesn't require
+    // this trader to submit a transaction (or hold gas) at all.
+    pub async fn commit_trade(&mut self, m: &Match) -> Result<[u8; 32], String> {
+        let (entry, trade_hash) = self.build_trade_entry(m).await?;
+
         let factory = ISettlementFactoryTrader::new(self.factory_address, &self.provider);
         let pending = factory
             .commitTrade(entry)
@@ -280,6 +301,49 @@ impl TraderClient {
             .map_err(|e| format!("commitTrade receipt failed: {e}"))?;
 
         Ok(trade_hash)
+    }
+
+    // Signs an EIP-712 authorization for this trade instead of submitting
+    // commitTrade as a transaction -- this trader's own gas cost for
+    // committing drops to zero, and there's nothing to broadcast until a
+    // relayer (typically the settlement node) collects authorizations from
+    // several traders and submits them together via
+    // SettlementFactory.commitTradeBatch, sharing one transaction's fixed
+    // overhead across all of them. The on-chain effect once submitted is
+    // identical to this trader calling commitTrade themselves: same
+    // lock(), same recordSettlement(), same deadline enforcement -- only
+    // how the authorization is proven changes.
+    //
+    // The domain here (name/version/chainId/verifyingContract) must match
+    // SettlementFactory's own EIP712(name, version) constructor args and
+    // its deployed address exactly, or the signature will recover to the
+    // wrong address on-chain and be rejected.
+    pub async fn sign_commit_authorization(
+        &mut self,
+        m: &Match,
+    ) -> Result<(ISettlementFactoryTrader::TradeEntry, Vec<u8>), String> {
+        let (entry, _trade_hash) = self.build_trade_entry(m).await?;
+
+        let chain_id = self
+            .provider
+            .get_chain_id()
+            .await
+            .map_err(|e| format!("get_chain_id failed: {e}"))?;
+        let domain = eip712_domain! {
+            name: "MEX-SettlementFactory",
+            version: "1",
+            chain_id: chain_id,
+            verifying_contract: self.factory_address,
+        };
+
+        let digest = entry.eip712_signing_hash(&domain);
+        let signature = self
+            .signer
+            .sign_hash(&digest)
+            .await
+            .map_err(|e| format!("signing commit authorization failed: {e}"))?;
+
+        Ok((entry, signature.as_bytes().to_vec()))
     }
 
     // Claims a slash against node(s) that missed their settlement deadline
