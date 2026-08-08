@@ -159,6 +159,23 @@ pub struct MeshNode {
     settlement_rx: Option<mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)>>,
     log_entry_tx: mpsc::Sender<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>,
     log_entry_rx: Option<mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>>,
+    misconduct_tx: mpsc::Sender<MisconductEvent>,
+    misconduct_rx: Option<mpsc::Receiver<MisconductEvent>>,
+}
+
+// A WireMessage::MisconductReport this node received, plus who it
+// actually arrived from at the transport level (`from`) alongside who
+// the message itself claims reported it (`reporter`) -- these are
+// usually the same node but nothing here enforces that (see
+// MisconductReport's own docs on this not yet being cryptographically
+// tied to real evidence).
+#[derive(Debug, Clone)]
+pub struct MisconductEvent {
+    pub from: NodeId,
+    pub reporter: NodeId,
+    pub subject: NodeId,
+    pub reason: String,
+    pub timestamp: f64,
 }
 
 pub struct MeshConfig {
@@ -231,6 +248,7 @@ impl MeshNode {
         let (echo_tx, echo_rx) = mpsc::channel(256);
         let (settlement_tx, settlement_rx) = mpsc::channel(64);
         let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
+        let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
 
         Ok(Self {
             node_id: config.node_id,
@@ -252,11 +270,44 @@ impl MeshNode {
             settlement_rx: Some(settlement_rx),
             log_entry_tx,
             log_entry_rx: Some(log_entry_rx),
+            misconduct_tx,
+            misconduct_rx: Some(misconduct_rx),
         })
     }
 
     pub fn sender(&self) -> mpsc::Sender<(NodeId, FloodMessage)> {
         self.tx.clone()
+    }
+
+    // Every WireMessage::MisconductReport this node receives, for a
+    // caller (e.g. a watchtower loop) to log/act on. This node's own
+    // ReputationEngine is also updated directly when this happens (see
+    // run()'s misconduct handling) -- this receiver is for external
+    // visibility beyond that, same take-before-run() rule as the other
+    // receiver() methods.
+    pub fn misconduct_receiver(&mut self) -> mpsc::Receiver<MisconductEvent> {
+        self.misconduct_rx.take().expect("misconduct_receiver already taken")
+    }
+
+    // Broadcasts a misconduct report about `subject` to every configured
+    // peer -- used both by this node's own CensorshipMonitor (see run())
+    // and available to external callers (e.g. a watchtower that detected
+    // an invalid settlement proof) via this same method, so both paths
+    // produce identical wire messages.
+    pub async fn report_misconduct(&self, subject: NodeId, reason: String) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        for peer_id in self.peer_ids() {
+            let msg = WireMessage::MisconductReport {
+                reporter: self.node_id,
+                subject,
+                reason: reason.clone(),
+                timestamp,
+            };
+            let _ = self.transport.send(peer_id, msg).await;
+        }
     }
 
     // Every WireMessage::SettlementProof this node receives from a peer,
@@ -294,6 +345,7 @@ impl MeshNode {
         let echo_tx = self.echo_tx.clone();
         let settlement_tx = self.settlement_tx.clone();
         let log_entry_tx = self.log_entry_tx.clone();
+        let misconduct_tx = self.misconduct_tx.clone();
         let mesh_key = self.mesh_key;
 
         let recv_transport = self.transport.clone();
@@ -339,6 +391,9 @@ impl MeshNode {
                         }
                         WireMessage::LogEntryBroadcast { entry } => {
                             let _ = log_entry_tx.send((from, entry)).await;
+                        }
+                        WireMessage::MisconductReport { reporter, subject, reason, timestamp } => {
+                            let _ = misconduct_tx.send(MisconductEvent { from, reporter, subject, reason, timestamp }).await;
                         }
                     },
                     Err(e) => {
@@ -402,6 +457,15 @@ impl MeshNode {
                         tracing::warn!(?echo_from, %missing_count, "Echo: peer doesn't know about orders we've seen");
                         if self.censorship.reported_missing(echo_from) {
                             reputation::integration::on_censorship_flag(&mut self.reputation, echo_from);
+                            // Stage D: don't just update our own local
+                            // reputation view -- tell the rest of the
+                            // mesh what we saw, so a peer who never
+                            // echo-probed echo_from themselves still
+                            // learns about it.
+                            self.report_misconduct(
+                                echo_from,
+                                format!("censorship: missing {missing_count} order(s) this node had already seen"),
+                            ).await;
                         }
                     }
                 }

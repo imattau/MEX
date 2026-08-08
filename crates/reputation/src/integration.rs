@@ -46,6 +46,28 @@ pub fn on_censorship_flag(engine: &mut ReputationEngine, node_id: NodeId) {
     );
 }
 
+// A peer other than this node independently detected and broadcast
+// misconduct (see protocol::WireMessage::MisconductReport) -- an invalid
+// settlement proof, a broken order-log chain, or the same kind of
+// censorship on_censorship_flag already covers, just witnessed by
+// someone else instead of by this node's own EchoRequest/EchoResponse
+// probe. Kept as its own function (not just a call site for
+// on_censorship_flag) so it stays possible to give externally-reported
+// evidence a different weight later -- reuses the same underlying P2P
+// penalty for now, since this codebase doesn't yet have a severity model
+// that distinguishes "suspected of dropping one echo" from "caught with
+// an invalid ZK proof."
+pub fn on_misconduct_reported(engine: &mut ReputationEngine, subject: NodeId, reporter: NodeId, reason: &str) {
+    tracing::warn!(?subject, ?reporter, reason, "misconduct reported by a peer");
+    engine.update_p2p_metrics(
+        subject,
+        P2PScoreUpdate {
+            censorship_flag: true,
+            ..Default::default()
+        },
+    );
+}
+
 pub fn on_echo_response(
     engine: &mut ReputationEngine,
     node_id: NodeId,

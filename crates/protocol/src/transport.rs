@@ -15,6 +15,7 @@ const MSG_ECHO_REQUEST: u8 = 0x06;
 const MSG_ECHO_RESPONSE: u8 = 0x07;
 const MSG_SETTLEMENT_PROOF: u8 = 0x08;
 const MSG_LOG_ENTRY: u8 = 0x09;
+const MSG_MISCONDUCT_REPORT: u8 = 0x0A;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
@@ -57,6 +58,22 @@ pub enum WireMessage {
     // flood-forwarded, same as SettlementProof.
     LogEntryBroadcast {
         entry: LogEntry<OrderReceipt>,
+    },
+    // Stage D: broadcast by any node that independently detects
+    // misconduct by another (a peer failing the CensorshipMonitor's echo
+    // check, an invalid SettlementProof, a LogEntryBroadcast that fails
+    // try_append_remote), instead of that detection only ever updating
+    // the detecting node's own local ReputationEngine. `reason` is a
+    // plain human-readable description, not a replayable proof -- this
+    // makes misconduct KNOWN mesh-wide, it doesn't yet make it
+    // independently re-verifiable by whoever receives the report (that
+    // would mean embedding the actual evidence -- the batch+proof, the
+    // rejected LogEntry -- which is a further extension, not done here).
+    MisconductReport {
+        reporter: NodeId,
+        subject: NodeId,
+        reason: String,
+        timestamp: f64,
     },
 }
 
@@ -138,6 +155,9 @@ impl UdpTransport {
             WireMessage::LogEntryBroadcast { .. } => {
                 (MSG_LOG_ENTRY, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
             }
+            WireMessage::MisconductReport { .. } => {
+                (MSG_MISCONDUCT_REPORT, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -172,7 +192,8 @@ impl UdpTransport {
                 WireMessage::EncryptedFlood(payload.to_vec())
             }
             MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
-            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY => {
+            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY
+            | MSG_MISCONDUCT_REPORT => {
                 bincode::deserialize::<WireMessage>(payload)
                     .map_err(|e| format!("Deserialize: {}", e))?
             }

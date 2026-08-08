@@ -23,6 +23,14 @@
 // this process independently confirms the sequencer hasn't rewritten
 // anything it broadcast.
 //
+// Stage D: when this process's OWN checks above catch something (an
+// invalid proof, a log entry that fails try_append_remote), it broadcasts
+// a WireMessage::MisconductReport to every other mesh peer instead of
+// only printing it locally -- so a peer who never independently checked
+// that specific proof/entry still learns the subject misbehaved. Also
+// prints every MisconductReport it receives from OTHER peers, for the
+// same reason in reverse.
+//
 // Usage:
 //   cargo run -p trader-client --bin watchtower_node -- <node_id> <listen_addr> <peers>
 //   e.g. ... -- 2 127.0.0.1:19002 1@127.0.0.1:19001
@@ -30,8 +38,37 @@
 use common::{NodeId, Region};
 use orderlog::{HashChainLog, OrderReceipt};
 use prover::BACKEND;
-use protocol::{MeshConfig, MeshNode};
+use protocol::{MeshConfig, MeshNode, WireMessage};
 use watchtower::{MockOnChainState, WatchtowerClient};
+
+// Shared by both the settlement-proof and order-log-mirror loops --
+// broadcasts a MisconductReport about `subject` to every known peer.
+// Not a MeshNode method call (this process already handed ownership of
+// its MeshNode to run() by the time either loop is checking anything),
+// just the same two primitives (transport(), peer_ids()) captured before
+// that happened, mirroring how crates/api/src/settlement.rs broadcasts a
+// SettlementProof after MeshNode::run() already owns the mesh node.
+async fn report_misconduct(
+    transport: &protocol::UdpTransport,
+    peer_ids: &[NodeId],
+    self_id: NodeId,
+    subject: NodeId,
+    reason: String,
+) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    for &peer_id in peer_ids {
+        let msg = WireMessage::MisconductReport {
+            reporter: self_id,
+            subject,
+            reason: reason.clone(),
+            timestamp,
+        };
+        let _ = transport.send(peer_id, msg).await;
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -67,10 +104,25 @@ async fn main() {
 
     let mut settlement_proofs = mesh_node.settlement_proof_receiver();
     let mut log_entries = mesh_node.log_entry_receiver();
+    let mut misconduct_reports = mesh_node.misconduct_receiver();
+    let transport = mesh_node.transport();
+    let peer_ids = mesh_node.peer_ids();
+    let self_id = NodeId(node_id);
     tokio::spawn(mesh_node.run());
 
-    println!("watchtower_node {node_id} listening on {listen_addr}, watching for settlement proofs and order log entries...");
+    println!("watchtower_node {node_id} listening on {listen_addr}, watching for settlement proofs, order log entries, and misconduct reports...");
 
+    let misconduct_task = tokio::spawn(async move {
+        while let Some(event) = misconduct_reports.recv().await {
+            println!(
+                "[misconduct] {:?} reported by {:?} (via {:?}): {}",
+                event.subject, event.reporter, event.from, event.reason
+            );
+        }
+    });
+
+    let log_mirror_transport = transport.clone();
+    let log_mirror_peers = peer_ids.clone();
     let log_mirror_task = tokio::spawn(async move {
         let mut mirror: HashChainLog<OrderReceipt> = HashChainLog::new();
         while let Some((from, entry)) = log_entries.recv().await {
@@ -85,6 +137,13 @@ async fn main() {
                 }
                 Err(e) => {
                     println!("[order_log] REJECTED entry seq={seq} from node {from:?}: {e}");
+                    report_misconduct(
+                        &log_mirror_transport,
+                        &log_mirror_peers,
+                        self_id,
+                        from,
+                        format!("order log entry seq={seq} failed try_append_remote: {e}"),
+                    ).await;
                 }
             }
         }
@@ -110,8 +169,16 @@ async fn main() {
                 on_chain.disputes_raised,
                 on_chain.slashed_signers.len(),
             );
+            report_misconduct(
+                &transport,
+                &peer_ids,
+                self_id,
+                from,
+                format!("settlement batch #{checked} ({trades_before} trades) failed independent proof verification"),
+            ).await;
         }
     }
 
     let _ = log_mirror_task.await;
+    let _ = misconduct_task.await;
 }
