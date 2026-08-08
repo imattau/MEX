@@ -25,9 +25,13 @@ dependencies = [
 name = "agent-sim"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "axum",
+ "chain",
+ "chain-ethereum",
  "common",
  "engine",
+ "hex",
  "lru 0.12.5",
  "protocol",
  "rand 0.8.7",
@@ -38,6 +42,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber 0.3.23",
+ "trader-client",
 ]
 
 [[package]]
