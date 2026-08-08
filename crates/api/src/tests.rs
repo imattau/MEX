@@ -86,4 +86,169 @@ mod tests {
         assert!(!submit_resp.success);
         assert!(submit_resp.error.unwrap().contains("signature"));
     }
+
+    // parse_trader_hex is a pure function -- unit-testing it directly is
+    // more precise than routing malformed input through the HTTP/WS layer.
+    // (An earlier version of these tests tried the latter via `oneshot`;
+    // axum's WebSocketUpgrade extractor itself fails on a synthetic
+    // non-connection request regardless of parameter order, since all of a
+    // handler's parameters are extracted up front before the handler body
+    // ever runs, so that approach can't actually exercise this validation
+    // path at all.)
+    #[test]
+    fn test_parse_trader_hex_rejects_non_hex() {
+        assert!(crate::server::parse_trader_hex("not-hex").is_err());
+    }
+
+    #[test]
+    fn test_parse_trader_hex_rejects_wrong_length() {
+        // Valid hex, but only 16 bytes -- must be rejected as the wrong
+        // length, not silently truncated/padded into a real trader ID.
+        assert!(crate::server::parse_trader_hex(&"ab".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn test_parse_trader_hex_accepts_valid_32_bytes_with_or_without_prefix() {
+        let hex64 = "ab".repeat(32);
+        assert_eq!(crate::server::parse_trader_hex(&hex64).unwrap(), [0xABu8; 32]);
+        assert_eq!(
+            crate::server::parse_trader_hex(&format!("0x{hex64}")).unwrap(),
+            [0xABu8; 32]
+        );
+    }
+
+    // Real, live round trip: binds the app to a real TCP socket, connects
+    // TWO real WebSocket clients scoped to two different traders, submits
+    // orders that produce a match between them, and confirms each trader's
+    // /ws/trades/:trader socket receives ONLY the match(es) they actually
+    // participated in -- not an unfiltered firehose of every match on the
+    // book, and not the other trader's stream leaking in.
+    #[tokio::test]
+    async fn test_ws_trades_filters_to_only_the_named_traders_matches() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use futures_util::StreamExt;
+        use rand::rngs::OsRng;
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use validation::OrderValidator;
+
+        let (tx, _) = broadcast::channel(100);
+        let state = Arc::new(RwLock::new(AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: tx,
+            reputation: reputation::ReputationEngine::new(),
+        }));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = app(state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut csprng = OsRng;
+        let sk_buyer = SigningKey::generate(&mut csprng);
+        let pk_buyer = sk_buyer.verifying_key().to_bytes();
+        let sk_seller = SigningKey::generate(&mut csprng);
+        let pk_seller = sk_seller.verifying_key().to_bytes();
+        let sk_bystander = SigningKey::generate(&mut csprng);
+        let pk_bystander = sk_bystander.verifying_key().to_bytes();
+
+        async fn connect_trader(addr: std::net::SocketAddr, trader: [u8; 32]) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+            let url = format!("ws://{addr}/ws/trades/{}", hex::encode(trader));
+            let mut req = url.into_client_request().unwrap();
+            req.headers_mut().insert("X-API-Key", "dev-default-key".parse().unwrap());
+            let (ws, _) = connect_async(req).await.unwrap();
+            ws
+        }
+
+        let mut buyer_ws = connect_trader(addr, pk_buyer).await;
+        let mut bystander_ws = connect_trader(addr, pk_bystander).await;
+
+        // Give both sockets a moment to actually subscribe before the match
+        // fires -- ws_broadcast is a live channel with no replay/backlog,
+        // so a subscription that lands after the send would simply miss it.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        // submit_order (server.rs) derives order.id from trader/nonce, and
+        // the signature covers that derived id -- so signing correctly here
+        // means replicating the exact same derivation the server uses,
+        // not just picking arbitrary bytes to sign.
+        fn build_and_sign(
+            sk: &SigningKey,
+            trader: [u8; 32],
+            side: common::OrderSide,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+        ) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+
+            let unsigned = common::Order {
+                id: order_id,
+                trader,
+                symbol: "ETH-USD".to_string(),
+                side,
+                price,
+                amount,
+                signature: Vec::new(),
+                nonce,
+                expiry: 0,
+                settlement_preference: common::SettlementPreference::Standard,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount,
+                "signature": signature,
+                "nonce": nonce, "expiry": 0,
+            })
+        }
+
+        let sell_req = build_and_sign(&sk_seller, pk_seller, common::OrderSide::Sell, 3000, 5, 1);
+        let sell_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+            .header("X-API-Key", "dev-default-key")
+            .json(&sell_req)
+            .send().await.unwrap()
+            .json().await.unwrap();
+        assert!(sell_resp.success, "sell order rejected: {:?}", sell_resp.error);
+
+        let buy_req = build_and_sign(&sk_buyer, pk_buyer, common::OrderSide::Buy, 3000, 5, 1);
+        let buy_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+            .header("X-API-Key", "dev-default-key")
+            .json(&buy_req)
+            .send().await.unwrap()
+            .json().await.unwrap();
+        assert!(buy_resp.success, "buy order rejected: {:?}", buy_resp.error);
+        assert_eq!(buy_resp.matches.len(), 1, "buy order should have matched the resting sell");
+
+        let buyer_msg = tokio::time::timeout(std::time::Duration::from_secs(2), buyer_ws.next())
+            .await
+            .expect("buyer socket must receive its own match")
+            .unwrap()
+            .unwrap();
+        let received: engine::Match = match buyer_msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => serde_json::from_str(&t).unwrap(),
+            other => panic!("unexpected message type: {other:?}"),
+        };
+        assert!(received.maker_trader == pk_buyer || received.taker_trader == pk_buyer);
+
+        // The bystander (unrelated trader) must NOT receive this match.
+        let bystander_result = tokio::time::timeout(std::time::Duration::from_millis(300), bystander_ws.next()).await;
+        assert!(bystander_result.is_err(), "an unrelated trader's socket must not receive someone else's match");
+
+        let _ = buyer_ws.close(None).await;
+        let _ = bystander_ws.close(None).await;
+    }
 }

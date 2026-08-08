@@ -173,6 +173,7 @@ mod tests {
                 seller: [4u8; 32],
                 fee_payer: [4u8; 32],
                 symbol: "BTC-USD".to_string(),
+                assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
             pre_state_root: [0u8; 32],

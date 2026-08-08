@@ -298,6 +298,7 @@ mod tests {
             seller: [2u8; 32],
             fee_payer: [2u8; 32],
             symbol: "BTC-USD".to_string(),
+            assigned_node: [0u8; 32],
             settlement_deadline: 0,
         }
     }

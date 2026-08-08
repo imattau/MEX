@@ -25,5 +25,7 @@ members = [
     "crates/chain-solana",
     "crates/chain-cosmwasm",
     "crates/batcher",
-    "crates/reputation"
+    "crates/reputation",
+    "crates/agent-sim",
+    "crates/trader-client"
 ]

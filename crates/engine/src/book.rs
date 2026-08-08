@@ -9,7 +9,46 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             node_rewards: 0,
+            active_nodes: Vec::new(),
+            next_node_index: 0,
         }
+    }
+
+    // Replaces the set of nodes eligible for assignment to a new match.
+    // Resets the round-robin cursor -- simplest correct behavior, since the
+    // old cursor position has no defined meaning against a different set of
+    // nodes (it could otherwise point past the end of a shorter new list,
+    // or land on an arbitrary member of a reordered one).
+    //
+    // This is deliberately the simplest possible selection policy (pure
+    // round-robin over whatever's in the list) -- it does not check
+    // liveness/reputation itself. Callers are responsible for keeping this
+    // list to nodes they actually consider active (e.g. via
+    // ChainAdapter::is_node_active), and for refreshing it as that changes.
+    pub fn set_active_nodes(&mut self, nodes: Vec<[u8; 32]>) {
+        self.active_nodes = nodes;
+        self.next_node_index = 0;
+    }
+
+    // Round-robins over the configured active-node set. Returns the zero
+    // pubkey (an explicit "unassigned" sentinel, never a real node's
+    // pubkey) if no active nodes are configured -- NodeRegistry.getNode of
+    // the zero pubkey is simply never registered, so any later on-chain
+    // commitTrade attempt against it fails safely (isActiveNode returns
+    // false) rather than being silently accepted.
+    //
+    // Takes the two fields it needs directly, rather than `&mut self`, so
+    // it can be called from inside add_order's match loops while
+    // self.asks/self.bids are already mutably borrowed via iter_mut() --
+    // Rust allows disjoint field borrows through direct field access, but
+    // not through an opaque `&mut self` method call.
+    fn assign_node(active_nodes: &[[u8; 32]], next_node_index: &mut usize) -> [u8; 32] {
+        if active_nodes.is_empty() {
+            return [0u8; 32];
+        }
+        let node = active_nodes[*next_node_index % active_nodes.len()];
+        *next_node_index = (*next_node_index + 1) % active_nodes.len();
+        node
     }
 
     pub fn add_order(&mut self, mut order: Order) -> Vec<Match> {
@@ -75,6 +114,7 @@ impl OrderBook {
                             fee_payer,
                             settlement_deadline: deadline,
                             symbol: self.symbol.clone(),
+                            assigned_node: Self::assign_node(&self.active_nodes, &mut self.next_node_index),
                         });
 
                         tracing::info!(
@@ -162,6 +202,7 @@ impl OrderBook {
                                 fee_payer,
                                 settlement_deadline: deadline,
                                 symbol: self.symbol.clone(),
+                                assigned_node: Self::assign_node(&self.active_nodes, &mut self.next_node_index),
                             });
 
                             if maker_order.amount == 0 {

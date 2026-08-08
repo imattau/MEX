@@ -71,8 +71,12 @@ sol! {
 
 // Left-zero-padded 20-byte-address <-> chain::OnChainAccount ([u8; 32])
 // conversion. See OnChainAccount's docs: this is the convention every
-// generic account field in the `chain` crate uses for EVM chains.
-fn account_to_address(account: OnChainAccount) -> Result<Address, String> {
+// generic account field in the `chain` crate uses for EVM chains. Public
+// (not just pub(crate)) because trader-side code outside this crate --
+// e.g. the trader-client crate resolving a counterparty's address before
+// building a SettlementTrade -- needs the same conversion, and should not
+// have to reimplement it.
+pub fn account_to_address(account: OnChainAccount) -> Result<Address, String> {
     if account[..12] != [0u8; 12] {
         return Err(format!(
             "OnChainAccount {} is not a valid left-zero-padded Ethereum address",
@@ -84,7 +88,15 @@ fn account_to_address(account: OnChainAccount) -> Result<Address, String> {
     Ok(Address::from(addr))
 }
 
-fn token_to_address(token: &Token) -> Result<Address, String> {
+// The reverse of account_to_address: any 20-byte Ethereum address is always
+// a valid OnChainAccount (infallible, unlike the other direction).
+pub fn address_to_account(addr: Address) -> OnChainAccount {
+    let mut out = [0u8; 32];
+    out[12..].copy_from_slice(addr.as_slice());
+    out
+}
+
+pub fn token_to_address(token: &Token) -> Result<Address, String> {
     match token {
         Token::Native => Ok(Address::ZERO),
         Token::Erc20(addr) => addr

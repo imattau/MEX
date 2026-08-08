@@ -206,6 +206,7 @@ mod node_attacks {
             seller: [0u8; 32],
             fee_payer: [0u8; 32],
             symbol: "BTC-USD".to_string(),
+            assigned_node: [0u8; 32],
             settlement_deadline: 0,
         };
 
@@ -353,6 +354,7 @@ mod node_attacks {
                 seller: [0u8; 32],
                 fee_payer: [0u8; 32],
                 symbol: "BTC-USD".to_string(),
+                assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
             maker_balance: 0,  // Zero balance!

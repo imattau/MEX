@@ -274,6 +274,7 @@ pub mod tests {
                 seller: [0u8; 32],
                 fee_payer: [0u8; 32],
                 symbol: "BTC-USD".to_string(),
+                assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
             maker_balance: 1_000_000,

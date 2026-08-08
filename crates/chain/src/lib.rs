@@ -19,8 +19,19 @@ pub enum Token {
 
 // One trade being settled on-chain. Mirrors SettlementFactory.TradeEntry on
 // Ethereum as closely as a chain-agnostic shape reasonably can.
+//
+// maker_order_id/taker_order_id trace back to the off-chain engine::Match
+// that produced this trade, and (together with the other fields) feed
+// trade_hash's derivation -- see chain-ethereum::compute_trade_hash. Nothing
+// on-chain currently recomputes/validates trade_hash (TraderEscrow just
+// stores whatever bytes32 the trader supplies), but binding it to these
+// specific terms is still the point: trade_hash is a commitment to exactly
+// this trade, not just an arbitrary unique ID, so it stays meaningful if
+// on-chain verification is ever added later.
 #[derive(Debug, Clone)]
 pub struct SettlementTrade {
+    pub maker_order_id: [u8; 32],
+    pub taker_order_id: [u8; 32],
     pub trader: OnChainAccount,
     pub counterparty: OnChainAccount,
     pub token: Token,

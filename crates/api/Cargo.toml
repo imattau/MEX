@@ -17,3 +17,12 @@ tracing = "0.1"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 reputation = { path = "../reputation" }
+hex = "0.4.3"
+
+[dev-dependencies]
+ed25519-dalek = "2"
+futures-util = "0.3.33"
+hex = "0.4.3"
+rand = "0.8"
+reqwest = { version = "0.13", features = ["json"] }
+tokio-tungstenite = "0.24"

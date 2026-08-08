@@ -27,6 +27,19 @@ impl TokenRegistry {
     pub fn symbol_of(&self, token: EthAddress) -> Option<&str> {
         self.by_address.get(&token).map(|s| s.as_str())
     }
+
+    // The reverse of symbol_of: needed by anything constructing a real
+    // on-chain trade from off-chain data that only carries a symbol (e.g.
+    // trader-client resolving engine::Match.symbol into a token address for
+    // SettlementFactory.TradeEntry). O(n) in the number of registered
+    // tokens -- fine at the scale a single registry's static config is
+    // realistically populated with; not worth a second HashMap for.
+    pub fn address_of(&self, symbol: &str) -> Option<EthAddress> {
+        self.by_address
+            .iter()
+            .find(|(_, s)| s.as_str() == symbol)
+            .map(|(addr, _)| *addr)
+    }
 }
 
 // The owner of a TraderEscrow: its Ethereum account, and the off-chain
@@ -102,6 +115,16 @@ mod tests {
     fn test_token_registry_unknown_address() {
         let reg = TokenRegistry::new();
         assert_eq!(reg.symbol_of(addr(99)), None);
+    }
+
+    #[test]
+    fn test_token_registry_address_of_round_trip() {
+        let mut reg = TokenRegistry::new();
+        let token = addr(1);
+        assert_eq!(reg.address_of("BTC-USD"), None);
+        reg.register(token, "BTC-USD");
+        assert_eq!(reg.address_of("BTC-USD"), Some(token));
+        assert_eq!(reg.address_of("ETH-USD"), None);
     }
 
     fn pubkey(byte: u8) -> [u8; 32] {

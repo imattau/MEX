@@ -17,6 +17,7 @@ pub struct Match {
     pub fee_payer: [u8; 32],
     pub settlement_deadline: u64,
     pub symbol: String,
+    pub assigned_node: [u8; 32],
 }
 
 pub struct OrderBook {
@@ -24,4 +25,6 @@ pub struct OrderBook {
     pub bids: BTreeMap<u64, Vec<Order>>,
     pub asks: BTreeMap<u64, Vec<Order>>,
     pub node_rewards: u64,
+    pub(crate) active_nodes: Vec<[u8; 32]>,
+    pub(crate) next_node_index: usize,
 }

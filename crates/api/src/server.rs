@@ -1,6 +1,6 @@
 use crate::types::{OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -70,6 +70,7 @@ pub fn app(state: Arc<RwLock<AppState>>) -> Router {
         .route("/api/v1/orderbook", get(get_orderbook))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
+        .route("/ws/trades/:trader", get(ws_trader_handler))
         .layer(middleware::from_fn(check_auth))
         .layer(ConcurrencyLimitLayer::new(256))
         .with_state(state)
@@ -231,4 +232,68 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<RwLock<AppState>>) {
     }
 
     gauge!("api.ws.connections").decrement(1.0);
+}
+
+// Parses a hex-encoded 32-byte trader pubkey from a URL path segment
+// (optionally "0x"-prefixed). A malformed value is rejected with 400 before
+// ever upgrading the connection, rather than upgrading and then immediately
+// erroring over the socket.
+pub(crate) fn parse_trader_hex(s: &str) -> Result<[u8; 32], String> {
+    let trimmed = s.trim_start_matches("0x").trim_start_matches("0X");
+    let bytes = hex::decode(trimmed).map_err(|e| format!("invalid hex: {e}"))?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("expected 32 bytes, got {}", v.len()))?;
+    Ok(bytes)
+}
+
+// Delivers only the Matches a specific trader actually participated in
+// (as maker or taker), instead of /ws's unfiltered broadcast to every
+// connected client -- this is what lets a trader-side client learn "here's
+// your match, here's what to commit" without having to filter every other
+// trader's matches out client-side. Filters the SAME underlying
+// ws_broadcast stream server-side; no separate per-trader queue, so a
+// trader who connects after a match happened has already missed it (no
+// backlog/replay yet).
+async fn ws_trader_handler(
+    Path(trader_hex): Path<String>,
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<RwLock<AppState>>>,
+) -> Response {
+    let trader = match parse_trader_hex(&trader_hex) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, trader_hex = %trader_hex, "Rejected /ws/trades connection: invalid trader");
+            return (StatusCode::BAD_REQUEST, e).into_response();
+        }
+    };
+    counter!("api.ws.trader_connections").increment(1);
+    ws.on_upgrade(move |socket| handle_trader_socket(socket, state, trader))
+        .into_response()
+}
+
+async fn handle_trader_socket(mut socket: WebSocket, state: Arc<RwLock<AppState>>, trader: [u8; 32]) {
+    let mut rx = {
+        let guard = state.read().unwrap();
+        guard.ws_broadcast.subscribe()
+    };
+
+    while let Ok(msg) = rx.recv().await {
+        if msg.maker_trader != trader && msg.taker_trader != trader {
+            continue;
+        }
+        match serde_json::to_string(&msg) {
+            Ok(serialized) => {
+                if socket.send(Message::Text(serialized)).await.is_err() {
+                    debug!("Trader WebSocket connection closed");
+                    break;
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to serialize match for trader WebSocket");
+            }
+        }
+    }
+
+    gauge!("api.ws.trader_connections").decrement(1.0);
 }

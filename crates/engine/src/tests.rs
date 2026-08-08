@@ -204,4 +204,77 @@ mod tests {
         let cancel_non_existent = book.cancel_order([99u8; 32]);
         assert!(!cancel_non_existent);
     }
+
+    #[test]
+    fn test_match_has_no_assigned_node_by_default() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
+        let matches = book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].assigned_node, [0u8; 32],
+            "with no active nodes configured, a match must get the zero-pubkey sentinel, not a fabricated node"
+        );
+    }
+
+    #[test]
+    fn test_assigned_node_round_robins_across_matches() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        let node_a = [1u8; 32];
+        let node_b = [2u8; 32];
+        book.set_active_nodes(vec![node_a, node_b]);
+
+        // One resting buy order per match, so each add_order call produces
+        // exactly one Match and therefore exactly one assign_node() call.
+        book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
+        let m1 = book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+        book.add_order(create_test_order(3, OrderSide::Buy, 3000, 10));
+        let m2 = book.add_order(create_test_order(4, OrderSide::Sell, 3000, 10));
+        book.add_order(create_test_order(5, OrderSide::Buy, 3000, 10));
+        let m3 = book.add_order(create_test_order(6, OrderSide::Sell, 3000, 10));
+
+        assert_eq!(m1[0].assigned_node, node_a);
+        assert_eq!(m2[0].assigned_node, node_b);
+        assert_eq!(m3[0].assigned_node, node_a, "cursor must wrap back to the first node");
+    }
+
+    #[test]
+    fn test_set_active_nodes_resets_round_robin_cursor() {
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        book.set_active_nodes(vec![[1u8; 32], [2u8; 32]]);
+
+        book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
+        let m1 = book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+        assert_eq!(m1[0].assigned_node, [1u8; 32]);
+
+        // Reconfiguring the active set mid-flight must not leave the cursor
+        // pointing at a stale, out-of-range, or otherwise meaningless
+        // position relative to the new list.
+        book.set_active_nodes(vec![[9u8; 32]]);
+        book.add_order(create_test_order(3, OrderSide::Buy, 3000, 10));
+        let m2 = book.add_order(create_test_order(4, OrderSide::Sell, 3000, 10));
+        assert_eq!(m2[0].assigned_node, [9u8; 32]);
+    }
+
+    #[test]
+    fn test_multiple_matches_in_one_add_order_call_each_get_a_turn() {
+        // A single incoming order can match against several resting orders
+        // in one add_order call, producing multiple Matches at once -- each
+        // one must still get its own turn in the round-robin, not all get
+        // the same node from a cursor that only advances once per call.
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        let node_a = [1u8; 32];
+        let node_b = [2u8; 32];
+        book.set_active_nodes(vec![node_a, node_b]);
+
+        book.add_order(create_test_order(1, OrderSide::Sell, 3000, 5));
+        book.add_order(create_test_order(2, OrderSide::Sell, 3000, 5));
+
+        let matches = book.add_order(create_test_order(3, OrderSide::Buy, 3000, 10));
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].assigned_node, node_a);
+        assert_eq!(matches[1].assigned_node, node_b);
+    }
 }
