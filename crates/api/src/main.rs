@@ -209,6 +209,7 @@ async fn main() {
                 heartbeat_interval_ms: 1000.0,
                 max_missed_heartbeats: 10,
                 schedule: None,
+                artificial_forward_delay_ms: None,
             })
             .await
             .unwrap_or_else(|e| {

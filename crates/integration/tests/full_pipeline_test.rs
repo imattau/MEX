@@ -68,6 +68,7 @@ async fn test_full_pipeline_all_13_layers() {
         node_key: None,
         mesh_encryption_key: None,
         schedule: None,
+        artificial_forward_delay_ms: None,
     }).await.expect("mesh node A");
 
     let node_b = MeshNode::new(MeshConfig {
@@ -80,6 +81,7 @@ async fn test_full_pipeline_all_13_layers() {
         node_key: None,
         mesh_encryption_key: None,
         schedule: None,
+        artificial_forward_delay_ms: None,
     }).await.expect("mesh node B");
 
     tokio::spawn(node_a.run());

@@ -124,6 +124,48 @@ impl CensorshipMonitor {
     }
 }
 
+// Correlates a Flood's local arrival with the HopWitness the immediately
+// preceding relay sends alongside it, to compute that specific hop's
+// observed one-way transit time -- see WireMessage::HopWitness's docs for
+// why the origin-carried FloodMessage.timestamp alone can't attribute a
+// delay to a specific relay in a multi-hop path.
+//
+// Known simplification, acceptable for this experiment and not for a
+// production version: pending entries are never evicted if their
+// counterpart never arrives (e.g. a peer that floods but doesn't speak
+// HopWitness), so this leaks memory over a long-running process. Fine for
+// a short, controlled live test; a real version needs a TTL sweep.
+struct HopLatencyMonitor {
+    pending_floods: HashMap<[u8; 32], (NodeId, f64)>,
+    pending_witnesses: HashMap<[u8; 32], (NodeId, f64)>,
+}
+
+impl HopLatencyMonitor {
+    fn new() -> Self {
+        Self { pending_floods: HashMap::new(), pending_witnesses: HashMap::new() }
+    }
+
+    fn on_flood_received(&mut self, order_id: [u8; 32], from: NodeId, recv_time: f64) -> Option<(NodeId, f64)> {
+        self.pending_floods.insert(order_id, (from, recv_time));
+        self.try_match(order_id)
+    }
+
+    fn on_witness_received(&mut self, order_id: [u8; 32], hop_node: NodeId, forwarded_at: f64) -> Option<(NodeId, f64)> {
+        self.pending_witnesses.insert(order_id, (hop_node, forwarded_at));
+        self.try_match(order_id)
+    }
+
+    // Once both halves for `order_id` are present, returns
+    // (hop_node, observed_one_way_ms) and clears them; None otherwise.
+    fn try_match(&mut self, order_id: [u8; 32]) -> Option<(NodeId, f64)> {
+        let (_from, recv_time) = *self.pending_floods.get(&order_id)?;
+        let (hop_node, forwarded_at) = *self.pending_witnesses.get(&order_id)?;
+        self.pending_floods.remove(&order_id);
+        self.pending_witnesses.remove(&order_id);
+        Some((hop_node, recv_time - forwarded_at))
+    }
+}
+
 pub struct MeshNode {
     pub node_id: NodeId,
     pub region: Region,
@@ -147,6 +189,14 @@ pub struct MeshNode {
     peer_addrs: HashMap<NodeId, SocketAddr>,
     mesh_key: [u8; 32],
     censorship: CensorshipMonitor,
+    latency_stats: crate::latency::PeerLatencyStats,
+    hop_latency: HopLatencyMonitor,
+    // nonce -> when this node sent that Ping, so RTT is computed from
+    // this node's own clock on both ends (send and receive of the
+    // matching Pong), never from anything the peer claims.
+    pending_pings: HashMap<u64, f64>,
+    next_ping_nonce: u64,
+    artificial_forward_delay_ms: u64,
     reputation: reputation::ReputationEngine,
     rx: mpsc::Receiver<(NodeId, FloodMessage)>,
     tx: mpsc::Sender<(NodeId, FloodMessage)>,
@@ -188,6 +238,13 @@ pub struct MeshConfig {
     pub heartbeat_interval_ms: f64,
     pub max_missed_heartbeats: u32,
     pub schedule: Option<FloodSchedule>,
+    // Test-only: artificially delays every Flood/HopWitness this node
+    // forwards by this many ms before sending. Exists to simulate
+    // deliberate order-withholding for the latency-anomaly-detection
+    // experiment (see HopLatencyMonitor) without faking anything else --
+    // this node still pings/pongs and forwards honestly, just slowly.
+    // None/0 in any real deployment; nothing here enables it by default.
+    pub artificial_forward_delay_ms: Option<u64>,
 }
 
 impl MeshNode {
@@ -261,6 +318,11 @@ impl MeshNode {
             peer_addrs,
             mesh_key,
             censorship: CensorshipMonitor::new(),
+            latency_stats: crate::latency::PeerLatencyStats::new(),
+            hop_latency: HopLatencyMonitor::new(),
+            pending_pings: HashMap::new(),
+            next_ping_nonce: 0,
+            artificial_forward_delay_ms: config.artificial_forward_delay_ms.unwrap_or(0),
             reputation: reputation::ReputationEngine::new(),
             rx,
             tx,
@@ -348,6 +410,13 @@ impl MeshNode {
         let misconduct_tx = self.misconduct_tx.clone();
         let mesh_key = self.mesh_key;
 
+        // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
+        // misconduct_tx, no external caller needs raw Pong/HopWitness
+        // events -- only the derived anomaly, which goes out as a
+        // MisconductReport the same way CensorshipMonitor's does).
+        let (pong_tx, mut pong_rx) = mpsc::channel::<(NodeId, u64, f64)>(256);
+        let (hop_witness_tx, mut hop_witness_rx) = mpsc::channel::<(NodeId, [u8; 32], NodeId, f64)>(1024);
+
         let recv_transport = self.transport.clone();
         tokio::spawn(async move {
             loop {
@@ -395,6 +464,23 @@ impl MeshNode {
                         WireMessage::MisconductReport { reporter, subject, reason, timestamp } => {
                             let _ = misconduct_tx.send(MisconductEvent { from, reporter, subject, reason, timestamp }).await;
                         }
+                        WireMessage::Ping { nonce, .. } => {
+                            // Answered directly here, not routed through
+                            // the main loop -- replying needs no mutable
+                            // state, just &self.transport, which this
+                            // background task already has.
+                            let _ = recv_transport.send(from, WireMessage::Pong { nonce }).await;
+                        }
+                        WireMessage::Pong { nonce } => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs_f64() * 1000.0;
+                            let _ = pong_tx.send((from, nonce, now)).await;
+                        }
+                        WireMessage::HopWitness { order_id, hop_node, forwarded_at } => {
+                            let _ = hop_witness_tx.send((from, order_id, hop_node, forwarded_at)).await;
+                        }
                     },
                     Err(e) => {
                         tracing::error!(error = %e, "Recv failed");
@@ -410,6 +496,13 @@ impl MeshNode {
         let mut echo_tick = tokio::time::interval(
             tokio::time::Duration::from_secs(ECHO_INTERVAL_SECS),
         );
+        // Deliberately fast relative to heartbeat_tick -- this experiment
+        // wants a usable RTT baseline within a couple of real seconds, not
+        // production-cadence pinging (which would want to be far less
+        // frequent to avoid flooding the network with its own traffic).
+        let mut ping_tick = tokio::time::interval(
+            tokio::time::Duration::from_millis(100),
+        );
 
         loop {
             tokio::select! {
@@ -418,6 +511,51 @@ impl MeshNode {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs_f64() * 1000.0;
+
+                    let order_id = flood_msg.order.id;
+
+                    // Sent IMMEDIATELY, before on_receive's forwarding
+                    // decision and before any artificial_forward_delay_ms
+                    // -- this is the fix for the obvious hole in an
+                    // earlier version of this: if the witness were sent
+                    // alongside the (possibly delayed) forward, a
+                    // withholding relay could just timestamp it AFTER its
+                    // own delay too and the gap would always look honest.
+                    // Emitting it here instead, from this relay's own
+                    // earliest possible observation of the order, means a
+                    // relay can't retroactively backdate how long it sat
+                    // on something without also delaying this witness --
+                    // which decouples it from artificial_forward_delay_ms
+                    // entirely, so a NAIVE withholding implementation
+                    // (delay the forward, nothing else) gets caught. A
+                    // sophisticated adversary who deliberately delays this
+                    // too would not be -- that's a real, acknowledged
+                    // limit of this prototype, not a claim this solves
+                    // the general case.
+                    for peer_id in self.flood.routing_table.downstream_peers.iter().map(|p| p.id) {
+                        let _ = self.transport.send(peer_id, WireMessage::HopWitness {
+                            order_id,
+                            hop_node: self.node_id,
+                            forwarded_at: now,
+                        }).await;
+                    }
+
+                    // Correlates this arrival with the HopWitness the
+                    // immediately preceding relay sent alongside it (if it
+                    // has arrived yet -- order over UDP isn't guaranteed,
+                    // see on_witness_received below for the other arrival
+                    // order). See HopLatencyMonitor's docs.
+                    if let Some((hop_node, observed_ms)) = self.hop_latency.on_flood_received(order_id, from_node, now) {
+                        if self.latency_stats.is_anomalous(hop_node, observed_ms) {
+                            let bound = self.latency_stats.expected_one_way_bound_ms(hop_node).unwrap_or(0.0);
+                            tracing::warn!(?hop_node, observed_ms, bound_ms = bound, "hop transit time exceeds established latency baseline");
+                            self.report_misconduct(
+                                hop_node,
+                                format!("order propagation delay: {observed_ms:.1}ms observed vs {bound:.1}ms baseline bound"),
+                            ).await;
+                        }
+                    }
+
                     match self.flood.on_receive(flood_msg, now) {
                         Ok(forwards) => {
                             reputation::integration::on_flood_relayed(&mut self.reputation, from_node);
@@ -431,12 +569,40 @@ impl MeshNode {
                                         continue;
                                     }
                                 }
+                                if self.artificial_forward_delay_ms > 0 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(self.artificial_forward_delay_ms)).await;
+                                }
                                 let _ = t.send(target, WireMessage::Flood(fwd_msg)).await;
                             }
                         }
                         Err(e) => {
                             reputation::integration::on_flood_dropped(&mut self.reputation, from_node);
                             tracing::debug!(?e, "Flood skip");
+                        }
+                    }
+                }
+
+                Some((from_peer, nonce, arrived_at)) = pong_rx.recv() => {
+                    if let Some(sent_at) = self.pending_pings.remove(&nonce) {
+                        let rtt_ms = arrived_at - sent_at;
+                        self.latency_stats.record_rtt(from_peer, rtt_ms);
+                    }
+                }
+
+                Some((from_wire, order_id, hop_node, forwarded_at)) = hop_witness_rx.recv() => {
+                    // `from_wire` (the UDP sender) should equal `hop_node`
+                    // (who the message claims forwarded it) for an honest
+                    // peer -- both are kept since nothing here enforces
+                    // that they match, same caveat as MisconductReport's.
+                    let _ = from_wire;
+                    if let Some((matched_hop, observed_ms)) = self.hop_latency.on_witness_received(order_id, hop_node, forwarded_at) {
+                        if self.latency_stats.is_anomalous(matched_hop, observed_ms) {
+                            let bound = self.latency_stats.expected_one_way_bound_ms(matched_hop).unwrap_or(0.0);
+                            tracing::warn!(hop_node = ?matched_hop, observed_ms, bound_ms = bound, "hop transit time exceeds established latency baseline");
+                            self.report_misconduct(
+                                matched_hop,
+                                format!("order propagation delay: {observed_ms:.1}ms observed vs {bound:.1}ms baseline bound"),
+                            ).await;
                         }
                     }
                 }
@@ -479,6 +645,24 @@ impl MeshNode {
                             }).await;
                         }
                     }
+                }
+
+                _ = ping_tick.tick() => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64() * 1000.0;
+                    let peer_ids: Vec<NodeId> = self.peer_addrs.keys().copied().collect();
+                    for peer_id in peer_ids {
+                        let nonce = self.next_ping_nonce;
+                        self.next_ping_nonce += 1;
+                        self.pending_pings.insert(nonce, now);
+                        let _ = self.transport.send(peer_id, WireMessage::Ping { nonce, sent_at: now }).await;
+                    }
+                    // Bounded cleanup for pings that never got a Pong
+                    // (dead peer, packet loss) -- without this,
+                    // pending_pings grows forever on a lossy link.
+                    self.pending_pings.retain(|_, sent_at| now - *sent_at < 5000.0);
                 }
 
                 _ = heartbeat_tick.tick() => {

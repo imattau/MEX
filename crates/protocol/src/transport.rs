@@ -16,6 +16,9 @@ const MSG_ECHO_RESPONSE: u8 = 0x07;
 const MSG_SETTLEMENT_PROOF: u8 = 0x08;
 const MSG_LOG_ENTRY: u8 = 0x09;
 const MSG_MISCONDUCT_REPORT: u8 = 0x0A;
+const MSG_PING: u8 = 0x0B;
+const MSG_PONG: u8 = 0x0C;
+const MSG_HOP_WITNESS: u8 = 0x0D;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
@@ -74,6 +77,31 @@ pub enum WireMessage {
         subject: NodeId,
         reason: String,
         timestamp: f64,
+    },
+    // Real challenge-response RTT measurement (see latency.rs's docs on
+    // why this can't be a self-reported timestamp): the sender records
+    // when it sent Ping, and computes RTT itself from when the matching
+    // Pong comes back -- the peer being measured never gets to assert
+    // its own latency.
+    Ping {
+        nonce: u64,
+        sent_at: f64,
+    },
+    Pong {
+        nonce: u64,
+    },
+    // Sent by a relay to a specific downstream peer at the same moment it
+    // forwards that order's Flood, so the receiver can compute this
+    // specific hop's observed transit time (its own local recv time minus
+    // forwarded_at) and compare it against that hop's own established
+    // latency baseline from Ping/Pong -- see node.rs's HopLatencyMonitor.
+    // Without this, only the ORIGIN timestamp is available end to end
+    // (FloodMessage.timestamp is carried unchanged through every hop), so
+    // a multi-hop delay can never be attributed to a specific relay.
+    HopWitness {
+        order_id: [u8; 32],
+        hop_node: NodeId,
+        forwarded_at: f64,
     },
 }
 
@@ -158,6 +186,15 @@ impl UdpTransport {
             WireMessage::MisconductReport { .. } => {
                 (MSG_MISCONDUCT_REPORT, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
             }
+            WireMessage::Ping { .. } => {
+                (MSG_PING, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
+            WireMessage::Pong { .. } => {
+                (MSG_PONG, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
+            WireMessage::HopWitness { .. } => {
+                (MSG_HOP_WITNESS, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -193,7 +230,7 @@ impl UdpTransport {
             }
             MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
             | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY
-            | MSG_MISCONDUCT_REPORT => {
+            | MSG_MISCONDUCT_REPORT | MSG_PING | MSG_PONG | MSG_HOP_WITNESS => {
                 bincode::deserialize::<WireMessage>(payload)
                     .map_err(|e| format!("Deserialize: {}", e))?
             }

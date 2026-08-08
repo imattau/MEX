@@ -1,6 +1,7 @@
 pub mod types;
 pub mod heartbeat;
 pub mod flood;
+pub mod latency;
 pub mod transport;
 pub mod node;
 pub mod tests;
@@ -11,5 +12,6 @@ pub use types::FloodSchedule;
 pub use types::FloodError;
 pub use heartbeat::HeartbeatTracker;
 pub use flood::DeterministicFlood;
+pub use latency::PeerLatencyStats;
 pub use node::{MeshNode, MeshConfig};
 pub use transport::{UdpTransport, WireMessage};
