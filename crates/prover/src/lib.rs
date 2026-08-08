@@ -25,71 +25,134 @@ pub struct TradeBatch {
     pub post_state_root: [u8; 32],
 }
 
-pub struct DEXTradeCircuit<F: PrimeField> {
-    pub maker_balance_pre: Option<F>,
-    pub taker_balance_pre: Option<F>,
-    pub amount: Option<F>,
-    pub price: Option<F>,
-    pub maker_balance_post: Option<F>,
-    pub taker_balance_post: Option<F>,
+// Fixed at circuit/trusted-setup time -- Groth16 can't prove a
+// variably-shaped circuit, so a batch always has exactly this many trade
+// "slots". A real batch with fewer trades is padded with no-op trades
+// (amount = price = 0, contributing nothing to any balance), which is why
+// prove_batch accepts anywhere from 1 to MAX_BATCH_TRADES trades. Changing
+// this constant changes the circuit's shape, which requires a fresh
+// trusted setup (see bn254::trusted_setup_path) and therefore a fresh
+// verifying key / BatchVerifier redeployment -- it is not a
+// backwards-compatible change.
+pub const MAX_BATCH_TRADES: usize = 8;
+
+// Proves balance conservation across a batch of up to MAX_BATCH_TRADES
+// sequential trades between one maker/taker pair: starting from
+// maker_balance_pre/taker_balance_pre (external to the circuit, folded
+// into pre_state_root by the caller), each trade in turn updates both
+// balances by its (amount * price) value and folds that traded value
+// (not the resulting balances -- see below) into a running root, ending
+// at post_state_root.
+//
+// The root accumulates each trade's `amount * price`, not its resulting
+// balances. That's deliberate: a zero-amount padding trade (used to fill
+// unused slots in a batch smaller than MAX_BATCH_TRADES) must be a true
+// no-op for the root, contributing nothing, regardless of how many
+// padding slots exist. Accumulating balances instead would make even a
+// no-op trade add its (unchanged) balances to the root again on every
+// padding step, so the root would depend on how much padding a batch
+// happened to need rather than only on its real trades -- breaking the
+// off-chain replay verify_proof uses to independently recompute the
+// expected root from just the real trade list.
+//
+// Only pre_state_root and post_state_root are public inputs -- every
+// per-trade balance and the roots between trades are private witnesses.
+// This keeps the public input count constant (2) regardless of batch
+// size, unlike an earlier single-trade version of this circuit that
+// exposed each trade's post-balances as public inputs directly; that
+// doesn't generalize cleanly to a batch (it would leak every intermediate
+// balance on-chain, once per trade, in every batch's calldata) and isn't
+// needed for the conservation property the circuit actually proves.
+pub struct DEXBatchCircuit<F: PrimeField> {
+    pub maker_balance_pre: Vec<Option<F>>,
+    pub taker_balance_pre: Vec<Option<F>>,
+    pub amount: Vec<Option<F>>,
+    pub price: Vec<Option<F>>,
+    pub maker_balance_post: Vec<Option<F>>,
+    pub taker_balance_post: Vec<Option<F>>,
+    // Root after each trade except the last (whose resulting root IS
+    // post_state_root) -- length MAX_BATCH_TRADES - 1.
+    pub intermediate_roots: Vec<Option<F>>,
     pub pre_state_root: Option<F>,
     pub post_state_root: Option<F>,
 }
 
-impl<F: PrimeField> ConstraintSynthesizer<F> for DEXTradeCircuit<F> {
+impl<F: PrimeField> ConstraintSynthesizer<F> for DEXBatchCircuit<F> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
-        let maker_pre =
-            cs.new_witness_variable(|| self.maker_balance_pre.ok_or(SynthesisError::AssignmentMissing))?;
-        let taker_pre =
-            cs.new_witness_variable(|| self.taker_balance_pre.ok_or(SynthesisError::AssignmentMissing))?;
-        let amt = cs.new_witness_variable(|| self.amount.ok_or(SynthesisError::AssignmentMissing))?;
-        let prc = cs.new_witness_variable(|| self.price.ok_or(SynthesisError::AssignmentMissing))?;
-
-        let maker_post =
-            cs.new_input_variable(|| self.maker_balance_post.ok_or(SynthesisError::AssignmentMissing))?;
-        let taker_post =
-            cs.new_input_variable(|| self.taker_balance_post.ok_or(SynthesisError::AssignmentMissing))?;
-
-        let pre_root =
+        let pre_root_var =
             cs.new_input_variable(|| self.pre_state_root.ok_or(SynthesisError::AssignmentMissing))?;
-        let post_root =
+        let post_root_var =
             cs.new_input_variable(|| self.post_state_root.ok_or(SynthesisError::AssignmentMissing))?;
 
-        let val = cs.new_witness_variable(|| {
-            let a = self.amount.ok_or(SynthesisError::AssignmentMissing)?;
-            let p = self.price.ok_or(SynthesisError::AssignmentMissing)?;
-            Ok(a * p)
-        })?;
+        let mut running_root = pre_root_var;
 
-        cs.enforce_constraint(
-            LinearCombination::from(amt),
-            LinearCombination::from(prc),
-            LinearCombination::from(val),
-        )?;
+        for i in 0..MAX_BATCH_TRADES {
+            let maker_pre = cs.new_witness_variable(|| {
+                self.maker_balance_pre.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let taker_pre = cs.new_witness_variable(|| {
+                self.taker_balance_pre.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let amt = cs.new_witness_variable(|| {
+                self.amount.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let prc = cs.new_witness_variable(|| {
+                self.price.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let val = cs.new_witness_variable(|| {
+                let a = self.amount.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)?;
+                let p = self.price.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)?;
+                Ok(a * p)
+            })?;
 
-        let mut lc_maker = LinearCombination::zero();
-        lc_maker = lc_maker + (F::one(), maker_pre) + (F::one(), val);
-        cs.enforce_constraint(
-            lc_maker,
-            LinearCombination::from(Variable::One),
-            LinearCombination::from(maker_post),
-        )?;
+            cs.enforce_constraint(
+                LinearCombination::from(amt),
+                LinearCombination::from(prc),
+                LinearCombination::from(val),
+            )?;
 
-        let mut lc_taker = LinearCombination::zero();
-        lc_taker = lc_taker + (F::one(), taker_pre) - (F::one(), val);
-        cs.enforce_constraint(
-            lc_taker,
-            LinearCombination::from(Variable::One),
-            LinearCombination::from(taker_post),
-        )?;
+            let maker_post = cs.new_witness_variable(|| {
+                self.maker_balance_post.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let mut lc_maker = LinearCombination::zero();
+            lc_maker = lc_maker + (F::one(), maker_pre) + (F::one(), val);
+            cs.enforce_constraint(
+                lc_maker,
+                LinearCombination::from(Variable::One),
+                LinearCombination::from(maker_post),
+            )?;
 
-        let mut lc_post = LinearCombination::zero();
-        lc_post = lc_post + (F::one(), pre_root) + (F::one(), maker_post) + (F::one(), taker_post);
-        cs.enforce_constraint(
-            lc_post,
-            LinearCombination::from(Variable::One),
-            LinearCombination::from(post_root),
-        )?;
+            let taker_post = cs.new_witness_variable(|| {
+                self.taker_balance_post.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            let mut lc_taker = LinearCombination::zero();
+            lc_taker = lc_taker + (F::one(), taker_pre) - (F::one(), val);
+            cs.enforce_constraint(
+                lc_taker,
+                LinearCombination::from(Variable::One),
+                LinearCombination::from(taker_post),
+            )?;
+
+            let next_root = if i == MAX_BATCH_TRADES - 1 {
+                post_root_var
+            } else {
+                cs.new_witness_variable(|| {
+                    self.intermediate_roots.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                })?
+            };
+            // Accumulates val (the traded amount * price), not maker_post +
+            // taker_post -- see this struct's docs for why that matters for
+            // padding trades.
+            let mut lc_root = LinearCombination::zero();
+            lc_root = lc_root + (F::one(), running_root) + (F::one(), val);
+            cs.enforce_constraint(
+                lc_root,
+                LinearCombination::from(Variable::One),
+                LinearCombination::from(next_root),
+            )?;
+
+            running_root = next_root;
+        }
 
         Ok(())
     }
@@ -211,18 +274,52 @@ pub mod tests {
 
     pub type Fq = Fp64<MontBackend<FqConfig, 1>>;
 
+    // Builds a MAX_BATCH_TRADES-slot circuit with one real trade (pre=5,10
+    // amount=2 price=3 -> post=11,4, matching the old single-trade test's
+    // values) followed by (MAX_BATCH_TRADES - 1) zero-amount padding
+    // trades, which must be true no-ops for the root (see
+    // DEXBatchCircuit's docs) -- so the final root equals the real trade's
+    // val (2*3=6) added to pre_state_root (0), i.e. 6, regardless of how
+    // many padding slots follow it.
+    fn batch_circuit_one_real_trade(tamper_maker_post: bool) -> DEXBatchCircuit<Fq> {
+        let real_maker_post = if tamper_maker_post { Fq::from(99u64) } else { Fq::from(11u64) };
+
+        let mut maker_pre = vec![Some(Fq::from(5u64))];
+        let mut taker_pre = vec![Some(Fq::from(10u64))];
+        let mut amount = vec![Some(Fq::from(2u64))];
+        let mut price = vec![Some(Fq::from(3u64))];
+        let mut maker_post = vec![Some(real_maker_post)];
+        let mut taker_post = vec![Some(Fq::from(4u64))];
+
+        for _ in 1..MAX_BATCH_TRADES {
+            maker_pre.push(Some(Fq::from(0u64)));
+            taker_pre.push(Some(Fq::from(0u64)));
+            amount.push(Some(Fq::from(0u64)));
+            price.push(Some(Fq::from(0u64)));
+            maker_post.push(Some(Fq::from(0u64)));
+            taker_post.push(Some(Fq::from(0u64)));
+        }
+
+        // val for every padding trade is 0, so the root never moves past
+        // the first trade's contribution -- every intermediate root is 6.
+        let intermediate_roots = vec![Some(Fq::from(6u64)); MAX_BATCH_TRADES - 1];
+
+        DEXBatchCircuit::<Fq> {
+            maker_balance_pre: maker_pre,
+            taker_balance_pre: taker_pre,
+            amount,
+            price,
+            maker_balance_post: maker_post,
+            taker_balance_post: taker_post,
+            intermediate_roots,
+            pre_state_root: Some(Fq::from(0u64)),
+            post_state_root: Some(Fq::from(6u64)),
+        }
+    }
+
     #[test]
     fn test_zk_circuit_satisfied() {
-        let circuit = DEXTradeCircuit::<Fq> {
-            maker_balance_pre: Some(Fq::from(5u64)),
-            taker_balance_pre: Some(Fq::from(10u64)),
-            amount: Some(Fq::from(2u64)),
-            price: Some(Fq::from(3u64)),
-            maker_balance_post: Some(Fq::from(11u64)),
-            taker_balance_post: Some(Fq::from(4u64)),
-            pre_state_root: Some(Fq::from(0u64)),
-            post_state_root: Some(Fq::from(15u64)),
-        };
+        let circuit = batch_circuit_one_real_trade(false);
 
         let cs = ark_relations::r1cs::ConstraintSystem::new();
         let cs_ref = ConstraintSystemRef::new(cs);
@@ -232,16 +329,7 @@ pub mod tests {
 
     #[test]
     fn test_zk_circuit_unsatisfied_tampered_post_balance() {
-        let circuit = DEXTradeCircuit::<Fq> {
-            maker_balance_pre: Some(Fq::from(5u64)),
-            taker_balance_pre: Some(Fq::from(10u64)),
-            amount: Some(Fq::from(2u64)),
-            price: Some(Fq::from(3u64)),
-            maker_balance_post: Some(Fq::from(99u64)),
-            taker_balance_post: Some(Fq::from(4u64)),
-            pre_state_root: Some(Fq::from(0u64)),
-            post_state_root: Some(Fq::from(0u64)),
-        };
+        let circuit = batch_circuit_one_real_trade(true);
 
         let cs = ark_relations::r1cs::ConstraintSystem::new();
         let cs_ref = ConstraintSystemRef::new(cs);
@@ -280,7 +368,10 @@ pub mod tests {
             maker_balance: 1_000_000,
             taker_balance: 1_000_000,
             pre_state_root: [0u8; 32],
-            post_state_root: u64_to_bytes32(2_000_000),
+            // Root = sum of each trade's (amount * price), not maker_post +
+            // taker_post -- see DEXBatchCircuit's docs. One trade of
+            // 3000 * 5.
+            post_state_root: u64_to_bytes32(3000 * 5),
         };
 
         let backend = Bn254Groth16Backend;

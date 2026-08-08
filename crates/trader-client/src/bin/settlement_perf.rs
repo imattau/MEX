@@ -28,7 +28,7 @@ use alloy::sol;
 use chain::OnChainAccount;
 use common::SettlementPreference;
 use engine::Match;
-use prover::{Bn254Groth16Backend, ProverBackend, TradeBatch};
+use prover::{Bn254Groth16Backend, ProverBackend, TradeBatch, MAX_BATCH_TRADES};
 use std::time::{Duration, Instant};
 use trader_client::TraderClient;
 
@@ -295,10 +295,139 @@ async fn main() {
     }
     println!(" done\n");
 
+    let baseline_settle_gas = timings.iter().map(|t| t.settle_gas).sum::<u64>() / timings.len() as u64;
+    let baseline_commit_gas = timings.iter().map(|t| t.commit_gas).sum::<u64>() / timings.len() as u64;
     report(&timings);
+
+    println!("\nrunning a batched settlement: {MAX_BATCH_TRADES} trades, one proof, one settleBatchWithFees call...");
+    run_batched_settlement(
+        &mut maker_client,
+        &factory_contract,
+        maker_pubkey,
+        taker_pubkey,
+        maker_signer.address(),
+        taker_signer.address(),
+        node_pubkey,
+        baseline_commit_gas,
+        baseline_settle_gas,
+    )
+    .await;
 
     println!("\nrunning a concurrent burst: 10 independent commitTrade calls fired in parallel...");
     concurrent_burst(&rpc_url, &factory_address, &deployer_provider, node_pubkey).await;
+}
+
+// The actual payoff being measured: MAX_BATCH_TRADES trades between the
+// same maker/taker pair, each individually commitTrade'd (that part is
+// inherently per-trade -- commitTrade is trader-signed, there is no way
+// to batch a different trader's signature into someone else's
+// transaction), but proven under ONE Groth16 proof and settled in ONE
+// settleBatchWithFees call instead of MAX_BATCH_TRADES separate ones.
+#[allow(clippy::too_many_arguments)]
+async fn run_batched_settlement(
+    maker_client: &mut TraderClient,
+    factory_contract: &ISettlementFactoryPerf::ISettlementFactoryPerfInstance<&impl Provider>,
+    maker_pubkey: [u8; 32],
+    taker_pubkey: [u8; 32],
+    maker_address: Address,
+    taker_address: Address,
+    node_pubkey: OnChainAccount,
+    baseline_commit_gas: u64,
+    baseline_settle_gas: u64,
+) {
+    let mut matches = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut commit_total = Duration::ZERO;
+
+    for i in 0..MAX_BATCH_TRADES {
+        let deadline = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+        let m = Match {
+            maker_order_id: u64_to_bytes32(20_000 + i as u64 * 2),
+            taker_order_id: u64_to_bytes32(20_000 + i as u64 * 2 + 1),
+            maker_trader: maker_pubkey,
+            taker_trader: taker_pubkey,
+            price: 3000,
+            amount: 1,
+            timestamp_us: 0,
+            settlement_tier: SettlementPreference::Standard,
+            fee_basis_points: 5,
+            seller: maker_pubkey,
+            fee_payer: maker_pubkey,
+            settlement_deadline: deadline,
+            symbol: "ETH-USD".to_string(),
+            assigned_node: node_pubkey,
+        };
+        let t0 = Instant::now();
+        let trade_hash = maker_client.commit_trade(&m).await.unwrap();
+        commit_total += t0.elapsed();
+
+        matches.push((m, trade_hash));
+    }
+
+    let trades: Vec<Match> = matches.iter().map(|(m, _)| m.clone()).collect();
+    let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
+    let batch = TradeBatch {
+        trades: trades.clone(),
+        maker_balance: 1_000_000,
+        taker_balance: 1_000_000,
+        pre_state_root: [0u8; 32],
+        post_state_root: u64_to_bytes32(total_value),
+    };
+
+    let backend = Bn254Groth16Backend;
+    let t1 = Instant::now();
+    let proof = backend.prove_batch(&batch).unwrap();
+    let prove_latency = t1.elapsed();
+
+    let entries: Vec<ISettlementFactoryPerf::TradeEntry> = matches
+        .iter()
+        .map(|(m, trade_hash)| ISettlementFactoryPerf::TradeEntry {
+            trader: maker_address,
+            counterparty: taker_address,
+            token: Address::ZERO,
+            amount: U256::from(m.price * m.amount),
+            fee: U256::from((m.price * m.amount) * m.fee_basis_points as u64 / 10_000),
+            deadline: U256::from(m.settlement_deadline),
+            tradeHash: FixedBytes::from(*trade_hash),
+            assignedNode: FixedBytes::from(node_pubkey),
+        })
+        .collect();
+    let fee_config = ISettlementFactoryPerf::FeeConfig { feeRecipient: maker_address, tier: 0 };
+    let calldata = prover::decode_proof_calldata(&proof).unwrap();
+    let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
+    let b = [
+        [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
+        [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+    ];
+    let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
+    let input: Vec<U256> = calldata.public_inputs.iter().map(|bytes| U256::from_be_bytes(*bytes)).collect();
+
+    let t2 = Instant::now();
+    let receipt = factory_contract
+        .settleBatchWithFees(entries, a, b, c, input, fee_config)
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    let settle_latency = t2.elapsed();
+    let settle_gas = receipt.gas_used;
+
+    println!("commitTrade x{MAX_BATCH_TRADES} total wall clock: {commit_total:?} (still one tx per trade -- inherent, trader-signed)");
+    println!("prove_batch (one proof for all {MAX_BATCH_TRADES} trades): {prove_latency:?}");
+    println!("settleBatchWithFees (one call, {MAX_BATCH_TRADES}-entry array): {settle_latency:?}, gas: {settle_gas}");
+
+    let batched_settle_gas_per_trade = settle_gas / MAX_BATCH_TRADES as u64;
+    let batched_total_gas_per_trade = baseline_commit_gas + batched_settle_gas_per_trade;
+    let baseline_total_gas_per_trade = baseline_commit_gas + baseline_settle_gas;
+
+    println!("\n=== Per-trade gas: single-trade-per-proof baseline vs {MAX_BATCH_TRADES}-trade batch ===");
+    println!("settleBatchWithFees gas/trade: baseline ~{baseline_settle_gas}  ->  batched ~{batched_settle_gas_per_trade}  ({:.1}x reduction)", baseline_settle_gas as f64 / batched_settle_gas_per_trade as f64);
+    println!("TOTAL gas/trade (commit unavoidable, settle amortized): baseline ~{baseline_total_gas_per_trade}  ->  batched ~{batched_total_gas_per_trade}  ({:.1}x reduction)", baseline_total_gas_per_trade as f64 / batched_total_gas_per_trade as f64);
+
+    println!("\n=== Updated computed throughput ceiling using batched gas/trade ===");
+    print_ceiling("Ethereum L1", 30_000_000, 12.0, batched_total_gas_per_trade);
+    print_ceiling("A representative L2 (e.g. Base)", 200_000_000, 2.0, batched_total_gas_per_trade);
 }
 
 async fn latest_block_gas(provider: &impl Provider) -> u64 {
@@ -345,13 +474,11 @@ fn report(timings: &[StageTiming]) {
         percentile(&total_lat, 0.5), percentile(&total_lat, 0.9), percentile(&total_lat, 0.99)
     );
 
-    println!("\n=== Gas cost per trade (this pipeline settles exactly 1 trade per ZK proof --");
-    println!("    the contract's settleBatchWithFees accepts an array, but prove_batch");
-    println!("    currently rejects batches with more than 1 trade, so batching does not");
-    println!("    yet amortize gas across multiple trades) ===");
+    println!("\n=== Gas cost per trade, single-trade-per-proof baseline (this section) ===");
     println!("commitTrade gas:         ~{avg_commit_gas}");
     println!("settleBatchWithFees gas: ~{avg_settle_gas}");
-    println!("TOTAL gas per trade:     ~{total_gas_per_trade}\n");
+    println!("TOTAL gas per trade:     ~{total_gas_per_trade}");
+    println!("(see the batched settlement section below for the amortized comparison)\n");
 
     println!("=== Computed throughput ceiling (not measured -- extrapolated from the gas ===");
     println!("    number above against real network block gas limits/times; local devnet");

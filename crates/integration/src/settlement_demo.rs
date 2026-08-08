@@ -187,7 +187,10 @@ fn main() {
     // ── Phase 4: ZK Proof ──
     println!("\n┌─ PHASE 4: ZK PROOF GENERATION ─────────────────────────┐");
     let pre_state = [0u8; 32];
-    let post_state = u64_to_bytes32(2_000_000);
+    // Root = sum of each trade's (amount * price), not a fixed placeholder
+    // -- see prover::DEXBatchCircuit's docs.
+    let total_value: u64 = all_matches.iter().map(|m| m.price * m.amount).sum();
+    let post_state = u64_to_bytes32(total_value);
 
     let batch = TradeBatch {
         trades: all_matches.clone(),
@@ -196,8 +199,6 @@ fn main() {
         pre_state_root: pre_state,
         post_state_root: post_state,
     };
-
-    let total_value: u64 = all_matches.iter().map(|m| m.price * m.amount).sum();
     let total_volume: u64 = all_matches.iter().map(|m| m.amount).sum();
 
     let prove_start = Instant::now();

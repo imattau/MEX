@@ -187,12 +187,15 @@ async fn test_full_pipeline_all_13_layers() {
     // ============================================================
     //   LAYERS 9-10: ZK Proving (Groth16) + Watchtower Audit
     // ============================================================
+    // Root = sum of each trade's (amount * price), not maker_balance +
+    // taker_balance -- see prover::DEXBatchCircuit's docs.
+    let post_root_val: u64 = matches.iter().map(|m| m.amount * m.price).sum();
     let batch = TradeBatch {
         trades: matches.clone(),
         maker_balance: 1_000_000,
         taker_balance: 1_000_000,
         pre_state_root: [0u8; 32],
-        post_state_root: u64_to_bytes32(2_000_000),
+        post_state_root: u64_to_bytes32(post_root_val),
     };
 
     let proof = BACKEND.prove_batch(&batch).expect("ZK prove failed");

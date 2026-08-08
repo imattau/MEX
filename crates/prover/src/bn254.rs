@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::{DEXTradeCircuit, TradeBatch};
+use crate::{DEXBatchCircuit, TradeBatch, MAX_BATCH_TRADES};
 use crate::backend::ProverBackend;
 
 fn bytes_to_fe(data: &[u8; 32]) -> Fr {
@@ -55,17 +55,69 @@ fn g2_to_tuple(point: &G2Affine) -> serde_json::Value {
     ])
 }
 
-fn setup_circuit() -> DEXTradeCircuit<Fr> {
-    DEXTradeCircuit {
-        maker_balance_pre: Some(Fr::from(1u64)),
-        taker_balance_pre: Some(Fr::from(1u64)),
-        amount: Some(Fr::from(1u64)),
-        price: Some(Fr::from(1u64)),
-        maker_balance_post: Some(Fr::from(2u64)),
-        taker_balance_post: Some(Fr::from(0u64)),
-        pre_state_root: Some(Fr::from(0u64)),
-        post_state_root: Some(Fr::from(0u64)),
+// Builds a full, self-consistent MAX_BATCH_TRADES-slot circuit instance
+// from a (possibly shorter) list of (amount, price) trades, a starting
+// maker/taker balance, and a starting root. Trades beyond `trades.len()`
+// are padded with (0, 0) -- true no-ops for both balances and the root
+// (see DEXBatchCircuit's docs). Used by both setup_circuit (an arbitrary
+// but internally consistent dummy instance, needed only to fix the
+// circuit's shape for the one-time trusted setup) and prove_batch (the
+// real thing).
+fn padded_witness(trades: &[(u64, u64)], maker_balance: u64, taker_balance: u64, pre_root: Fr) -> DEXBatchCircuit<Fr> {
+    assert!(trades.len() <= MAX_BATCH_TRADES, "padded_witness caller must enforce the batch-size limit itself");
+
+    let mut maker_pre = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut taker_pre = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut amount = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut price = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut maker_post = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut taker_post = Vec::with_capacity(MAX_BATCH_TRADES);
+    let mut intermediate_roots = Vec::with_capacity(MAX_BATCH_TRADES.saturating_sub(1));
+
+    let mut maker_bal = Fr::from(maker_balance);
+    let mut taker_bal = Fr::from(taker_balance);
+    let mut root = pre_root;
+
+    for i in 0..MAX_BATCH_TRADES {
+        let (amt_u64, prc_u64) = trades.get(i).copied().unwrap_or((0, 0));
+        let amt = Fr::from(amt_u64);
+        let prc = Fr::from(prc_u64);
+        let val = amt * prc;
+        let m_post = maker_bal + val;
+        let t_post = taker_bal - val;
+
+        maker_pre.push(Some(maker_bal));
+        taker_pre.push(Some(taker_bal));
+        amount.push(Some(amt));
+        price.push(Some(prc));
+        maker_post.push(Some(m_post));
+        taker_post.push(Some(t_post));
+
+        root += val;
+        if i < MAX_BATCH_TRADES - 1 {
+            intermediate_roots.push(Some(root));
+        }
+
+        maker_bal = m_post;
+        taker_bal = t_post;
     }
+
+    DEXBatchCircuit {
+        maker_balance_pre: maker_pre,
+        taker_balance_pre: taker_pre,
+        amount,
+        price,
+        maker_balance_post: maker_post,
+        taker_balance_post: taker_post,
+        intermediate_roots,
+        pre_state_root: Some(pre_root),
+        post_state_root: Some(root),
+    }
+}
+
+fn setup_circuit() -> DEXBatchCircuit<Fr> {
+    let dummy_trades = vec![(1u64, 1u64); MAX_BATCH_TRADES];
+    padded_witness(&dummy_trades, 10, 10, Fr::from(0u64))
 }
 
 struct SetupParams {
@@ -158,49 +210,28 @@ impl ProverBackend for Bn254Groth16Backend {
         if batch.trades.is_empty() {
             return Err("Empty batch".to_string());
         }
-        // The circuit's trusted setup is fixed to a single (amount, price) witness pair,
-        // so it can only bind the witness to real trade data for a single trade. Batches
-        // with more than one trade would have to fall back to a placeholder witness (as
-        // before), which proves nothing about the individual trades -- reject them instead
-        // of silently proving over fake data.
-        if batch.trades.len() != 1 {
+        if batch.trades.len() > MAX_BATCH_TRADES {
             return Err(format!(
-                "Circuit only supports single-trade batches, got {} trades",
+                "Batch of {} trades exceeds the circuit's max of {MAX_BATCH_TRADES}",
                 batch.trades.len()
             ));
         }
-        let trade = &batch.trades[0];
 
-        let total_value_u128 = trade.amount as u128 * trade.price as u128;
+        let mut total_value_u128 = 0u128;
+        for trade in &batch.trades {
+            total_value_u128 += trade.amount as u128 * trade.price as u128;
+        }
         if total_value_u128 > batch.taker_balance as u128 {
             return Err(format!(
-                "Insolvent trade: value {} exceeds taker balance {}",
+                "Insolvent batch: total value {} exceeds taker balance {}",
                 total_value_u128, batch.taker_balance
             ));
         }
 
-        let pre_balance = Fr::from(batch.maker_balance);
-        let taker_pre_balance = Fr::from(batch.taker_balance);
-
-        let amount = Fr::from(trade.amount as u64);
-        let price = Fr::from(trade.price as u64);
-        let total_value = amount * price;
-
-        let maker_post = pre_balance + total_value;
-        let taker_post = taker_pre_balance - total_value;
+        let trade_pairs: Vec<(u64, u64)> = batch.trades.iter().map(|t| (t.amount, t.price)).collect();
         let pre_root = bytes_to_fe(&batch.pre_state_root);
-        let post_root = pre_root + maker_post + taker_post;
-
-        let circuit = DEXTradeCircuit::<Fr> {
-            maker_balance_pre: Some(pre_balance),
-            taker_balance_pre: Some(taker_pre_balance),
-            amount: Some(amount),
-            price: Some(price),
-            maker_balance_post: Some(maker_post),
-            taker_balance_post: Some(taker_post),
-            pre_state_root: Some(pre_root),
-            post_state_root: Some(post_root),
-        };
+        let circuit = padded_witness(&trade_pairs, batch.maker_balance, batch.taker_balance, pre_root);
+        let post_root = circuit.post_state_root.expect("padded_witness always sets post_state_root");
 
         let pk = proving_key();
         let mut rng = OsRng;
@@ -212,7 +243,7 @@ impl ProverBackend for Bn254Groth16Backend {
             .serialize_compressed(&mut proof_bytes)
             .map_err(|e| format!("Proof serialization failed: {:?}", e))?;
 
-        let public_inputs = vec![maker_post, taker_post, pre_root, post_root];
+        let public_inputs = vec![pre_root, post_root];
         let mut public_bytes = Vec::new();
         for input in &public_inputs {
             let mut buf = Vec::new();
@@ -241,7 +272,7 @@ impl ProverBackend for Bn254Groth16Backend {
             Err(_) => return false,
         };
 
-        if batch.trades.is_empty() {
+        if batch.trades.is_empty() || batch.trades.len() > MAX_BATCH_TRADES {
             return false;
         }
 
@@ -250,15 +281,16 @@ impl ProverBackend for Bn254Groth16Backend {
             total_value_u128 += trade.amount as u128 * trade.price as u128;
         }
         if total_value_u128 > batch.taker_balance as u128 {
-            // Insolvent trade: taker_balance - total_value would wrap around the
+            // Insolvent batch: taker_balance - total_value would wrap around the
             // BN254 scalar field instead of underflowing, silently producing a
             // huge-but-"valid" post-balance. Reject before that can happen.
             return false;
         }
 
-        let pre_balance = Fr::from(batch.maker_balance);
-        let taker_pre_balance = Fr::from(batch.taker_balance);
-
+        // Padding trades contribute 0 to the root (see DEXBatchCircuit's
+        // docs), so replaying only the real trades here -- without needing
+        // to know or reproduce how many padding slots the prover used --
+        // gives exactly the same root the circuit computed.
         let mut total_value = Fr::from(0u64);
         for trade in &batch.trades {
             let amount = Fr::from(trade.amount as u64);
@@ -266,18 +298,14 @@ impl ProverBackend for Bn254Groth16Backend {
             total_value += amount * price;
         }
 
-        let expected_maker_post = pre_balance + total_value;
-        let expected_taker_post = taker_pre_balance - total_value;
         let expected_pre_root = bytes_to_fe(&batch.pre_state_root);
-        let expected_post_root = expected_pre_root + expected_maker_post + expected_taker_post;
+        let expected_post_root = expected_pre_root + total_value;
 
         if bytes_to_fe(&batch.post_state_root) != expected_post_root {
             return false;
         }
 
         let expected_inputs = vec![
-            expected_maker_post,
-            expected_taker_post,
             expected_pre_root,
             expected_post_root,
         ];
@@ -419,34 +447,34 @@ mod tests {
         result
     }
 
+    fn make_match(price: u64, amount: u64) -> Match {
+        Match {
+            maker_order_id: [1u8; 32],
+            taker_order_id: [2u8; 32],
+            maker_trader: [0u8; 32],
+            taker_trader: [0u8; 32],
+            price,
+            amount,
+            timestamp_us: 1700000000,
+            settlement_tier: SettlementPreference::Standard,
+            fee_basis_points: 5,
+            seller: [0u8; 32],
+            fee_payer: [0u8; 32],
+            symbol: "BTC-USD".to_string(),
+            assigned_node: [0u8; 32],
+            settlement_deadline: 0,
+        }
+    }
+
     #[test]
-    fn test_bn254_prove_and_verify() {
+    fn test_bn254_prove_and_verify_single_trade() {
         let maker_balance = 1_000_000u64;
         let taker_balance = 1_000_000u64;
-        let price = 3000u64;
-        let amount = 5u64;
-        let total_value = price * amount;
-        let maker_post = maker_balance + total_value;
-        let taker_post = taker_balance - total_value;
-        let post_root_val = maker_post + taker_post;
+        let total_value = 3000u64 * 5u64;
+        let post_root_val = total_value;
 
         let batch = TradeBatch {
-            trades: vec![Match {
-                maker_order_id: [1u8; 32],
-                taker_order_id: [2u8; 32],
-                maker_trader: [0u8; 32],
-                taker_trader: [0u8; 32],
-                price,
-                amount,
-                timestamp_us: 1700000000,
-                settlement_tier: SettlementPreference::Standard,
-                fee_basis_points: 5,
-                seller: [0u8; 32],
-                fee_payer: [0u8; 32],
-                symbol: "BTC-USD".to_string(),
-                assigned_node: [0u8; 32],
-                settlement_deadline: 0,
-            }],
+            trades: vec![make_match(3000, 5)],
             maker_balance,
             taker_balance,
             pre_state_root: [0u8; 32],
@@ -458,35 +486,76 @@ mod tests {
         assert!(backend.verify_proof(&proof, &batch));
     }
 
+    // The actual point of this whole rewrite: a batch of several distinct
+    // trades, proven under a single proof, must verify -- and the root
+    // must reflect the SUM of all real trades' values (not just the
+    // first, and not inflated by the padding slots the circuit uses
+    // internally to reach MAX_BATCH_TRADES).
+    #[test]
+    fn test_bn254_prove_and_verify_multi_trade_batch() {
+        let maker_balance = 1_000_000u64;
+        let taker_balance = 1_000_000u64;
+
+        let trades = vec![
+            make_match(3000, 5),
+            make_match(2950, 3),
+            make_match(3010, 7),
+        ];
+        let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
+
+        let batch = TradeBatch {
+            trades,
+            maker_balance,
+            taker_balance,
+            pre_state_root: [0u8; 32],
+            post_state_root: u64_to_bytes32(total_value),
+        };
+
+        let backend = Bn254Groth16Backend;
+        let proof = backend.prove_batch(&batch).unwrap();
+        assert!(backend.verify_proof(&proof, &batch), "a real multi-trade batch's proof must verify");
+
+        // Same proof, but checked against a batch missing one trade (a
+        // different, smaller total_value/post_state_root) -- must fail,
+        // proving the batch's root really is bound to ALL of its trades,
+        // not just however many the verifier happens to be told about.
+        let mut short_batch = batch.clone();
+        short_batch.trades.pop();
+        let short_total: u64 = short_batch.trades.iter().map(|t| t.price * t.amount).sum();
+        short_batch.post_state_root = u64_to_bytes32(short_total);
+        assert!(
+            !backend.verify_proof(&proof, &short_batch),
+            "a proof for 3 trades must not verify against a claimed 2-trade batch"
+        );
+    }
+
+    #[test]
+    fn test_bn254_batch_over_max_size_rejected() {
+        let maker_balance = 10_000_000u64;
+        let taker_balance = 10_000_000u64;
+        let trades: Vec<Match> = (0..(MAX_BATCH_TRADES + 1)).map(|_| make_match(10, 1)).collect();
+
+        let batch = TradeBatch {
+            trades,
+            maker_balance,
+            taker_balance,
+            pre_state_root: [0u8; 32],
+            post_state_root: [0u8; 32],
+        };
+
+        let backend = Bn254Groth16Backend;
+        assert!(backend.prove_batch(&batch).is_err());
+    }
+
     #[test]
     fn test_decode_proof_calldata_matches_public_inputs() {
         let maker_balance = 1_000_000u64;
         let taker_balance = 1_000_000u64;
-        let price = 3000u64;
-        let amount = 5u64;
-        let total_value = price * amount;
-        let maker_post = maker_balance + total_value;
-        let taker_post = taker_balance - total_value;
         let pre_root = 0u64;
-        let post_root_val = maker_post + taker_post;
+        let post_root_val = 3000u64 * 5u64;
 
         let batch = TradeBatch {
-            trades: vec![Match {
-                maker_order_id: [1u8; 32],
-                taker_order_id: [2u8; 32],
-                maker_trader: [0u8; 32],
-                taker_trader: [0u8; 32],
-                price,
-                amount,
-                timestamp_us: 1700000000,
-                settlement_tier: SettlementPreference::Standard,
-                fee_basis_points: 5,
-                seller: [0u8; 32],
-                fee_payer: [0u8; 32],
-                symbol: "BTC-USD".to_string(),
-                assigned_node: [0u8; 32],
-                settlement_deadline: 0,
-            }],
+            trades: vec![make_match(3000, 5)],
             maker_balance,
             taker_balance,
             pre_state_root: [0u8; 32],
@@ -497,15 +566,12 @@ mod tests {
         let proof = backend.prove_batch(&batch).unwrap();
         let calldata = decode_proof_calldata(&proof).unwrap();
 
-        // 4 public inputs: maker_post, taker_post, pre_root, post_root (see
-        // prove_batch's `public_inputs` vec) -- each a big-endian uint256
-        // matching the plaintext u64 values used to build this batch, since
-        // none of them come close to wrapping the scalar field here.
-        assert_eq!(calldata.public_inputs.len(), 4);
-        assert_eq!(calldata.public_inputs[0], u64_to_bytes32(maker_post));
-        assert_eq!(calldata.public_inputs[1], u64_to_bytes32(taker_post));
-        assert_eq!(calldata.public_inputs[2], u64_to_bytes32(pre_root));
-        assert_eq!(calldata.public_inputs[3], u64_to_bytes32(post_root_val));
+        // 2 public inputs: pre_root, post_root (see prove_batch's
+        // `public_inputs` vec and DEXBatchCircuit's docs for why
+        // per-trade balances are no longer public).
+        assert_eq!(calldata.public_inputs.len(), 2);
+        assert_eq!(calldata.public_inputs[0], u64_to_bytes32(pre_root));
+        assert_eq!(calldata.public_inputs[1], u64_to_bytes32(post_root_val));
 
         // a/c are G1 points (non-infinity for a real proof); b is G2. Just
         // assert they're non-zero -- an actual pairing-check round trip

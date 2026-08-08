@@ -155,9 +155,9 @@ mod tests {
         let price = 3000u64;
         let amount = 5u64;
         let total_value = price * amount;
-        let maker_post = maker_balance + total_value;
-        let taker_post = taker_balance - total_value;
-        let post_root_val = maker_post + taker_post;
+        // Root = sum of each trade's (amount * price), not maker_post +
+        // taker_post -- see prover::DEXBatchCircuit's docs.
+        let post_root_val = total_value;
 
         TradeBatch {
             trades: vec![Match {

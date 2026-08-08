@@ -8,8 +8,8 @@ pub trait ProverBackend: Send + Sync {
 }
 
 use ark_ff::PrimeField;
-use crate::DEXTradeCircuit;
+use crate::DEXBatchCircuit;
 
 pub trait CircuitVerifier {
-    fn verify_constraints<F: PrimeField>(circuit: DEXTradeCircuit<F>) -> bool;
+    fn verify_constraints<F: PrimeField>(circuit: DEXBatchCircuit<F>) -> bool;
 }

@@ -1,10 +1,11 @@
 // Live, one-shot proof of the full ZK pipeline against a real chain: builds
-// a TradeBatch, generates a real Groth16 proof for it via the same
-// Bn254Groth16Backend used in production, and submits it directly to a
-// deployed BatchVerifier's verifyProof -- bypassing SettlementFactory's
-// escrow/trade bookkeeping entirely, since the only thing being tested here
-// is whether a real proof against a real deployed verifying key actually
-// passes the on-chain pairing check (or correctly fails a tampered one).
+// a multi-trade TradeBatch, generates a real Groth16 proof covering all of
+// it via the same Bn254Groth16Backend used in production, and submits it
+// directly to a deployed BatchVerifier's verifyProof -- bypassing
+// SettlementFactory's escrow/trade bookkeeping entirely, since the only
+// thing being tested here is whether a real batch proof against a real
+// deployed verifying key actually passes the on-chain pairing check (or
+// correctly fails a tampered one).
 //
 // Usage: cargo run -p prover --bin verify_onchain_smoke -- <rpc_url> <private_key> <batch_verifier_address>
 
@@ -35,35 +36,39 @@ fn u64_to_bytes32(val: u64) -> [u8; 32] {
     result
 }
 
+// A real MULTI-trade batch (not just one) -- this is the actual thing
+// being validated here: one proof, covering several distinct trades
+// between the same maker/taker pair, verified in a single on-chain call.
 fn build_batch() -> TradeBatch {
     let maker_balance = 1_000_000u64;
     let taker_balance = 1_000_000u64;
-    let price = 3000u64;
-    let amount = 5u64;
-    let total_value = price * amount;
-    let post_root_val = (maker_balance + total_value) + (taker_balance - total_value);
+
+    let trade_terms = [(3000u64, 5u64), (2950u64, 3u64), (3010u64, 7u64)];
+    let make_match = |price: u64, amount: u64, i: usize| Match {
+        maker_order_id: [i as u8 + 1; 32],
+        taker_order_id: [i as u8 + 100; 32],
+        maker_trader: [0u8; 32],
+        taker_trader: [0u8; 32],
+        price,
+        amount,
+        timestamp_us: 1_700_000_000,
+        settlement_tier: SettlementPreference::Standard,
+        fee_basis_points: 5,
+        seller: [0u8; 32],
+        fee_payer: [0u8; 32],
+        symbol: "ETH-USD".to_string(),
+        assigned_node: [0u8; 32],
+        settlement_deadline: 0,
+    };
+    let trades: Vec<Match> = trade_terms.iter().enumerate().map(|(i, &(p, a))| make_match(p, a, i)).collect();
+    let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
 
     TradeBatch {
-        trades: vec![Match {
-            maker_order_id: [1u8; 32],
-            taker_order_id: [2u8; 32],
-            maker_trader: [0u8; 32],
-            taker_trader: [0u8; 32],
-            price,
-            amount,
-            timestamp_us: 1_700_000_000,
-            settlement_tier: SettlementPreference::Standard,
-            fee_basis_points: 5,
-            seller: [0u8; 32],
-            fee_payer: [0u8; 32],
-            symbol: "ETH-USD".to_string(),
-            assigned_node: [0u8; 32],
-            settlement_deadline: 0,
-        }],
+        trades,
         maker_balance,
         taker_balance,
         pre_state_root: [0u8; 32],
-        post_state_root: u64_to_bytes32(post_root_val),
+        post_state_root: u64_to_bytes32(total_value),
     }
 }
 

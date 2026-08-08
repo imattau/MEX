@@ -210,12 +210,15 @@ mod node_attacks {
             settlement_deadline: 0,
         };
 
+        // Root = sum of each trade's (amount * price), not maker_balance +
+        // taker_balance -- see prover::DEXBatchCircuit's docs.
+        let post_root_val = fake_trade.amount * fake_trade.price;
         let batch = TradeBatch {
             trades: vec![fake_trade],
             maker_balance: 1_000_000,
             taker_balance: 1_000_000_000,
             pre_state_root: [0u8; 32],
-            post_state_root: u64_to_bytes32(1_000_000 + 1_000_000_000),
+            post_state_root: u64_to_bytes32(post_root_val),
         };
 
         // The ZK prover accepts ANY batch — it only proves balance conservation
