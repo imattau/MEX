@@ -1,0 +1,38 @@
+simulation:
+  engine_url: "http://127.0.0.1:9876"
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "qwen3:1.7b"
+  timeout_seconds: 120
+  temperature: 0.7
+  num_predict: 512
+
+simulation_loop:
+  total_steps: 100
+  step_delay_seconds: 0.1
+
+memory:
+  db_path: "./agent_memory"
+  collection_name: "agent_observations"
+  max_context_entries: 20
+
+agents:
+  market_maker_1:
+    persona: "market_maker"
+    name: "Athena MM"
+  market_maker_2:
+    persona: "market_maker"
+    name: "Hermes MM"
+  momentum_1:
+    persona: "momentum_trader"
+    name: "Zeus Momentum"
+  momentum_2:
+    persona: "momentum_trader"
+    name: "Ares Momentum"
+  mean_reversion_1:
+    persona: "mean_reversion"
+    name: "Hades Reversion"
+  mean_reversion_2:
+    persona: "mean_reversion"
+    name: "Demeter Reversion"

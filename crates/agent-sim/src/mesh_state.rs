@@ -557,7 +557,15 @@ impl MultiNodeSimulation {
         }
     }
 
+    // noise_amplitude <= 0.0 fully disables noise injection (no orders
+    // generated at all), rather than just zeroing price variance -- callers
+    // that want a deterministic book with only their own orders (e.g. to
+    // force two specific agents to cross each other) rely on this.
     pub fn inject_noise(&mut self, rng: &mut impl Rng, noise_amplitude: f64) {
+        if noise_amplitude <= 0.0 {
+            return;
+        }
+
         let mid = self.mid_price().unwrap_or(3000.0);
 
         for node in &mut self.nodes {

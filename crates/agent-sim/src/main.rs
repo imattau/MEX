@@ -58,6 +58,13 @@ async fn main() {
     });
 
     sim.register_agent(AgentConfig {
+        id: "market_maker_2".to_string(),
+        name: "Hermes MM".to_string(),
+        persona: "market_maker".to_string(),
+        initial_capital: 1_000_000,
+    });
+
+    sim.register_agent(AgentConfig {
         id: "momentum_1".to_string(),
         name: "Zeus Momentum".to_string(),
         persona: "momentum_trader".to_string(),
@@ -65,8 +72,22 @@ async fn main() {
     });
 
     sim.register_agent(AgentConfig {
+        id: "momentum_2".to_string(),
+        name: "Ares Momentum".to_string(),
+        persona: "momentum_trader".to_string(),
+        initial_capital: 500_000,
+    });
+
+    sim.register_agent(AgentConfig {
         id: "mean_reversion_1".to_string(),
         name: "Hades Reversion".to_string(),
+        persona: "mean_reversion".to_string(),
+        initial_capital: 500_000,
+    });
+
+    sim.register_agent(AgentConfig {
+        id: "mean_reversion_2".to_string(),
+        name: "Demeter Reversion".to_string(),
         persona: "mean_reversion".to_string(),
         initial_capital: 500_000,
     });
