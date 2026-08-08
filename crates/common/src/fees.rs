@@ -1,12 +1,41 @@
 use crate::types::SettlementPreference;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FeeCalculator {
+    // Caller-updated, not live-polled: this crate is chain-agnostic and has
+    // no RPC access of its own. Whoever operates a node (and does have
+    // chain access) is responsible for periodically refreshing this from a
+    // real gas price if they want fees to actually track it -- see
+    // OrderBook::set_fee_calculator.
     pub base_gas_price: u64,
+    // The operator's configured/expected batch fill ratio (e.g.
+    // typical_batch_size / MAX_BATCH_TRADES), not a live per-trade value.
+    // It can't be: fee_basis_points is decided when a trade is matched,
+    // before the trade is committed and long before a node has decided
+    // which other trades it'll batch this one with -- there is no "actual"
+    // batch utilization to observe yet at this point, only an expectation.
     pub batch_utilization: f64,
+    // Similarly caller-configured, not fed by a real market-volatility
+    // oracle (none exists in this codebase yet).
     pub volatility_index: f64,
 }
 
 const BASELINE_GAS_GWEI: u64 = 50;
+
+impl Default for FeeCalculator {
+    // The neutral configuration: gas price at baseline, no batching
+    // discount assumed, no volatility premium. calculate_fee_basis_points
+    // under these settings reduces to exactly tier.fee_basis_points() --
+    // i.e. today's fixed 5/15/50 bps schedule -- so using this by default
+    // changes nothing for callers that never configure a FeeCalculator.
+    fn default() -> Self {
+        Self {
+            base_gas_price: BASELINE_GAS_GWEI,
+            batch_utilization: 0.0,
+            volatility_index: 0.0,
+        }
+    }
+}
 
 impl FeeCalculator {
     pub fn new(base_gas_price: u64, batch_utilization: f64, volatility_index: f64) -> Self {
@@ -63,6 +92,27 @@ impl FeeCalculator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The property everything wiring FeeCalculator into production code
+    // depends on: an unconfigured (Default) calculator must charge exactly
+    // what the old hardcoded static schedule charged, for every tier, so
+    // adopting it changes nothing for callers that don't explicitly
+    // configure gas price / batch utilization / volatility.
+    #[test]
+    fn test_default_calculator_matches_static_schedule() {
+        let calc = FeeCalculator::default();
+        for tier in [
+            SettlementPreference::Standard,
+            SettlementPreference::Express,
+            SettlementPreference::Instant,
+        ] {
+            assert_eq!(
+                calc.calculate_fee_basis_points(tier),
+                tier.fee_basis_points(),
+                "default FeeCalculator must reproduce the static schedule for {tier:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_default_fee_basis_points() {

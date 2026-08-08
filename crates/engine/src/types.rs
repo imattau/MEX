@@ -1,4 +1,4 @@
-use common::{Order, SettlementPreference};
+use common::{FeeCalculator, Order, SettlementPreference};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -27,4 +27,8 @@ pub struct OrderBook {
     pub node_rewards: u64,
     pub(crate) active_nodes: Vec<[u8; 32]>,
     pub(crate) next_node_index: usize,
+    // Defaults (via FeeCalculator::default()) to exactly the old fixed
+    // 5/15/50 bps schedule -- see set_fee_calculator to make fees actually
+    // respond to real gas price / expected batch efficiency.
+    pub fee_calculator: FeeCalculator,
 }

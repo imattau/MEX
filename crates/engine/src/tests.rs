@@ -23,6 +23,29 @@ mod tests {
         }
     }
 
+    // The actual point of wiring FeeCalculator in: an OrderBook configured
+    // with a non-default calculator must charge a genuinely different fee
+    // than the old fixed 5/15/50 bps schedule, not silently ignore it.
+    #[test]
+    fn test_configured_fee_calculator_changes_match_fee() {
+        let mut default_book = OrderBook::new("ETH-USD".to_string());
+        default_book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
+        let default_matches = default_book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+        assert_eq!(default_matches[0].fee_basis_points, 5, "default calculator must match the old static Standard-tier rate");
+
+        let mut configured_book = OrderBook::new("ETH-USD".to_string());
+        // 2x the baseline gas price, no batching discount, no volatility --
+        // gas_multiplier alone should exactly double the Standard rate.
+        configured_book.set_fee_calculator(common::FeeCalculator::new(100, 0.0, 0.0));
+        configured_book.add_order(create_test_order(3, OrderSide::Buy, 3000, 10));
+        let configured_matches = configured_book.add_order(create_test_order(4, OrderSide::Sell, 3000, 10));
+        assert_eq!(configured_matches[0].fee_basis_points, 10, "2x gas price must double the fee rate");
+        assert_ne!(
+            configured_matches[0].fee_basis_points, default_matches[0].fee_basis_points,
+            "a configured FeeCalculator must actually change the charged fee, not be silently ignored"
+        );
+    }
+
     #[test]
     fn test_empty_book_add() {
         let mut book = OrderBook::new("ETH-USD".to_string());

@@ -11,7 +11,18 @@ impl OrderBook {
             node_rewards: 0,
             active_nodes: Vec::new(),
             next_node_index: 0,
+            fee_calculator: FeeCalculator::default(),
         }
+    }
+
+    // Configures fees to actually respond to gas price / expected batch
+    // efficiency / volatility instead of the fixed 5/15/50 bps schedule
+    // FeeCalculator::default() reproduces. Callers with real chain access
+    // (this crate has none -- see FeeCalculator's docs) are responsible
+    // for keeping base_gas_price current if they want that part to mean
+    // anything.
+    pub fn set_fee_calculator(&mut self, calc: FeeCalculator) {
+        self.fee_calculator = calc;
     }
 
     // Replaces the set of nodes eligible for assignment to a new match.
@@ -93,9 +104,9 @@ impl OrderBook {
                         maker_order.amount -= match_amount;
 
                         let (tier, fee_bps, seller, fee_payer, deadline) =
-                            Self::resolve_settlement_params(&order, maker_order, now_secs);
+                            Self::resolve_settlement_params(&order, maker_order, now_secs, &self.fee_calculator);
 
-                        let fee = FeeCalculator::compute_fee_amount(
+                        let fee = self.fee_calculator.compute_fee_amount_dynamic(
                             match_amount, ask_price, tier,
                         );
                         self.node_rewards += fee as u64;
@@ -181,9 +192,9 @@ impl OrderBook {
                             maker_order.amount -= match_amount;
 
                             let (tier, fee_bps, seller, fee_payer, deadline) =
-                                Self::resolve_settlement_params(&order, maker_order, now_secs);
+                                Self::resolve_settlement_params(&order, maker_order, now_secs, &self.fee_calculator);
 
-                            let fee = FeeCalculator::compute_fee_amount(
+                            let fee = self.fee_calculator.compute_fee_amount_dynamic(
                                 match_amount, bid_price, tier,
                             );
                             self.node_rewards += fee as u64;
@@ -237,6 +248,7 @@ impl OrderBook {
         taker_order: &Order,
         maker_order: &Order,
         now_secs: u64,
+        fee_calculator: &FeeCalculator,
     ) -> (SettlementPreference, u32, [u8; 32], [u8; 32], u64) {
         let sell_order = if taker_order.side == OrderSide::Sell {
             taker_order
@@ -259,7 +271,7 @@ impl OrderBook {
             }
         };
 
-        let fee_bps = tier.fee_basis_points();
+        let fee_bps = fee_calculator.calculate_fee_basis_points(tier);
         let deadline = now_secs + tier.deadline_seconds();
 
         (tier, fee_bps, sell_order.trader, fee_payer, deadline)
