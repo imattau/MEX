@@ -25,6 +25,11 @@ sol! {
         function commitTrade(TradeEntry calldata trade) external;
         function claimSlash(bytes32[] calldata tradeHashes) external;
     }
+
+    #[sol(rpc)]
+    interface ITraderEscrowDeposit {
+        function deposit(address token, uint256 amount) external payable;
+    }
 }
 
 // A trader's own signing client: holds the trader's own Ethereum key and
@@ -123,6 +128,46 @@ impl TraderClient {
             .call()
             .await
             .map_err(|e| format!("getEscrow call failed: {e}"))
+    }
+
+    // Deposits native ETH into this trader's own escrow (ensure_escrow must
+    // have already been called -- this fails if no escrow exists yet).
+    //
+    // Deliberately sends through this client's own `self.provider` rather
+    // than a freshly constructed one. alloy's nonce filler resolves an
+    // account's next nonce once per provider instance (via
+    // eth_getTransactionCount) and then tracks it locally from there; a
+    // second, independent provider signing for the same account desyncs
+    // that local count from actual chain state as soon as either provider
+    // sends a transaction the other doesn't know about. A caller that
+    // built its own throwaway provider to deposit, separate from the
+    // provider a TraderClient goes on to reuse for every later
+    // commitTrade/claimSlash, was hitting exactly that: the first
+    // commitTrade after such a deposit would reuse a stale cached nonce
+    // and get rejected with "nonce too low". Routing every transaction for
+    // this trader through the one provider avoids the desync entirely.
+    pub async fn deposit_native(&self, amount_wei: U256) -> Result<(), String> {
+        let factory = ISettlementFactoryTrader::new(self.factory_address, &self.provider);
+        let escrow_address = factory
+            .getEscrow(self.own_address)
+            .call()
+            .await
+            .map_err(|e| format!("getEscrow call failed: {e}"))?;
+        if escrow_address == Address::ZERO {
+            return Err("no escrow exists for this trader yet -- call ensure_escrow first".to_string());
+        }
+
+        let escrow = ITraderEscrowDeposit::new(escrow_address, &self.provider);
+        escrow
+            .deposit(Address::ZERO, amount_wei)
+            .value(amount_wei)
+            .send()
+            .await
+            .map_err(|e| format!("deposit send failed: {e}"))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("deposit receipt failed: {e}"))?;
+        Ok(())
     }
 
     // Resolves a counterparty's Ethereum address from their off-chain

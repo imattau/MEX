@@ -107,13 +107,9 @@ pub async fn bootstrap(
         .await?;
 
         client.ensure_escrow().await?;
-        deposit_native(
-            &config.rpc_url,
-            &agent_private_key,
-            &config.factory_address,
-            AGENT_DEPOSIT_ETH,
-        )
-        .await?;
+        client
+            .deposit_native(U256::from(parse_eth(AGENT_DEPOSIT_ETH)))
+            .await?;
 
         tracing::info!(
             agent_id,
@@ -179,61 +175,6 @@ async fn fund_address<P: Provider>(
         .get_receipt()
         .await
         .map_err(|e| format!("funding transfer receipt failed: {e}"))?;
-    Ok(())
-}
-
-async fn deposit_native(
-    rpc_url: &str,
-    private_key: &str,
-    factory_address: &str,
-    eth_amount: &str,
-) -> Result<(), String> {
-    // Depositing is a TraderEscrow action, not exposed on TraderClient
-    // (which only covers commitTrade/claimSlash -- see its docs). Do it
-    // directly here with the same signer, mirroring how the live tests
-    // built while developing trader-client funded escrows.
-    use alloy::sol;
-
-    sol! {
-        #[sol(rpc)]
-        interface ISettlementFactoryLookup {
-            function getEscrow(address trader) external view returns (address);
-        }
-        #[sol(rpc)]
-        interface ITraderEscrowDeposit {
-            function deposit(address token, uint256 amount) external payable;
-        }
-    }
-
-    let signer: PrivateKeySigner = private_key
-        .parse()
-        .map_err(|e| format!("invalid private key: {e}"))?;
-    let own_address = signer.address();
-    let wallet = EthereumWallet::from(signer);
-    let url = rpc_url.parse().map_err(|e| format!("invalid RPC URL: {e}"))?;
-    let provider = ProviderBuilder::new().wallet(wallet).connect_http(url).erased();
-
-    let factory: Address = factory_address
-        .parse()
-        .map_err(|e| format!("invalid factory address: {e}"))?;
-    let factory_contract = ISettlementFactoryLookup::new(factory, &provider);
-    let escrow_address = factory_contract
-        .getEscrow(own_address)
-        .call()
-        .await
-        .map_err(|e| format!("getEscrow failed: {e}"))?;
-
-    let amount = U256::from(parse_eth(eth_amount));
-    let escrow = ITraderEscrowDeposit::new(escrow_address, &provider);
-    escrow
-        .deposit(Address::ZERO, amount)
-        .value(amount)
-        .send()
-        .await
-        .map_err(|e| format!("deposit send failed: {e}"))?
-        .get_receipt()
-        .await
-        .map_err(|e| format!("deposit receipt failed: {e}"))?;
     Ok(())
 }
 
