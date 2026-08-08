@@ -152,6 +152,11 @@ pub struct MeshNode {
     tx: mpsc::Sender<(NodeId, FloodMessage)>,
     echo_rx: mpsc::Receiver<(NodeId, Vec<[u8; 32]>)>,
     echo_tx: mpsc::Sender<(NodeId, Vec<[u8; 32]>)>,
+    settlement_tx: mpsc::Sender<(NodeId, prover::TradeBatch, Vec<u8>)>,
+    // Taken once via settlement_proof_receiver(), before run() consumes
+    // self -- mirrors how sender() exposes tx for injection, but in the
+    // opposite direction (received-from-network, not injected-by-us).
+    settlement_rx: Option<mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)>>,
 }
 
 pub struct MeshConfig {
@@ -222,6 +227,7 @@ impl MeshNode {
 
         let (tx, rx) = mpsc::channel(1024);
         let (echo_tx, echo_rx) = mpsc::channel(256);
+        let (settlement_tx, settlement_rx) = mpsc::channel(64);
 
         Ok(Self {
             node_id: config.node_id,
@@ -239,6 +245,8 @@ impl MeshNode {
             tx,
             echo_rx,
             echo_tx,
+            settlement_tx,
+            settlement_rx: Some(settlement_rx),
         })
     }
 
@@ -246,9 +254,32 @@ impl MeshNode {
         self.tx.clone()
     }
 
+    // Every WireMessage::SettlementProof this node receives from a peer,
+    // for a caller (e.g. a watchtower loop) to independently re-verify --
+    // see WireMessage::SettlementProof's docs. Must be called before
+    // run(), which consumes self; panics if called twice.
+    pub fn settlement_proof_receiver(&mut self) -> mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)> {
+        self.settlement_rx.take().expect("settlement_proof_receiver already taken")
+    }
+
+    // Direct handle to this node's transport, for a caller that needs to
+    // send something MeshNode's own run() loop doesn't originate itself
+    // (e.g. broadcasting a SettlementProof to every configured peer) --
+    // both UdpTransport::send/recv take &self, so sharing this alongside
+    // run()'s own background tasks is safe (see this struct's docs on
+    // `transport`).
+    pub fn transport(&self) -> Arc<UdpTransport> {
+        self.transport.clone()
+    }
+
+    pub fn peer_ids(&self) -> Vec<NodeId> {
+        self.peer_addrs.keys().copied().collect()
+    }
+
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let tx = self.tx.clone();
         let echo_tx = self.echo_tx.clone();
+        let settlement_tx = self.settlement_tx.clone();
         let mesh_key = self.mesh_key;
 
         let recv_transport = self.transport.clone();
@@ -289,6 +320,9 @@ impl MeshNode {
                             tracing::trace!(?node_id, "Unsigned heartbeat");
                         }
                         WireMessage::Ack { .. } => {}
+                        WireMessage::SettlementProof { batch, proof } => {
+                            let _ = settlement_tx.send((from, batch, proof)).await;
+                        }
                     },
                     Err(e) => {
                         tracing::error!(error = %e, "Recv failed");

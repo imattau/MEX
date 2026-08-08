@@ -216,9 +216,11 @@ async fn main() {
                 std::process::exit(1);
             });
             let sender = mesh_node.sender();
+            let transport = mesh_node.transport();
+            let peer_ids = mesh_node.peer_ids();
             tokio::spawn(mesh_node.run());
             tracing::info!(mesh_node_id, %listen_addr, "gossip mesh enabled");
-            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender })
+            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids })
         }
         Err(_) => None,
     };

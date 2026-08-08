@@ -99,6 +99,14 @@ pub struct MeshHandle {
     pub node_id: common::NodeId,
     pub region: common::Region,
     pub sender: mpsc::Sender<(common::NodeId, common::FloodMessage)>,
+    // Stage C: direct handle for broadcasting a settlement proof to every
+    // configured peer -- not routed through `sender`/on_receive, since
+    // that path's flood-forwarding semantics (dedup by order id, hop
+    // limits) are Order-specific and settlement proofs are sent directly
+    // to known peers, not multi-hop propagated (see
+    // protocol::WireMessage::SettlementProof's docs).
+    pub transport: std::sync::Arc<protocol::UdpTransport>,
+    pub peer_ids: Vec<common::NodeId>,
 }
 
 fn setup_metrics() {

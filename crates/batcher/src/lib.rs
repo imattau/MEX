@@ -9,6 +9,12 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+fn u64_to_bytes32(val: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..32].copy_from_slice(&val.to_be_bytes());
+    out
+}
+
 pub struct SettlementBatcher {
     standard_queue: VecDeque<Match>,
     express_queue: VecDeque<Match>,
@@ -205,6 +211,7 @@ impl SettlementBatcher {
         let mut proven_trades = Vec::with_capacity(trades.len());
         let mut proofs = Vec::new();
         let mut proof_trade_counts = Vec::new();
+        let mut trade_batches = Vec::new();
         let mut total_value: u64 = 0;
 
         for chunk in trades.chunks(MAX_BATCH_TRADES) {
@@ -239,12 +246,26 @@ impl SettlementBatcher {
                 continue;
             }
 
+            // prove_batch ignores this field entirely -- it computes the
+            // real post_state_root itself from the circuit witness (see
+            // padded_witness) and only USES pre_state_root as an input,
+            // so setting this wrong never affected the proof this crate
+            // actually produces or what settleBatchWithFees accepts
+            // on-chain. It matters for anyone independently re-verifying
+            // the proof afterward: verify_proof recomputes its own
+            // expected post_state_root from pre_state_root + the trades
+            // and rejects the batch if this field doesn't match that --
+            // a placeholder [0u8; 32] here made every batch this
+            // produced fail that check, undetected until something
+            // actually called verify_proof against a real batch (see
+            // watchtower_node, added in the same change as this fix).
+            let chunk_total_value: u64 = chunk_trades.iter().map(|t| t.price as u64 * t.amount as u64).sum();
             let batch = TradeBatch {
                 trades: chunk_trades.clone(),
                 maker_balances: chunk_maker_balances,
                 taker_balances: chunk_taker_balances,
                 pre_state_root: [0u8; 32],
-                post_state_root: [0u8; 32],
+                post_state_root: u64_to_bytes32(chunk_total_value),
             };
 
             match self.prover.prove_batch(&batch) {
@@ -297,6 +318,7 @@ impl SettlementBatcher {
                     proof_trade_counts.push(chunk_trades.len());
                     proven_trades.extend(chunk_trades);
                     proofs.push(proof);
+                    trade_batches.push(batch);
                 }
                 Err(reason) => {
                     tracing::warn!(
@@ -313,6 +335,7 @@ impl SettlementBatcher {
             total_value,
             proofs,
             proof_trade_counts,
+            trade_batches,
         }
     }
 }
@@ -337,6 +360,13 @@ pub struct SettlementBatch {
     pub total_value: u64,
     pub proofs: Vec<Vec<u8>>,
     pub proof_trade_counts: Vec<usize>,
+    // The exact TradeBatch (trades + balances + roots) used to generate
+    // each proofs[i] -- same length/order as proofs. Needed by anything
+    // independently re-verifying a proof (see
+    // watchtower::WatchtowerClient::monitor_batch), since verify_proof
+    // needs the same batch data the proof was generated against, not
+    // just the trades that ended up settled.
+    pub trade_batches: Vec<TradeBatch>,
 }
 
 #[cfg(test)]
@@ -464,6 +494,35 @@ mod tests {
         let batches = batcher.process_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].trades.len(), 3);
+    }
+
+    // Regression test for a real bug: build_batch used to hardcode
+    // post_state_root to [0u8; 32] on every TradeBatch it produced.
+    // prove_batch never noticed (it computes the real root itself and
+    // ignores this field) so every proof this crate ever generated was
+    // still valid -- but ANYONE independently re-verifying a real
+    // batcher-produced batch via ProverBackend::verify_proof would always
+    // get `false`, since verify_proof recomputes its own expected root
+    // from pre_state_root + the trades and compares it against this
+    // field. Caught live by Stage C's watchtower_node reporting every
+    // real settlement as fraudulent when it wasn't.
+    #[test]
+    fn test_produced_batch_passes_independent_verification() {
+        let mut batcher = SettlementBatcher::new();
+        batcher.deposit([2u8; 32], "BTC-USD", 1_000_000);
+        batcher.enqueue(make_match(SettlementPreference::Instant, 1));
+
+        let batches = batcher.process_batches();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.trade_batches.len(), 1, "one proof chunk should produce one TradeBatch");
+
+        let trade_batch = &batch.trade_batches[0];
+        let proof = &batch.proofs[0];
+        assert!(
+            BACKEND.verify_proof(proof, trade_batch),
+            "a batch this crate just produced and proved must pass independent re-verification against itself"
+        );
     }
 
     #[test]

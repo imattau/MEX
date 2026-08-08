@@ -76,7 +76,9 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
 
         for batch in batches {
             let mut idx = 0;
-            for (proof, &count) in batch.proofs.iter().zip(&batch.proof_trade_counts) {
+            for ((proof, &count), trade_batch) in
+                batch.proofs.iter().zip(&batch.proof_trade_counts).zip(&batch.trade_batches)
+            {
                 let chunk = &batch.trades[idx..idx + count];
                 idx += count;
 
@@ -90,7 +92,10 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                             .submit_settlement_batch(&settlement_trades, proof, fee_config)
                             .await
                         {
-                            Ok(tx) => tracing::info!(tx, trades = settlement_trades.len(), "settled a batch chunk on-chain"),
+                            Ok(tx) => {
+                                tracing::info!(tx, trades = settlement_trades.len(), "settled a batch chunk on-chain");
+                                broadcast_settlement_proof(&state, trade_batch, proof).await;
+                            }
                             Err(e) => tracing::error!(error = %e, "settleBatchWithFees failed for a chunk"),
                         }
                     }
@@ -99,6 +104,36 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                     }
                 }
             }
+        }
+    }
+}
+
+// Broadcasts the exact TradeBatch + proof just submitted on-chain to
+// every configured mesh peer, so each can independently re-verify it
+// (watchtower::WatchtowerClient::monitor_batch) instead of trusting this
+// node's own self-report. Only broadcast AFTER a successful on-chain
+// submission -- a failed submission never happened as far as settlement
+// is concerned, so there's nothing real to verify yet.
+async fn broadcast_settlement_proof(
+    state: &Arc<RwLock<AppState>>,
+    trade_batch: &prover::TradeBatch,
+    proof: &[u8],
+) {
+    let mesh = {
+        let guard = state.read().unwrap();
+        match &guard.mesh {
+            Some(m) => (m.transport.clone(), m.peer_ids.clone()),
+            None => return,
+        }
+    };
+    let (transport, peer_ids) = mesh;
+    for peer_id in peer_ids {
+        let msg = protocol::WireMessage::SettlementProof {
+            batch: trade_batch.clone(),
+            proof: proof.to_vec(),
+        };
+        if let Err(e) = transport.send(peer_id, msg).await {
+            tracing::warn!(?peer_id, error = %e, "failed to broadcast settlement proof to peer");
         }
     }
 }

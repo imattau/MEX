@@ -1,4 +1,5 @@
 use common::{FloodMessage, NodeId};
+use prover::TradeBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -11,6 +12,7 @@ const MSG_ENCRYPTED_FLOOD: u8 = 0x04;
 const MSG_SIGNED_HEARTBEAT: u8 = 0x05;
 const MSG_ECHO_REQUEST: u8 = 0x06;
 const MSG_ECHO_RESPONSE: u8 = 0x07;
+const MSG_SETTLEMENT_PROOF: u8 = 0x08;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
@@ -30,6 +32,17 @@ pub enum WireMessage {
     EchoResponse {
         present: Vec<[u8; 32]>,
         missing: Vec<[u8; 32]>,
+    },
+    // Broadcast by whichever node just submitted a settlement batch
+    // on-chain, so any listening peer can independently re-verify the
+    // proof (watchtower::WatchtowerClient::monitor_batch) against the
+    // exact TradeBatch it was generated from, without trusting the
+    // submitter's own self-report. Direct peer-to-peer, not
+    // flood-forwarded like Order gossip -- see this stage's scoping
+    // notes for why multi-hop propagation of this is a further stage.
+    SettlementProof {
+        batch: TradeBatch,
+        proof: Vec<u8>,
     },
 }
 
@@ -105,6 +118,9 @@ impl UdpTransport {
             WireMessage::EchoResponse { .. } => {
                 (MSG_ECHO_RESPONSE, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
             }
+            WireMessage::SettlementProof { .. } => {
+                (MSG_SETTLEMENT_PROOF, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -139,7 +155,7 @@ impl UdpTransport {
                 WireMessage::EncryptedFlood(payload.to_vec())
             }
             MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
-            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE => {
+            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF => {
                 bincode::deserialize::<WireMessage>(payload)
                     .map_err(|e| format!("Deserialize: {}", e))?
             }

@@ -886,6 +886,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "orderlog",
  "protocol",
+ "prover",
  "rand 0.8.7",
  "reputation",
  "reqwest",
@@ -4312,6 +4313,7 @@ dependencies = [
  "common",
  "ed25519-dalek",
  "lru 0.12.5",
+ "prover",
  "rand 0.8.7",
  "reputation",
  "security",
@@ -6033,6 +6035,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
+ "tracing-subscriber 0.3.23",
+ "watchtower",
 ]
 
 [[package]]

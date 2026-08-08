@@ -19,6 +19,7 @@ metrics-exporter-prometheus = "0.15"
 reputation = { path = "../reputation" }
 orderlog = { path = "../orderlog" }
 protocol = { path = "../protocol" }
+prover = { path = "../prover" }
 hex = "0.4.3"
 batcher = { version = "0.1.0", path = "../batcher" }
 chain = { version = "0.1.0", path = "../chain" }
