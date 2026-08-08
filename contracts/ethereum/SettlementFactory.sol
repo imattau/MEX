@@ -21,6 +21,15 @@ contract SettlementFactory is EIP712 {
         "TradeEntry(address trader,address counterparty,address token,uint256 amount,uint256 fee,uint256 deadline,bytes32 tradeHash,bytes32 assignedNode)"
     );
 
+    // Measured live at ~148k gas/trade for commitTradeBatch (see
+    // verify_batched_commit_perf). Mainnet's block gas limit is ~30M gas,
+    // which puts the real ceiling around ~200 trades/call; 150 leaves
+    // headroom for other transactions sharing the block and for L2s with
+    // lower per-block gas limits. Without this cap, a relayer that built
+    // too large a batch would get an opaque "exceeds block gas limit"
+    // failure at inclusion time instead of a clear revert reason.
+    uint256 public constant MAX_COMMIT_BATCH = 150;
+
     event EscrowCreated(address indexed trader, address escrowAddress, bytes32 offchainPubkey);
     event BatchSettled(bytes32 indexed batchRoot, uint256 tradeCount);
     event NodePenalized(bytes32 indexed nodePubkey, uint256 penalty);
@@ -130,6 +139,7 @@ contract SettlementFactory is EIP712 {
         bytes[] calldata signatures
     ) external {
         require(trades.length == signatures.length, "trades/signatures length mismatch");
+        require(trades.length <= MAX_COMMIT_BATCH, "Batch exceeds MAX_COMMIT_BATCH");
 
         for (uint256 i = 0; i < trades.length; i++) {
             TradeEntry calldata trade = trades[i];
