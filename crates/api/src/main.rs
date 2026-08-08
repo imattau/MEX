@@ -44,8 +44,26 @@
 //                            hold this node accountable across restarts
 //                            needs the pubkey to stay stable, so this
 //                            should be set for any real deployment.
+//   MEX_MESH_NODE_ID         Optional, u32. Presence of this var is what
+//                            enables the gossip mesh (protocol crate) --
+//                            unset means no mesh, matching every other
+//                            optional feature in this file: no behavior
+//                            change from before it existed.
+//   MEX_MESH_LISTEN_ADDR     Required if MEX_MESH_NODE_ID is set. UDP
+//                            address this node's mesh listens on, e.g.
+//                            0.0.0.0:9001.
+//   MEX_MESH_REGION          Optional if mesh enabled. One of us-east-1 /
+//                            eu-west-1 / ap-southeast-1. Defaults to
+//                            us-east-1.
+//   MEX_MESH_PEERS           Optional if mesh enabled. Comma-separated
+//                            id@host:port entries, e.g.
+//                            "1@127.0.0.1:9002,2@127.0.0.1:9003". Peer
+//                            authentication (real pubkeys, not the zero
+//                            placeholder used here) is not yet wired up --
+//                            see this stage's scoping notes; this is
+//                            replication only, not yet trust-minimized.
 
-use api::server::AppState;
+use api::server::{AppState, MeshHandle};
 use api::settlement::SettlementConfig;
 use common::FeeCalculator;
 use ed25519_dalek::SigningKey;
@@ -136,6 +154,75 @@ async fn main() {
     order_book.set_active_nodes(vec![node_pubkey]);
     order_book.set_fee_calculator(fee_calculator);
 
+    let mesh = match std::env::var("MEX_MESH_NODE_ID") {
+        Ok(id_str) => {
+            let mesh_node_id: u32 = id_str.parse().unwrap_or_else(|e| {
+                eprintln!("MEX_MESH_NODE_ID is not a valid u32: {e}");
+                std::process::exit(1);
+            });
+            let listen_addr: std::net::SocketAddr = require_env("MEX_MESH_LISTEN_ADDR")
+                .parse()
+                .unwrap_or_else(|e| {
+                    eprintln!("MEX_MESH_LISTEN_ADDR is not a valid socket address: {e}");
+                    std::process::exit(1);
+                });
+            let region = match std::env::var("MEX_MESH_REGION").as_deref() {
+                Ok("eu-west-1") => common::Region::EuWest1,
+                Ok("ap-southeast-1") => common::Region::ApSoutheast1,
+                Ok("us-east-1") | Err(_) => common::Region::UsEast1,
+                Ok(other) => {
+                    eprintln!("MEX_MESH_REGION must be one of us-east-1/eu-west-1/ap-southeast-1, got {other}");
+                    std::process::exit(1);
+                }
+            };
+            let peers: Vec<(common::NodeId, std::net::SocketAddr, [u8; 32])> =
+                std::env::var("MEX_MESH_PEERS").unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|entry| {
+                        let (id_part, addr_part) = entry.split_once('@').unwrap_or_else(|| {
+                            eprintln!("MEX_MESH_PEERS entry '{entry}' must be of the form id@host:port");
+                            std::process::exit(1);
+                        });
+                        let peer_id: u32 = id_part.parse().unwrap_or_else(|e| {
+                            eprintln!("MEX_MESH_PEERS entry '{entry}' has an invalid id: {e}");
+                            std::process::exit(1);
+                        });
+                        let peer_addr: std::net::SocketAddr = addr_part.parse().unwrap_or_else(|e| {
+                            eprintln!("MEX_MESH_PEERS entry '{entry}' has an invalid address: {e}");
+                            std::process::exit(1);
+                        });
+                        // Placeholder pubkey -- peer authentication for signed
+                        // heartbeats isn't wired up at this stage (replication
+                        // only), see this stage's scoping notes.
+                        (common::NodeId(peer_id), peer_addr, [0u8; 32])
+                    })
+                    .collect();
+
+            let mesh_node = protocol::MeshNode::new(protocol::MeshConfig {
+                node_id: common::NodeId(mesh_node_id),
+                region,
+                listen_addr,
+                peers,
+                node_key: None,
+                mesh_encryption_key: None,
+                heartbeat_interval_ms: 1000.0,
+                max_missed_heartbeats: 10,
+                schedule: None,
+            })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("failed to bind mesh listener on {listen_addr}: {e}");
+                std::process::exit(1);
+            });
+            let sender = mesh_node.sender();
+            tokio::spawn(mesh_node.run());
+            tracing::info!(mesh_node_id, %listen_addr, "gossip mesh enabled");
+            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender })
+        }
+        Err(_) => None,
+    };
+
     let (ws_broadcast, _) = tokio::sync::broadcast::channel(1024);
     let state = Arc::new(RwLock::new(AppState {
         node_id: common::NodeId(0),
@@ -149,6 +236,7 @@ async fn main() {
         receipt_signing_key,
         order_log: orderlog::HashChainLog::new(),
         match_log: orderlog::HashChainLog::new(),
+        mesh,
     }));
 
     let settlement_config = SettlementConfig {

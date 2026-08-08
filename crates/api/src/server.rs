@@ -14,7 +14,7 @@ use metrics::{counter, gauge, histogram};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, OnceLock};
 use std::time::Instant;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tower::limit::ConcurrencyLimitLayer;
 use axum::http::{HeaderMap, StatusCode, Request};
 use axum::middleware::{self, Next};
@@ -84,6 +84,21 @@ pub struct AppState {
     // the server didn't actually match orders the way it claims to.
     pub order_log: HashChainLog<OrderReceipt>,
     pub match_log: HashChainLog<Match>,
+    // Stage A of connecting the gossip mesh (protocol crate) to this
+    // server: when configured (MEX_MESH_* env vars), every accepted order
+    // is also flooded to mesh peers for redundant replication, in
+    // addition to being matched locally here. None means mesh disabled --
+    // the default, and no behavior change from before this existed.
+    // Peers only hold a replicated copy at this stage; they don't match
+    // independently (see the conversation this was scoped in for why
+    // that's a deliberately separate, harder problem).
+    pub mesh: Option<MeshHandle>,
+}
+
+pub struct MeshHandle {
+    pub node_id: common::NodeId,
+    pub region: common::Region,
+    pub sender: mpsc::Sender<(common::NodeId, common::FloodMessage)>,
 }
 
 fn setup_metrics() {
@@ -191,6 +206,23 @@ async fn submit_order(
         order.settlement_requester,
     );
     guard.order_log.append(receipt.clone());
+
+    if let Some(mesh) = &guard.mesh {
+        let flood_msg = common::FloodMessage {
+            order: order.clone(),
+            hop_count: 0,
+            path: vec![mesh.node_id],
+            timestamp: receipt.received_at_us as f64 / 1000.0,
+            source_region: mesh.region,
+        };
+        // Injected as if received from ourselves -- MeshNode::run's main
+        // loop treats anything on this channel through the same
+        // on_receive/forward path as a real inbound flood, which is
+        // exactly what's needed to get it propagating to downstream
+        // peers. Fire-and-forget: a slow/full mesh channel must never
+        // block or fail a trader's HTTP response.
+        let _ = mesh.sender.try_send((mesh.node_id, flood_msg));
+    }
 
     let matches = guard.order_book.add_order(order);
     counter!("api.orders.matched").increment(matches.len() as u64);

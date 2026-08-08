@@ -27,6 +27,7 @@ mod tests {
             receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
+            mesh: None,
         }))
     }
 
@@ -152,6 +153,7 @@ mod tests {
             receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
+            mesh: None,
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -288,6 +290,7 @@ mod tests {
             receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
+            mesh: None,
         }));
         let state_for_inspection = Arc::clone(&state);
         let app = app(state);
