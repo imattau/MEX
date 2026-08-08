@@ -130,39 +130,83 @@ impl CensorshipMonitor {
 // why the origin-carried FloodMessage.timestamp alone can't attribute a
 // delay to a specific relay in a multi-hop path.
 //
+// Stage 2: also retains a verdict history per order (unlike the pending
+// maps below, which clear once matched), so a node with genuine
+// topological redundancy -- the same order reaching it via more than one
+// independent relay -- can check whether OTHER paths for that exact
+// order looked normal while one specific hop's didn't. That corroboration
+// is what turns "this one hop was slow" into "this one hop was slow
+// while everyone else's copy of the SAME order was fine," which is much
+// stronger evidence a specific relay is at fault rather than general
+// network conditions.
+//
 // Known simplification, acceptable for this experiment and not for a
-// production version: pending entries are never evicted if their
-// counterpart never arrives (e.g. a peer that floods but doesn't speak
-// HopWitness), so this leaks memory over a long-running process. Fine for
-// a short, controlled live test; a real version needs a TTL sweep.
+// production version: neither the pending maps nor the verdict history
+// are evicted on a TTL, so both leak unboundedly over a long-running
+// process (the verdict history is at least LRU-bounded by order count,
+// unlike the pending maps). Fine for a short, controlled live test; a
+// real version needs a proper sweep.
 struct HopLatencyMonitor {
-    pending_floods: HashMap<[u8; 32], (NodeId, f64)>,
-    pending_witnesses: HashMap<[u8; 32], (NodeId, f64)>,
+    // Keyed by (order_id, hop_node), not just order_id -- the original
+    // single-path version of this keyed by order_id alone, which meant a
+    // second witness/arrival for the same order from a DIFFERENT hop
+    // would silently clobber the first before it could be matched. Since
+    // Stage 2's whole point is multiple independent hops reporting on the
+    // same order, that bug had to be fixed here first.
+    pending_floods: HashMap<([u8; 32], NodeId), f64>,
+    pending_witnesses: HashMap<([u8; 32], NodeId), f64>,
+    verdicts: lru::LruCache<[u8; 32], Vec<(NodeId, f64, bool)>>,
 }
 
 impl HopLatencyMonitor {
     fn new() -> Self {
-        Self { pending_floods: HashMap::new(), pending_witnesses: HashMap::new() }
+        Self {
+            pending_floods: HashMap::new(),
+            pending_witnesses: HashMap::new(),
+            verdicts: lru::LruCache::new(std::num::NonZeroUsize::new(10_000).unwrap()),
+        }
     }
 
     fn on_flood_received(&mut self, order_id: [u8; 32], from: NodeId, recv_time: f64) -> Option<(NodeId, f64)> {
-        self.pending_floods.insert(order_id, (from, recv_time));
-        self.try_match(order_id)
+        self.pending_floods.insert((order_id, from), recv_time);
+        self.try_match(order_id, from)
     }
 
     fn on_witness_received(&mut self, order_id: [u8; 32], hop_node: NodeId, forwarded_at: f64) -> Option<(NodeId, f64)> {
-        self.pending_witnesses.insert(order_id, (hop_node, forwarded_at));
-        self.try_match(order_id)
+        self.pending_witnesses.insert((order_id, hop_node), forwarded_at);
+        self.try_match(order_id, hop_node)
     }
 
-    // Once both halves for `order_id` are present, returns
+    // Once both halves for (order_id, hop_node) are present, returns
     // (hop_node, observed_one_way_ms) and clears them; None otherwise.
-    fn try_match(&mut self, order_id: [u8; 32]) -> Option<(NodeId, f64)> {
-        let (_from, recv_time) = *self.pending_floods.get(&order_id)?;
-        let (hop_node, forwarded_at) = *self.pending_witnesses.get(&order_id)?;
-        self.pending_floods.remove(&order_id);
-        self.pending_witnesses.remove(&order_id);
+    fn try_match(&mut self, order_id: [u8; 32], hop_node: NodeId) -> Option<(NodeId, f64)> {
+        let recv_time = *self.pending_floods.get(&(order_id, hop_node))?;
+        let forwarded_at = *self.pending_witnesses.get(&(order_id, hop_node))?;
+        self.pending_floods.remove(&(order_id, hop_node));
+        self.pending_witnesses.remove(&(order_id, hop_node));
         Some((hop_node, recv_time - forwarded_at))
+    }
+
+    fn record_verdict(&mut self, order_id: [u8; 32], hop_node: NodeId, observed_ms: f64, anomalous: bool) {
+        if let Some(v) = self.verdicts.get_mut(&order_id) {
+            v.push((hop_node, observed_ms, anomalous));
+        } else {
+            self.verdicts.put(order_id, vec![(hop_node, observed_ms, anomalous)]);
+        }
+    }
+
+    // True if, for this exact order, some hop OTHER than `hop_node` was
+    // recorded as NOT anomalous -- independent corroboration that
+    // `hop_node` specifically is the outlier, not that the whole network
+    // is just slow right now. False (not just "unknown") when there's no
+    // other recorded path at all -- a single-path observation is real
+    // evidence on its own (Stage 1 already established that), just not
+    // corroborated evidence.
+    fn has_corroborating_non_anomalous_hop(&mut self, order_id: &[u8; 32], hop_node: NodeId) -> bool {
+        self.verdicts
+            .get(order_id)
+            .map(|v| v.iter().any(|(h, _, anomalous)| *h != hop_node && !*anomalous))
+            .unwrap_or(false)
     }
 }
 
@@ -372,6 +416,34 @@ impl MeshNode {
         }
     }
 
+    // Shared by both HopLatencyMonitor arrival branches in run() (a
+    // matched (order, hop) pair can complete from either the Flood side
+    // or the HopWitness side, whichever arrives second). Records the
+    // verdict either way -- not just anomalous ones -- since Stage 2's
+    // corroboration check needs to know about normal-looking hops too,
+    // and only reports misconduct (annotated with whether any other
+    // independent path corroborates it) when this hop specifically
+    // looks anomalous.
+    async fn handle_hop_latency_result(&mut self, order_id: [u8; 32], hop_node: NodeId, observed_ms: f64) {
+        let anomalous = self.latency_stats.is_anomalous(hop_node, observed_ms);
+        self.hop_latency.record_verdict(order_id, hop_node, observed_ms, anomalous);
+        if !anomalous {
+            return;
+        }
+        let bound = self.latency_stats.expected_one_way_bound_ms(hop_node).unwrap_or(0.0);
+        let corroborated = self.hop_latency.has_corroborating_non_anomalous_hop(&order_id, hop_node);
+        tracing::warn!(?hop_node, observed_ms, bound_ms = bound, corroborated, "hop transit time exceeds established latency baseline");
+        let corroboration_note = if corroborated {
+            "corroborated: another independent path for the same order showed normal timing"
+        } else {
+            "uncorroborated: no other independent path observed for this order yet"
+        };
+        self.report_misconduct(
+            hop_node,
+            format!("order propagation delay: {observed_ms:.1}ms observed vs {bound:.1}ms baseline bound ({corroboration_note})"),
+        ).await;
+    }
+
     // Every WireMessage::SettlementProof this node receives from a peer,
     // for a caller (e.g. a watchtower loop) to independently re-verify --
     // see WireMessage::SettlementProof's docs. Must be called before
@@ -546,14 +618,7 @@ impl MeshNode {
                     // see on_witness_received below for the other arrival
                     // order). See HopLatencyMonitor's docs.
                     if let Some((hop_node, observed_ms)) = self.hop_latency.on_flood_received(order_id, from_node, now) {
-                        if self.latency_stats.is_anomalous(hop_node, observed_ms) {
-                            let bound = self.latency_stats.expected_one_way_bound_ms(hop_node).unwrap_or(0.0);
-                            tracing::warn!(?hop_node, observed_ms, bound_ms = bound, "hop transit time exceeds established latency baseline");
-                            self.report_misconduct(
-                                hop_node,
-                                format!("order propagation delay: {observed_ms:.1}ms observed vs {bound:.1}ms baseline bound"),
-                            ).await;
-                        }
+                        self.handle_hop_latency_result(order_id, hop_node, observed_ms).await;
                     }
 
                     match self.flood.on_receive(flood_msg, from_node, now) {
@@ -606,14 +671,7 @@ impl MeshNode {
                     // that they match, same caveat as MisconductReport's.
                     let _ = from_wire;
                     if let Some((matched_hop, observed_ms)) = self.hop_latency.on_witness_received(order_id, hop_node, forwarded_at) {
-                        if self.latency_stats.is_anomalous(matched_hop, observed_ms) {
-                            let bound = self.latency_stats.expected_one_way_bound_ms(matched_hop).unwrap_or(0.0);
-                            tracing::warn!(hop_node = ?matched_hop, observed_ms, bound_ms = bound, "hop transit time exceeds established latency baseline");
-                            self.report_misconduct(
-                                matched_hop,
-                                format!("order propagation delay: {observed_ms:.1}ms observed vs {bound:.1}ms baseline bound"),
-                            ).await;
-                        }
+                        self.handle_hop_latency_result(order_id, matched_hop, observed_ms).await;
                     }
                 }
 
