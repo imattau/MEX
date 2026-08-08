@@ -18,6 +18,8 @@ ark-snark = "0.4.0"
 hex = "0.4"
 rand = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+alloy = { version = "2.3.0", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
