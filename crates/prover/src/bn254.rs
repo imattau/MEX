@@ -6,6 +6,7 @@ use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_snark::SNARK;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::{DEXTradeCircuit, TradeBatch};
@@ -72,13 +73,61 @@ struct SetupParams {
     vk: VerifyingKey<Bn254>,
 }
 
+// Where the persisted trusted setup (the Groth16 proving key, which embeds
+// the verifying key) lives. Overridable via MEX_TRUSTED_SETUP_PATH -- e.g.
+// to point multiple test processes at a shared temp file, or to isolate a
+// test's own setup from the checked-in default. Defaults to a fixed path
+// under this crate's own directory (via CARGO_MANIFEST_DIR, resolved at
+// compile time) rather than the current working directory, so it resolves
+// the same way regardless of where the binary is run from.
+fn trusted_setup_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MEX_TRUSTED_SETUP_PATH") {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/trusted_setup.bin"))
+}
+
+// Loads the proving key from disk if present, otherwise runs the (one-time,
+// insecure-toxic-waste, dev-only) setup and persists it so every later
+// process -- not just this one -- reuses the exact same key. Without this,
+// every process restart silently generated a fresh, incompatible key: a
+// verifying key exported (or a BatchVerifier deployed) from one run could
+// never validate a proof produced by a different run.
+fn load_or_generate_pk(path: &Path) -> ProvingKey<Bn254> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(pk) = ProvingKey::<Bn254>::deserialize_compressed(bytes.as_slice()) {
+            return pk;
+        }
+        // Corrupt or incompatible file (e.g. from a different arkworks
+        // version) -- fall through and regenerate rather than fail closed.
+    }
+
+    let circuit = setup_circuit();
+    let mut rng = OsRng;
+    let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(circuit, &mut rng)
+        .expect("Groth16 setup failed");
+
+    let mut bytes = Vec::new();
+    if pk.serialize_compressed(&mut bytes).is_ok() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Write-then-rename so a crash or a concurrent second process
+        // generating its own key at the same time can't leave a partially
+        // written, corrupt file behind for the next reader.
+        let tmp_path = path.with_extension("bin.tmp");
+        if std::fs::write(&tmp_path, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp_path, path);
+        }
+    }
+
+    pk
+}
+
 fn setup_params() -> &'static SetupParams {
     static PARAMS: OnceLock<SetupParams> = OnceLock::new();
     PARAMS.get_or_init(|| {
-        let circuit = setup_circuit();
-        let mut rng = OsRng;
-        let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(circuit, &mut rng)
-            .expect("Groth16 setup failed");
+        let pk = load_or_generate_pk(&trusted_setup_path());
         let vk = pk.vk.clone();
         SetupParams { pk, vk }
     })
@@ -463,5 +512,60 @@ mod tests {
         assert_ne!(calldata.a, [[0u8; 32]; 2]);
         assert_ne!(calldata.c, [[0u8; 32]; 2]);
         assert_ne!(calldata.b, [[[0u8; 32]; 2]; 2]);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn pk_bytes(pk: &ProvingKey<Bn254>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        pk.serialize_compressed(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_load_or_generate_persists_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("setup.bin");
+        assert!(!path.exists());
+
+        let first = load_or_generate_pk(&path);
+        assert!(path.exists(), "first call must persist the generated key to disk");
+
+        let second = load_or_generate_pk(&path);
+        assert_eq!(
+            pk_bytes(&first),
+            pk_bytes(&second),
+            "a second call against the same path must load the identical key, not generate a new one"
+        );
+    }
+
+    #[test]
+    fn test_different_paths_get_independent_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.bin");
+        let path_b = dir.path().join("b.bin");
+
+        let a = load_or_generate_pk(&path_a);
+        let b = load_or_generate_pk(&path_b);
+
+        assert_ne!(
+            pk_bytes(&a),
+            pk_bytes(&b),
+            "two never-before-seen paths should each get their own freshly generated key"
+        );
+    }
+
+    #[test]
+    fn test_corrupt_file_falls_back_to_regeneration_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.bin");
+        std::fs::write(&path, b"not a valid proving key").unwrap();
+
+        // Must not panic -- a corrupt/incompatible file is recoverable by
+        // regenerating, not a fatal condition.
+        let _pk = load_or_generate_pk(&path);
     }
 }
