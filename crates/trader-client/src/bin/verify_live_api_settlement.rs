@@ -197,12 +197,12 @@ async fn sol_settlement_check(provider: &impl Provider, factory_address: &str, t
         #[sol(rpc)]
         interface ITraderEscrowCheck {
             struct Settlement {
-                uint256 deadline;
+                uint40 deadline;
                 bool refunded;
                 bool settled;
                 bool slashed;
-                bytes32 assignedNode;
                 address token;
+                bytes32 assignedNode;
                 uint256 lockedAmount;
                 address counterparty;
             }

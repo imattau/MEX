@@ -18,13 +18,24 @@ contract TraderEscrow {
     mapping(address => uint256) public lockedBalances;
     mapping(bytes32 => Settlement) public settlements;
 
+    // Field order here is deliberate, not just declaration convenience:
+    // Solidity packs consecutive struct fields into one 32-byte storage
+    // slot as long as they fit, only starting a fresh slot when the next
+    // field wouldn't. deadline (uint40, safe until year 36812 -- no real
+    // Unix timestamp gets close) + the 3 status bools + token (address)
+    // total 28 bytes and share ONE slot; assignedNode and lockedAmount
+    // each need a full slot of their own regardless of order (both are
+    // exactly 32 bytes); counterparty gets the last slot alone since
+    // nothing smaller is left to share it with. That's 4 slots instead
+    // of the 6 a naive field order produces, saving 2 cold SSTOREs
+    // (~40k gas) on every recordSettlement call.
     struct Settlement {
-        uint256 deadline;
+        uint40 deadline;
         bool refunded;
         bool settled;
         bool slashed;
-        bytes32 assignedNode;
         address token;
+        bytes32 assignedNode;
         uint256 lockedAmount;
         // Recorded at commitTrade time so settleBatchWithFees can verify
         // the counterparty it's about to pay actually matches what this
@@ -118,13 +129,14 @@ contract TraderEscrow {
         address counterparty
     ) external onlyFactory {
         require(settlements[tradeHash].deadline == 0, "Trade already recorded");
+        require(deadline <= type(uint40).max, "Deadline exceeds uint40 range");
         settlements[tradeHash] = Settlement({
-            deadline: deadline,
+            deadline: uint40(deadline),
             refunded: false,
             settled: false,
             slashed: false,
-            assignedNode: assignedNode,
             token: token,
+            assignedNode: assignedNode,
             lockedAmount: lockedAmount,
             counterparty: counterparty
         });
