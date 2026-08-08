@@ -125,10 +125,19 @@ contract NodeRegistry {
         return (node.reputationScore, node.trustLevel, node.lastRepUpdate);
     }
 
-    function slashNode(bytes32 nodePubkey, uint256 amount) external onlySlashingAuthority {
+    // Pays the slashed amount out to `recipient` -- the party actually
+    // wronged by whatever this node did (e.g. the trader who called
+    // claimSlash after a missed settlement deadline) -- rather than
+    // leaving it stuck in this contract's balance with no way out.
+    // recipient is chosen by the slashing authority (SettlementFactory),
+    // not this contract: NodeRegistry only tracks stake/reputation and
+    // has no notion of trades or escrows, so it can't determine on its
+    // own who was wronged.
+    function slashNode(bytes32 nodePubkey, uint256 amount, address payable recipient) external onlySlashingAuthority {
         NodeInfo storage node = nodes[nodePubkey];
         require(node.active, "Node not active");
         require(node.stake >= amount, "Insufficient stake to slash");
+        require(recipient != address(0), "Invalid recipient");
 
         node.stake -= amount;
         node.slashCount++;
@@ -142,6 +151,8 @@ contract NodeRegistry {
         if (node.stake < MIN_STAKE) {
             delete nodes[nodePubkey];
         }
+
+        recipient.transfer(amount);
     }
 
     function recordMissedDeadline(bytes32 nodePubkey) external {
@@ -156,6 +167,17 @@ contract NodeRegistry {
         }
     }
 
+    // Unlike slashNode, this penalty has no single identifiable recipient:
+    // it's triggered by a cumulative missed-deadline COUNT
+    // (recordMissedDeadline, callable by anyone, not tied to one trader's
+    // claim), not one specific trade a specific trader can point to. The
+    // penalized amount is still just decremented from node.stake here and
+    // left in this contract's balance with no payout path -- the same gap
+    // slashNode had until it gained a recipient, minus the part of the fix
+    // that doesn't apply here (there's no single wronged party to pay).
+    // Resolving this would need a shared destination (e.g. an insurance/
+    // treasury pool distributed across affected traders) that doesn't
+    // exist yet.
     function _autoPenalize(bytes32 nodePubkey) private {
         NodeInfo storage node = nodes[nodePubkey];
         uint256 penalty = node.stake / 2;

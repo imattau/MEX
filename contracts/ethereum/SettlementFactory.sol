@@ -211,7 +211,11 @@ contract SettlementFactory {
 
             uint256 stake = registry.getNode(s.assignedNode).stake;
             if (stake > 0) {
-                registry.slashNode(s.assignedNode, stake / 2);
+                // The caller (msg.sender) is who was actually wronged here --
+                // their trade missed its deadline -- so the slashed stake
+                // compensates them directly, instead of being stranded in
+                // NodeRegistry with no way out.
+                registry.slashNode(s.assignedNode, stake / 2, payable(msg.sender));
             }
         }
     }
