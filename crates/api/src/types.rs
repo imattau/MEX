@@ -1,6 +1,6 @@
-use crate::receipts::OrderReceipt;
 use common::{OrderSide, SettlementPreference, SettlementRequester};
 use engine::Match;
+use orderlog::OrderReceipt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,4 +59,10 @@ pub struct ConfirmCommitRequest {
 pub struct ConfirmCommitResponse {
     pub success: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRootResponse {
+    pub root: [u8; 32],
+    pub len: u64,
 }

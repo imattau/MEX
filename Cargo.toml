@@ -26,6 +26,7 @@ members = [
     "crates/chain-cosmwasm",
     "crates/batcher",
     "crates/reputation",
+    "crates/orderlog",
     "crates/agent-sim",
     "crates/trader-client"
 ]

@@ -82,41 +82,13 @@ async fn main() {
     assert!(bad_resp["receipt"].is_null(), "rejected order must not get a receipt");
     println!("rejected (bad signature) order correctly got NO receipt: OK");
 
-    // Independent verification -- this binary has no direct dependency on
-    // `api`, deliberately: parse the receipt's raw fields from JSON and
-    // rebuild + check the signature exactly as api::receipts::verify_receipt
-    // would, proving a trader (or any third party) could do this without
-    // trusting the server again.
+    // Independent verification via orderlog::verify_receipt -- the same
+    // function a third-party auditor would use, proving a trader (or
+    // anyone) could check this without trusting the server again.
     for (label, receipt) in [("sell", &sell_receipt), ("buy", &buy_receipt)] {
-        let order_id: [u8; 32] = serde_json::from_value(receipt["order_id"].clone()).unwrap();
-        let trader: [u8; 32] = serde_json::from_value(receipt["trader"].clone()).unwrap();
-        let symbol: String = serde_json::from_value(receipt["symbol"].clone()).unwrap();
-        let side_byte: u8 = if receipt["side"] == "Buy" { 0 } else { 1 };
-        let price: u64 = serde_json::from_value(receipt["price"].clone()).unwrap();
-        let amount: u64 = serde_json::from_value(receipt["amount"].clone()).unwrap();
-        let nonce: u64 = serde_json::from_value(receipt["nonce"].clone()).unwrap();
-        let expiry: u64 = serde_json::from_value(receipt["expiry"].clone()).unwrap();
-        let received_at_us: u64 = serde_json::from_value(receipt["received_at_us"].clone()).unwrap();
-        let node_pubkey: [u8; 32] = serde_json::from_value(receipt["node_pubkey"].clone()).unwrap();
-        let signature: Vec<u8> = serde_json::from_value(receipt["signature"].clone()).unwrap();
-
-        let mut msg = Vec::new();
-        msg.extend_from_slice(&order_id);
-        msg.extend_from_slice(&trader);
-        msg.extend_from_slice(symbol.as_bytes());
-        msg.push(side_byte);
-        msg.extend_from_slice(&price.to_be_bytes());
-        msg.extend_from_slice(&amount.to_be_bytes());
-        msg.extend_from_slice(&nonce.to_be_bytes());
-        msg.extend_from_slice(&expiry.to_be_bytes());
-        msg.extend_from_slice(&received_at_us.to_be_bytes());
-
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&node_pubkey).unwrap();
-        let sig_bytes: [u8; 64] = signature.try_into().unwrap();
-        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-        use ed25519_dalek::Verifier;
-        verifying_key.verify(&msg, &sig).unwrap_or_else(|_| panic!("{label} receipt failed independent signature verification"));
-        println!("{label} receipt independently verified against node_pubkey {}: OK", hex::encode(node_pubkey));
+        let parsed: orderlog::OrderReceipt = serde_json::from_value(receipt.clone()).unwrap();
+        assert!(orderlog::verify_receipt(&parsed), "{label} receipt failed independent signature verification");
+        println!("{label} receipt independently verified against node_pubkey {}: OK", hex::encode(parsed.node_pubkey));
     }
 
     println!("\nORDER RECEIPTS LIVE TEST PASSED");

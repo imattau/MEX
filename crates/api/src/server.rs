@@ -1,6 +1,6 @@
-use crate::types::{ConfirmCommitRequest, ConfirmCommitResponse, OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
+use crate::types::{ConfirmCommitRequest, ConfirmCommitResponse, LogRootResponse, OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -9,6 +9,7 @@ use batcher::SettlementBatcher;
 use common::Order;
 use ed25519_dalek::SigningKey;
 use engine::{Match, OrderBook};
+use orderlog::{HashChainLog, LogEntry, OrderReceipt};
 use metrics::{counter, gauge, histogram};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, OnceLock};
@@ -71,8 +72,18 @@ pub struct AppState {
     // Deliberately separate from the on-chain settlement key
     // (MEX_NODE_PRIVATE_KEY) -- this key only ever signs order receipts,
     // never a transaction, so compromising it can't move funds. See
-    // receipts.rs.
+    // orderlog's docs.
     pub receipt_signing_key: SigningKey,
+    // Append-only, tamper-evident records of every accepted order and
+    // every match this server actually produced -- see orderlog's docs.
+    // A third party fetches both (GET /api/v1/order_log/entries,
+    // /api/v1/match_log/entries), verifies the hash chains
+    // (orderlog::verify_chain), replays correct price-time-priority
+    // matching against order_log using a fresh engine::OrderBook, and
+    // diffs that against match_log: any divergence is provable evidence
+    // the server didn't actually match orders the way it claims to.
+    pub order_log: HashChainLog<OrderReceipt>,
+    pub match_log: HashChainLog<Match>,
 }
 
 fn setup_metrics() {
@@ -93,6 +104,10 @@ pub fn app(state: Arc<RwLock<AppState>>) -> Router {
         .route("/api/v1/order", post(submit_order))
         .route("/api/v1/orderbook", get(get_orderbook))
         .route("/api/v1/trade/committed", post(confirm_committed))
+        .route("/api/v1/order_log/root", get(order_log_root))
+        .route("/api/v1/order_log/entries", get(order_log_entries))
+        .route("/api/v1/match_log/root", get(match_log_root))
+        .route("/api/v1/match_log/entries", get(match_log_entries))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
         .route("/ws/trades/:trader", get(ws_trader_handler))
@@ -159,10 +174,10 @@ async fn submit_order(
         });
     }
 
-    // Signed BEFORE add_order runs -- see receipts.rs's docs for why this
+    // Signed BEFORE add_order runs -- see orderlog's docs for why this
     // ordering is the entire point: signing after matching would let the
     // timestamp be chosen to fit whatever match order already happened.
-    let receipt = crate::receipts::sign_receipt(
+    let receipt = orderlog::sign_receipt(
         &guard.receipt_signing_key,
         order.id,
         order.trader,
@@ -172,13 +187,17 @@ async fn submit_order(
         order.amount,
         order.nonce,
         order.expiry,
+        order.settlement_preference,
+        order.settlement_requester,
     );
+    guard.order_log.append(receipt.clone());
 
     let matches = guard.order_book.add_order(order);
     counter!("api.orders.matched").increment(matches.len() as u64);
     histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
 
     for m in &matches {
+        guard.match_log.append(m.clone());
         let _ = guard.ws_broadcast.send(m.clone());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -246,6 +265,43 @@ async fn get_orderbook(
         bids,
         asks,
     })
+}
+
+#[derive(serde::Deserialize)]
+struct SinceQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+async fn order_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
+    let guard = state.read().unwrap();
+    Json(LogRootResponse { root: guard.order_log.root(), len: guard.order_log.len() as u64 })
+}
+
+// Fetches order receipts from `since` (inclusive) onward -- an auditor
+// fetches the whole log this way, verifies the hash chain
+// (orderlog::verify_chain), and replays it through a fresh
+// engine::OrderBook to compute what price-time-priority matching should
+// have produced, then diffs that against /api/v1/match_log/entries.
+async fn order_log_entries(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Query(q): Query<SinceQuery>,
+) -> Json<Vec<LogEntry<OrderReceipt>>> {
+    let guard = state.read().unwrap();
+    Json(guard.order_log.entries_since(q.since).to_vec())
+}
+
+async fn match_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
+    let guard = state.read().unwrap();
+    Json(LogRootResponse { root: guard.match_log.root(), len: guard.match_log.len() as u64 })
+}
+
+async fn match_log_entries(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Query(q): Query<SinceQuery>,
+) -> Json<Vec<LogEntry<Match>>> {
+    let guard = state.read().unwrap();
+    Json(guard.match_log.entries_since(q.since).to_vec())
 }
 
 // Called by a trader (or their TraderClient) right after they've

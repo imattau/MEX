@@ -147,6 +147,8 @@ async fn main() {
         confirmed_trade_hashes: std::collections::HashMap::new(),
         batcher: batcher::SettlementBatcher::new(),
         receipt_signing_key,
+        order_log: orderlog::HashChainLog::new(),
+        match_log: orderlog::HashChainLog::new(),
     }));
 
     let settlement_config = SettlementConfig {
