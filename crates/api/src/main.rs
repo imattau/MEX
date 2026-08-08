@@ -19,9 +19,24 @@
 //                             so matches actually get assigned to a real,
 //                             active node instead of the zero sentinel.
 //   MEX_SETTLEMENT_POLL_SECS Defaults to 5.
+//   MEX_FEE_BASE_GAS_PRICE   Optional, gwei. Feeds FeeCalculator's gas-price
+//                            term. Unset means FeeCalculator::default(),
+//                            which reproduces the old fixed 5/15/50 bps
+//                            schedule exactly -- see common::fees' own
+//                            test_default_calculator_matches_static_schedule.
+//                            This is a static value set at startup, not
+//                            live-polled; see FeeCalculator's own docs for
+//                            why (this crate is chain-agnostic).
+//   MEX_FEE_BATCH_UTILIZATION Optional, 0.0-1.0. Feeds FeeCalculator's
+//                            batching-discount term -- the operator's
+//                            expected typical_batch_size / MAX_BATCH_TRADES,
+//                            not a live value (see FeeCalculator's docs).
+//   MEX_FEE_VOLATILITY_INDEX Optional, >= 0.0. Feeds FeeCalculator's
+//                            volatility-premium term.
 
 use api::server::AppState;
 use api::settlement::SettlementConfig;
+use common::FeeCalculator;
 use engine::OrderBook;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -72,8 +87,23 @@ async fn main() {
         });
     let fee_recipient = deployer_signer.address();
 
+    let fee_base_gas_price: u64 = std::env::var("MEX_FEE_BASE_GAS_PRICE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50); // matches FeeCalculator::default()'s BASELINE_GAS_GWEI
+    let fee_batch_utilization: f64 = std::env::var("MEX_FEE_BATCH_UTILIZATION")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let fee_volatility_index: f64 = std::env::var("MEX_FEE_VOLATILITY_INDEX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let fee_calculator = FeeCalculator::new(fee_base_gas_price, fee_batch_utilization, fee_volatility_index);
+
     let mut order_book = OrderBook::new(symbol.clone());
     order_book.set_active_nodes(vec![node_pubkey]);
+    order_book.set_fee_calculator(fee_calculator);
 
     let (ws_broadcast, _) = tokio::sync::broadcast::channel(1024);
     let state = Arc::new(RwLock::new(AppState {
@@ -101,6 +131,6 @@ async fn main() {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
-    tracing::info!(%addr, %symbol, "MEX API server starting");
+    tracing::info!(%addr, %symbol, fee_base_gas_price, fee_batch_utilization, fee_volatility_index, "MEX API server starting");
     axum::serve(listener, router).await.unwrap();
 }
