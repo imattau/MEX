@@ -143,9 +143,9 @@ fn test_e2e_trade_lifecycle() {
     // taker_balance -- see prover::DEXBatchCircuit's docs.
     let post_root_val: u64 = matches.iter().map(|m| m.amount * m.price).sum();
     let batch = TradeBatch {
+        maker_balances: vec![maker_balance; matches.len()],
+        taker_balances: vec![taker_balance; matches.len()],
         trades: matches.clone(),
-        maker_balance,
-        taker_balance,
         pre_state_root: [0u8; 32],
         post_state_root: u64_to_bytes32(post_root_val),
     };

@@ -193,9 +193,9 @@ fn main() {
     let post_state = u64_to_bytes32(total_value);
 
     let batch = TradeBatch {
+        maker_balances: vec![1_000_000; all_matches.len()],
+        taker_balances: vec![1_000_000; all_matches.len()],
         trades: all_matches.clone(),
-        maker_balance: 1_000_000,
-        taker_balance: 1_000_000,
         pre_state_root: pre_state,
         post_state_root: post_state,
     };

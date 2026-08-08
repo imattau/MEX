@@ -236,10 +236,10 @@ async fn main() {
 
         let batch = TradeBatch {
             trades: vec![m.clone()],
-            maker_balance: 1_000_000,
-            taker_balance: 1_000_000,
+            maker_balances: vec![1_000_000],
+            taker_balances: vec![1_000_000],
             pre_state_root: [0u8; 32],
-            post_state_root: u64_to_bytes32(2_000_000),
+            post_state_root: u64_to_bytes32(m.price * m.amount),
         };
         let backend = Bn254Groth16Backend;
         let t1 = Instant::now();
@@ -366,9 +366,9 @@ async fn run_batched_settlement(
     let trades: Vec<Match> = matches.iter().map(|(m, _)| m.clone()).collect();
     let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
     let batch = TradeBatch {
+        maker_balances: vec![1_000_000; trades.len()],
+        taker_balances: vec![1_000_000; trades.len()],
         trades: trades.clone(),
-        maker_balance: 1_000_000,
-        taker_balance: 1_000_000,
         pre_state_root: [0u8; 32],
         post_state_root: u64_to_bytes32(total_value),
     };

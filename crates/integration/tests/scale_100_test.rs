@@ -166,9 +166,9 @@ fn test_scale_100_nodes_e2e() {
     // taker_balance -- see prover::DEXBatchCircuit's docs.
     let post_root_val: u64 = matches.iter().map(|m| m.amount * m.price).sum();
     let batch = TradeBatch {
+        maker_balances: vec![1_000_000; matches.len()],
+        taker_balances: vec![1_000_000; matches.len()],
         trades: matches.clone(),
-        maker_balance: 1_000_000,
-        taker_balance: 1_000_000,
         pre_state_root: [0u8; 32],
         post_state_root: u64_to_bytes32(post_root_val),
     };

@@ -4,7 +4,7 @@ pub use ledger::BalanceLedger;
 
 use common::{NodeId, SettlementPreference};
 use engine::Match;
-use prover::{TradeBatch, BACKEND, ProverBackend};
+use prover::{TradeBatch, BACKEND, ProverBackend, MAX_BATCH_TRADES};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -182,76 +182,127 @@ impl SettlementBatcher {
         }
     }
 
-    // The circuit backing prove_batch only supports one trade per proof (see
-    // crates/prover/src/bn254.rs), so batching here means proving each trade
-    // individually against its traders' real balances, rather than
-    // amortizing a single proof over the whole batch. A trade that would be
-    // insolvent against the ledger is dropped from the batch with a warning
-    // instead of silently shipping an empty/invalid proof for it.
+    // The circuit backing prove_batch supports up to MAX_BATCH_TRADES trades
+    // per proof, each with its own independent maker/taker pair (see
+    // crates/prover's DEXBatchCircuit docs) -- so trades here are grouped
+    // into chunks of that size and proven together, amortizing one proof's
+    // verification cost across every trade in the chunk instead of paying
+    // it per trade. A trade that would be insolvent against the ledger is
+    // dropped before proving, with a warning, instead of silently proving
+    // over a fabricated balance.
     //
     // The ledger may be shared with a concurrently-running chain-sync
     // service (see SettlementBatcher::with_ledger), so the balance read
     // here and the debit below aren't atomic with each other -- a real
-    // withdrawal could land in between and make the debit fail even though
-    // prove_batch's own check passed. debit() before credit() is what makes
-    // that safe: if the debit fails, the trade is dropped and nothing was
-    // credited, so a race can never mint an unbacked credit.
+    // withdrawal could land in between and make a debit fail even though
+    // prove_batch's own solvency check passed. Because one proof now covers
+    // a whole chunk at once, a single trade's debit failing after the
+    // chunk's proof was already generated can't be handled by just
+    // dropping that one trade (the proof's arithmetic already accounts for
+    // it) -- the entire chunk is rolled back and dropped instead, so the
+    // proof and the trades actually reported as settled never diverge.
     fn build_batch(&mut self, trades: Vec<Match>, _tier: SettlementPreference) -> SettlementBatch {
         let mut proven_trades = Vec::with_capacity(trades.len());
-        let mut proofs = Vec::with_capacity(trades.len());
+        let mut proofs = Vec::new();
+        let mut proof_trade_counts = Vec::new();
         let mut total_value: u64 = 0;
 
-        for trade in trades {
-            let trade_value = trade.price as u64 * trade.amount as u64;
-            let (maker_balance, taker_balance) = {
-                let ledger = self.ledger.lock().expect("ledger mutex poisoned");
-                (
-                    ledger.balance_of(trade.maker_trader, &trade.symbol),
-                    ledger.balance_of(trade.taker_trader, &trade.symbol),
-                )
-            };
+        for chunk in trades.chunks(MAX_BATCH_TRADES) {
+            let mut chunk_trades = Vec::with_capacity(chunk.len());
+            let mut chunk_maker_balances = Vec::with_capacity(chunk.len());
+            let mut chunk_taker_balances = Vec::with_capacity(chunk.len());
 
-            let single_trade_batch = TradeBatch {
-                trades: vec![trade.clone()],
-                maker_balance,
-                taker_balance,
+            for trade in chunk {
+                let trade_value = trade.price as u64 * trade.amount as u64;
+                let (maker_balance, taker_balance) = {
+                    let ledger = self.ledger.lock().expect("ledger mutex poisoned");
+                    (
+                        ledger.balance_of(trade.maker_trader, &trade.symbol),
+                        ledger.balance_of(trade.taker_trader, &trade.symbol),
+                    )
+                };
+
+                if trade_value > taker_balance {
+                    tracing::warn!(
+                        trade_id = ?trade.maker_order_id,
+                        "Dropping trade from settlement batch: insolvent against the ledger"
+                    );
+                    continue;
+                }
+
+                chunk_trades.push(trade.clone());
+                chunk_maker_balances.push(maker_balance);
+                chunk_taker_balances.push(taker_balance);
+            }
+
+            if chunk_trades.is_empty() {
+                continue;
+            }
+
+            let batch = TradeBatch {
+                trades: chunk_trades.clone(),
+                maker_balances: chunk_maker_balances,
+                taker_balances: chunk_taker_balances,
                 pre_state_root: [0u8; 32],
                 post_state_root: [0u8; 32],
             };
 
-            match self.prover.prove_batch(&single_trade_batch) {
+            match self.prover.prove_batch(&batch) {
                 Ok(proof) => {
-                    let debited = self
-                        .ledger
-                        .lock()
-                        .expect("ledger mutex poisoned")
-                        .debit(trade.taker_trader, &trade.symbol, trade_value);
+                    // Two-phase: attempt every debit in the chunk before
+                    // crediting any of them, so a mid-chunk failure can be
+                    // fully undone rather than leaving a partially-applied
+                    // chunk whose proof no longer matches what actually
+                    // got settled.
+                    let mut debited_so_far: Vec<(&Match, u64)> = Vec::with_capacity(chunk_trades.len());
+                    let mut chunk_failed = false;
 
-                    match debited {
-                        Ok(()) => {
-                            self.ledger
-                                .lock()
-                                .expect("ledger mutex poisoned")
-                                .credit(trade.maker_trader, &trade.symbol, trade_value);
+                    for trade in &chunk_trades {
+                        let trade_value = trade.price as u64 * trade.amount as u64;
+                        let debited = self
+                            .ledger
+                            .lock()
+                            .expect("ledger mutex poisoned")
+                            .debit(trade.taker_trader, &trade.symbol, trade_value);
 
-                            total_value += trade_value;
-                            proven_trades.push(trade);
-                            proofs.push(proof);
-                        }
-                        Err(reason) => {
-                            tracing::warn!(
-                                trade_id = ?trade.maker_order_id,
-                                reason,
-                                "Dropping trade from settlement batch: taker balance changed concurrently between proving and settling"
-                            );
+                        match debited {
+                            Ok(()) => debited_so_far.push((trade, trade_value)),
+                            Err(reason) => {
+                                tracing::warn!(
+                                    trade_id = ?trade.maker_order_id,
+                                    reason,
+                                    "Dropping settlement chunk: taker balance changed concurrently between proving and settling"
+                                );
+                                chunk_failed = true;
+                                break;
+                            }
                         }
                     }
+
+                    if chunk_failed {
+                        let mut ledger = self.ledger.lock().expect("ledger mutex poisoned");
+                        for (trade, trade_value) in &debited_so_far {
+                            ledger.credit(trade.taker_trader, &trade.symbol, *trade_value);
+                        }
+                        continue;
+                    }
+
+                    let mut ledger = self.ledger.lock().expect("ledger mutex poisoned");
+                    for (trade, trade_value) in &debited_so_far {
+                        ledger.credit(trade.maker_trader, &trade.symbol, *trade_value);
+                        total_value += trade_value;
+                    }
+                    drop(ledger);
+
+                    proof_trade_counts.push(chunk_trades.len());
+                    proven_trades.extend(chunk_trades);
+                    proofs.push(proof);
                 }
                 Err(reason) => {
                     tracing::warn!(
-                        trade_id = ?trade.maker_order_id,
+                        count = chunk_trades.len(),
                         reason,
-                        "Dropping trade from settlement batch: proof generation failed"
+                        "Dropping settlement chunk: proof generation failed"
                     );
                 }
             }
@@ -261,6 +312,7 @@ impl SettlementBatcher {
             trades: proven_trades,
             total_value,
             proofs,
+            proof_trade_counts,
         }
     }
 }
@@ -273,11 +325,18 @@ impl Default for SettlementBatcher {
 
 #[derive(Debug, Clone)]
 pub struct SettlementBatch {
+    // Trades that were successfully proven and settled, grouped by which
+    // proof covers them: proof_trade_counts[i] is how many consecutive
+    // entries of `trades`, starting right after the previous group, belong
+    // to proofs[i]. E.g. proof_trade_counts = [3, 2] means trades[0..3]
+    // belong to proofs[0] and trades[3..5] belong to proofs[1]. Trades that
+    // failed to prove or settle (e.g. insolvent against the ledger, or part
+    // of a chunk whose proof generation failed) are omitted entirely --
+    // there is no placeholder entry for them.
     pub trades: Vec<Match>,
     pub total_value: u64,
-    // One proof per entry in `trades`, aligned by index. Trades that failed
-    // to prove (e.g. insolvent against the ledger) are omitted from both.
     pub proofs: Vec<Vec<u8>>,
+    pub proof_trade_counts: Vec<usize>,
 }
 
 #[cfg(test)]
@@ -326,6 +385,66 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].trades.len(), 0, "insolvent trade must be dropped, not proven with a fake balance");
         assert_eq!(batches[0].proofs.len(), 0);
+    }
+
+    // The actual point of the batching rewrite: a batch bigger than
+    // MAX_BATCH_TRADES, made of trades between many different, unrelated
+    // trader pairs (not the same two parties repeatedly), must still all
+    // get proven and settled -- split across multiple proofs, each
+    // covering up to MAX_BATCH_TRADES trades, not one proof per trade.
+    #[test]
+    fn test_standard_batch_spans_multiple_proof_chunks() {
+        let mut batcher = SettlementBatcher::new();
+        // Deliberately not a clean multiple of MAX_BATCH_TRADES, to also
+        // exercise a final, partially-filled chunk.
+        let n = MAX_BATCH_TRADES * 2 + 3;
+        batcher.standard_batch_size = n;
+
+        for i in 0..n {
+            let maker = [(i * 2) as u8; 32];
+            let taker = [(i * 2 + 1) as u8; 32];
+            batcher.deposit(taker, "BTC-USD", 1_000_000);
+            batcher.enqueue(Match {
+                maker_order_id: [i as u8; 32],
+                taker_order_id: [(i + 200) as u8; 32],
+                maker_trader: maker,
+                taker_trader: taker,
+                price: 100,
+                amount: 10,
+                timestamp_us: 0,
+                settlement_tier: SettlementPreference::Standard,
+                fee_basis_points: SettlementPreference::Standard.fee_basis_points(),
+                seller: taker,
+                fee_payer: taker,
+                symbol: "BTC-USD".to_string(),
+                assigned_node: [0u8; 32],
+                settlement_deadline: 0,
+            });
+        }
+
+        let batches = batcher.process_batches();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.trades.len(), n, "every solvent trade across every pair must be settled");
+
+        let expected_proof_count = n.div_ceil(MAX_BATCH_TRADES);
+        assert_eq!(batch.proofs.len(), expected_proof_count);
+        assert_eq!(batch.proof_trade_counts.len(), expected_proof_count);
+        assert_eq!(
+            batch.proof_trade_counts.iter().sum::<usize>(),
+            n,
+            "proof_trade_counts must account for every settled trade exactly once"
+        );
+        for &count in &batch.proof_trade_counts {
+            assert!(count > 0 && count <= MAX_BATCH_TRADES);
+        }
+
+        // Every maker actually got credited -- confirms the multi-pair
+        // per-chunk debit/credit logic, not just the proof-generation side.
+        for i in 0..n {
+            let maker = [(i * 2) as u8; 32];
+            assert_eq!(batcher.balance_of(maker, "BTC-USD"), 1000, "maker {i} should have been credited 100*10");
+        }
     }
 
     #[test]

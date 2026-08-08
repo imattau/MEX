@@ -215,8 +215,8 @@ mod node_attacks {
         let post_root_val = fake_trade.amount * fake_trade.price;
         let batch = TradeBatch {
             trades: vec![fake_trade],
-            maker_balance: 1_000_000,
-            taker_balance: 1_000_000_000,
+            maker_balances: vec![1_000_000],
+            taker_balances: vec![1_000_000_000],
             pre_state_root: [0u8; 32],
             post_state_root: u64_to_bytes32(post_root_val),
         };
@@ -360,8 +360,8 @@ mod node_attacks {
                 assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
-            maker_balance: 0,  // Zero balance!
-            taker_balance: trade_value,
+            maker_balances: vec![0],  // Zero balance!
+            taker_balances: vec![trade_value],
             pre_state_root: [0u8; 32],
             post_state_root: {
                 let mut result = [0u8; 32];

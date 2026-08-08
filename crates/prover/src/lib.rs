@@ -19,8 +19,12 @@ pub static BACKEND: Bn254Groth16Backend = Bn254Groth16Backend;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeBatch {
     pub trades: Vec<Match>,
-    pub maker_balance: u64,
-    pub taker_balance: u64,
+    // One entry per trade in `trades`, same length, same order -- each
+    // trade has its own independent maker/taker balance pair, so a batch
+    // can cover any number of unrelated trader pairs, not just one pair
+    // trading repeatedly. See DEXBatchCircuit's docs.
+    pub maker_balances: Vec<u64>,
+    pub taker_balances: Vec<u64>,
     pub pre_state_root: [u8; 32],
     pub post_state_root: [u8; 32],
 }
@@ -204,8 +208,12 @@ impl BatchSigner {
         let mut msg = Vec::new();
         msg.extend_from_slice(&batch.pre_state_root);
         msg.extend_from_slice(&batch.post_state_root);
-        msg.extend_from_slice(&batch.maker_balance.to_be_bytes());
-        msg.extend_from_slice(&batch.taker_balance.to_be_bytes());
+        for &b in &batch.maker_balances {
+            msg.extend_from_slice(&b.to_be_bytes());
+        }
+        for &b in &batch.taker_balances {
+            msg.extend_from_slice(&b.to_be_bytes());
+        }
         for trade in &batch.trades {
             msg.extend_from_slice(&trade.maker_order_id);
             msg.extend_from_slice(&trade.taker_order_id);
@@ -365,8 +373,8 @@ pub mod tests {
                 assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
-            maker_balance: 1_000_000,
-            taker_balance: 1_000_000,
+            maker_balances: vec![1_000_000],
+            taker_balances: vec![1_000_000],
             pre_state_root: [0u8; 32],
             // Root = sum of each trade's (amount * price), not maker_post +
             // taker_post -- see DEXBatchCircuit's docs. One trade of

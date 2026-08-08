@@ -151,8 +151,8 @@ async fn main() {
 
     let batch = TradeBatch {
         trades: vec![m.clone()],
-        maker_balance: 1_000_000,
-        taker_balance: 1_000_000,
+        maker_balances: vec![1_000_000],
+        taker_balances: vec![1_000_000],
         pre_state_root: [0u8; 32],
         post_state_root: u64_to_bytes32(m.price * m.amount),
     };

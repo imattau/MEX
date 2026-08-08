@@ -37,18 +37,22 @@ fn u64_to_bytes32(val: u64) -> [u8; 32] {
 }
 
 // A real MULTI-trade batch (not just one) -- this is the actual thing
-// being validated here: one proof, covering several distinct trades
-// between the same maker/taker pair, verified in a single on-chain call.
+// being validated here: one proof, covering several distinct trades among
+// completely different trader pairs (not the same two parties trading
+// repeatedly), verified in a single on-chain call.
 fn build_batch() -> TradeBatch {
-    let maker_balance = 1_000_000u64;
-    let taker_balance = 1_000_000u64;
-
-    let trade_terms = [(3000u64, 5u64), (2950u64, 3u64), (3010u64, 7u64)];
+    // (maker_balance, taker_balance, price, amount) -- a different pair
+    // and different starting balances each, to actually exercise that.
+    let trade_terms = [
+        (1_000_000u64, 1_000_000u64, 3000u64, 5u64),
+        (500_000u64, 2_000_000u64, 2950u64, 3u64),
+        (2_000_000u64, 750_000u64, 3010u64, 7u64),
+    ];
     let make_match = |price: u64, amount: u64, i: usize| Match {
         maker_order_id: [i as u8 + 1; 32],
         taker_order_id: [i as u8 + 100; 32],
-        maker_trader: [0u8; 32],
-        taker_trader: [0u8; 32],
+        maker_trader: [i as u8 + 1; 32],
+        taker_trader: [i as u8 + 50; 32],
         price,
         amount,
         timestamp_us: 1_700_000_000,
@@ -60,13 +64,15 @@ fn build_batch() -> TradeBatch {
         assigned_node: [0u8; 32],
         settlement_deadline: 0,
     };
-    let trades: Vec<Match> = trade_terms.iter().enumerate().map(|(i, &(p, a))| make_match(p, a, i)).collect();
+    let trades: Vec<Match> = trade_terms.iter().enumerate().map(|(i, &(_, _, p, a))| make_match(p, a, i)).collect();
+    let maker_balances: Vec<u64> = trade_terms.iter().map(|&(mb, _, _, _)| mb).collect();
+    let taker_balances: Vec<u64> = trade_terms.iter().map(|&(_, tb, _, _)| tb).collect();
     let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
 
     TradeBatch {
         trades,
-        maker_balance,
-        taker_balance,
+        maker_balances,
+        taker_balances,
         pre_state_root: [0u8; 32],
         post_state_root: u64_to_bytes32(total_value),
     }

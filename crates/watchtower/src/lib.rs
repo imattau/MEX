@@ -178,8 +178,8 @@ mod tests {
             }],
             pre_state_root: [0u8; 32],
             post_state_root: u64_to_bytes32(post_root_val),
-            maker_balance,
-            taker_balance,
+            maker_balances: vec![maker_balance],
+            taker_balances: vec![taker_balance],
         }
     }
 

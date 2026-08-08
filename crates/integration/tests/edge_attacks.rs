@@ -125,8 +125,8 @@ mod edge_cases {
     fn edge_empty_batch_zk_proving() {
         let batch = TradeBatch {
             trades: vec![],
-            maker_balance: 1_000_000,
-            taker_balance: 1_000_000,
+            maker_balances: vec![],
+            taker_balances: vec![],
             pre_state_root: [0x10u8; 32],
             post_state_root: [0x10u8; 32],  // Same pre/post = no change
         };
