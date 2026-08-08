@@ -237,6 +237,28 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         let start = (seq as usize).min(self.entries.len());
         &self.entries[start..]
     }
+
+    // Accepts an entry that arrived from elsewhere (e.g. broadcast over
+    // the mesh) into this log as its next entry, IF it actually is a
+    // valid extension of what's here already -- same check
+    // verify_chain does for a whole slice, applied one entry at a time
+    // as each arrives, so a mirror doesn't have to buffer everything and
+    // re-verify from scratch on every new entry. Rejects (returning
+    // Err, entry untouched) a wrong seq, a prev_hash that doesn't match
+    // this log's current root, or a claimed entry_hash that doesn't
+    // actually match its own seq/prev_hash/payload -- any of which means
+    // either the sender is lying or this mirror missed an earlier entry
+    // and needs to resync (see entries_since for catching back up).
+    pub fn try_append_remote(&mut self, entry: LogEntry<T>) -> Result<(), String> {
+        if !verify_next_entry(self.root(), self.len() as u64, &entry) {
+            return Err(format!(
+                "entry seq={} does not validly extend this log (current root {}, len {})",
+                entry.seq, hex_prefix(&self.root()), self.len()
+            ));
+        }
+        self.entries.push(entry);
+        Ok(())
+    }
 }
 
 // Recomputes the hash chain over `entries` from scratch and confirms it's
@@ -262,6 +284,21 @@ pub fn verify_chain<T: Serialize + Clone>(entries: &[LogEntry<T>]) -> bool {
         prev_hash = entry.entry_hash;
     }
     true
+}
+
+// The single-entry version of verify_chain's check: does `entry` validly
+// extend a log whose current root is `current_root` and whose next
+// expected sequence number is `expected_seq`? Used by
+// HashChainLog::try_append_remote for a mirror that verifies each entry
+// as it arrives instead of re-checking the whole chain from scratch.
+pub fn verify_next_entry<T: Serialize>(current_root: [u8; 32], expected_seq: u64, entry: &LogEntry<T>) -> bool {
+    entry.seq == expected_seq
+        && entry.prev_hash == current_root
+        && entry.entry_hash == compute_entry_hash(entry.seq, entry.prev_hash, &entry.payload)
+}
+
+fn hex_prefix(bytes: &[u8; 32]) -> String {
+    bytes.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -348,5 +385,45 @@ mod tests {
         assert_eq!(log.entries_since(3).len(), 2);
         assert_eq!(log.entries_since(0).len(), 5);
         assert_eq!(log.entries_since(100).len(), 0);
+    }
+
+    #[test]
+    fn test_try_append_remote_mirrors_a_valid_sequence() {
+        let mut source: HashChainLog<u64> = HashChainLog::new();
+        source.append(1);
+        source.append(2);
+        source.append(3);
+
+        let mut mirror: HashChainLog<u64> = HashChainLog::new();
+        for entry in source.entries() {
+            mirror.try_append_remote(entry.clone()).expect("valid entry should be accepted");
+        }
+        assert_eq!(mirror.root(), source.root());
+        assert_eq!(mirror.len(), source.len());
+    }
+
+    #[test]
+    fn test_try_append_remote_rejects_a_gap() {
+        let mut source: HashChainLog<u64> = HashChainLog::new();
+        source.append(1);
+        source.append(2);
+
+        let mut mirror: HashChainLog<u64> = HashChainLog::new();
+        // Skips seq=0 entirely -- mirror never saw the first entry.
+        let result = mirror.try_append_remote(source.entries()[1].clone());
+        assert!(result.is_err());
+        assert_eq!(mirror.len(), 0, "a rejected entry must not be appended");
+    }
+
+    #[test]
+    fn test_try_append_remote_rejects_a_tampered_entry() {
+        let mut source: HashChainLog<u64> = HashChainLog::new();
+        source.append(1);
+
+        let mut tampered = source.entries()[0].clone();
+        tampered.payload = 999;
+
+        let mut mirror: HashChainLog<u64> = HashChainLog::new();
+        assert!(mirror.try_append_remote(tampered).is_err());
     }
 }

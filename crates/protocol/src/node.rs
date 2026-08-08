@@ -157,6 +157,8 @@ pub struct MeshNode {
     // self -- mirrors how sender() exposes tx for injection, but in the
     // opposite direction (received-from-network, not injected-by-us).
     settlement_rx: Option<mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)>>,
+    log_entry_tx: mpsc::Sender<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>,
+    log_entry_rx: Option<mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>>,
 }
 
 pub struct MeshConfig {
@@ -228,6 +230,7 @@ impl MeshNode {
         let (tx, rx) = mpsc::channel(1024);
         let (echo_tx, echo_rx) = mpsc::channel(256);
         let (settlement_tx, settlement_rx) = mpsc::channel(64);
+        let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
 
         Ok(Self {
             node_id: config.node_id,
@@ -247,6 +250,8 @@ impl MeshNode {
             echo_tx,
             settlement_tx,
             settlement_rx: Some(settlement_rx),
+            log_entry_tx,
+            log_entry_rx: Some(log_entry_rx),
         })
     }
 
@@ -260,6 +265,14 @@ impl MeshNode {
     // run(), which consumes self; panics if called twice.
     pub fn settlement_proof_receiver(&mut self) -> mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)> {
         self.settlement_rx.take().expect("settlement_proof_receiver already taken")
+    }
+
+    // Every WireMessage::LogEntryBroadcast this node receives, for a
+    // caller to mirror into its own HashChainLog (see
+    // orderlog::HashChainLog::try_append_remote) -- same
+    // take-before-run() rule as settlement_proof_receiver.
+    pub fn log_entry_receiver(&mut self) -> mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)> {
+        self.log_entry_rx.take().expect("log_entry_receiver already taken")
     }
 
     // Direct handle to this node's transport, for a caller that needs to
@@ -280,6 +293,7 @@ impl MeshNode {
         let tx = self.tx.clone();
         let echo_tx = self.echo_tx.clone();
         let settlement_tx = self.settlement_tx.clone();
+        let log_entry_tx = self.log_entry_tx.clone();
         let mesh_key = self.mesh_key;
 
         let recv_transport = self.transport.clone();
@@ -322,6 +336,9 @@ impl MeshNode {
                         WireMessage::Ack { .. } => {}
                         WireMessage::SettlementProof { batch, proof } => {
                             let _ = settlement_tx.send((from, batch, proof)).await;
+                        }
+                        WireMessage::LogEntryBroadcast { entry } => {
+                            let _ = log_entry_tx.send((from, entry)).await;
                         }
                     },
                     Err(e) => {

@@ -4313,6 +4313,7 @@ dependencies = [
  "common",
  "ed25519-dalek",
  "lru 0.12.5",
+ "orderlog",
  "prover",
  "rand 0.8.7",
  "reputation",

@@ -1,4 +1,5 @@
 use common::{FloodMessage, NodeId};
+use orderlog::{LogEntry, OrderReceipt};
 use prover::TradeBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ const MSG_SIGNED_HEARTBEAT: u8 = 0x05;
 const MSG_ECHO_REQUEST: u8 = 0x06;
 const MSG_ECHO_RESPONSE: u8 = 0x07;
 const MSG_SETTLEMENT_PROOF: u8 = 0x08;
+const MSG_LOG_ENTRY: u8 = 0x09;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
@@ -43,6 +45,18 @@ pub enum WireMessage {
     SettlementProof {
         batch: TradeBatch,
         proof: Vec<u8>,
+    },
+    // Broadcast by the sequencer for every order it commits to its own
+    // order_log, in the exact sequence it committed them -- unlike Flood
+    // (Stage A), which gossips a bare Order with no ordering guarantee,
+    // this carries the actual orderlog::LogEntry (seq, prev_hash,
+    // entry_hash, and the signed OrderReceipt), so a peer can verify each
+    // one really is the sequencer's next committed entry
+    // (orderlog::HashChainLog::try_append_remote) instead of just
+    // learning an order existed at some point. Direct peer-to-peer, not
+    // flood-forwarded, same as SettlementProof.
+    LogEntryBroadcast {
+        entry: LogEntry<OrderReceipt>,
     },
 }
 
@@ -121,6 +135,9 @@ impl UdpTransport {
             WireMessage::SettlementProof { .. } => {
                 (MSG_SETTLEMENT_PROOF, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
             }
+            WireMessage::LogEntryBroadcast { .. } => {
+                (MSG_LOG_ENTRY, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -155,7 +172,7 @@ impl UdpTransport {
                 WireMessage::EncryptedFlood(payload.to_vec())
             }
             MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
-            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF => {
+            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY => {
                 bincode::deserialize::<WireMessage>(payload)
                     .map_err(|e| format!("Deserialize: {}", e))?
             }

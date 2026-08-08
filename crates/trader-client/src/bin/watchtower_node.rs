@@ -1,24 +1,34 @@
-// Stage C of connecting the gossip mesh to real settlement: a standalone
-// process that joins the mesh as a peer and independently re-verifies
-// every settlement proof it's broadcast a copy of
-// (protocol::WireMessage::SettlementProof), instead of trusting the
-// submitting node's own "I settled it" self-report.
+// A standalone process that joins the gossip mesh as a peer and provides
+// two independent accountability checks, neither trusting the
+// sequencer/settlement node's own self-report:
 //
-// watchtower::WatchtowerClient::monitor_batch already existed and did the
-// right thing (verify the proof, raise a dispute + slash the signers on
-// failure) -- it just had nothing feeding it live data before this. This
-// is that feed. It logs the same MockOnChainState side effects
-// monitor_batch always produced; it does NOT (yet) submit a real on-chain
-// dispute/slash transaction -- that needs a real chain-facing
-// implementation of watchtower::OnChainClient, which chain_ethereum's
-// EthereumAdapter doesn't have (it only implements the read/settle-side
-// ChainAdapter trait). That's a further stage, not this one.
+// Stage C: re-verifies every settlement proof it's broadcast a copy of
+// (protocol::WireMessage::SettlementProof) using
+// watchtower::WatchtowerClient::monitor_batch, which already existed and
+// did the right thing (verify the proof, raise a dispute + slash the
+// signers on failure) -- it just had nothing feeding it live data before
+// this. Logs the same MockOnChainState side effects monitor_batch always
+// produced; does NOT (yet) submit a real on-chain dispute/slash
+// transaction -- that needs a real chain-facing implementation of
+// watchtower::OnChainClient, which chain_ethereum's EthereumAdapter
+// doesn't have. A further stage, not this one.
+//
+// Stage B: mirrors the sequencer's order_log by accepting each broadcast
+// LogEntryBroadcast into its own orderlog::HashChainLog, verifying as
+// each arrives (orderlog::HashChainLog::try_append_remote) that it's
+// really the sequencer's next committed entry, not just gossip that an
+// order existed at some point. Prints its mirrored root periodically so
+// it can be checked against the sequencer's own published root (GET
+// /api/v1/order_log/root) -- if they ever match at the same length,
+// this process independently confirms the sequencer hasn't rewritten
+// anything it broadcast.
 //
 // Usage:
 //   cargo run -p trader-client --bin watchtower_node -- <node_id> <listen_addr> <peers>
 //   e.g. ... -- 2 127.0.0.1:19002 1@127.0.0.1:19001
 
 use common::{NodeId, Region};
+use orderlog::{HashChainLog, OrderReceipt};
 use prover::BACKEND;
 use protocol::{MeshConfig, MeshNode};
 use watchtower::{MockOnChainState, WatchtowerClient};
@@ -56,9 +66,29 @@ async fn main() {
     .unwrap_or_else(|e| panic!("failed to bind mesh listener on {listen_addr}: {e}"));
 
     let mut settlement_proofs = mesh_node.settlement_proof_receiver();
+    let mut log_entries = mesh_node.log_entry_receiver();
     tokio::spawn(mesh_node.run());
 
-    println!("watchtower_node {node_id} listening on {listen_addr}, watching for settlement proofs...");
+    println!("watchtower_node {node_id} listening on {listen_addr}, watching for settlement proofs and order log entries...");
+
+    let log_mirror_task = tokio::spawn(async move {
+        let mut mirror: HashChainLog<OrderReceipt> = HashChainLog::new();
+        while let Some((from, entry)) = log_entries.recv().await {
+            let seq = entry.seq;
+            match mirror.try_append_remote(entry) {
+                Ok(()) => {
+                    println!(
+                        "[order_log] accepted entry seq={seq} from node {from:?} -- mirror now len={} root={}",
+                        mirror.len(),
+                        hex::encode(&mirror.root()[..4]),
+                    );
+                }
+                Err(e) => {
+                    println!("[order_log] REJECTED entry seq={seq} from node {from:?}: {e}");
+                }
+            }
+        }
+    });
 
     let watchtower = WatchtowerClient;
     let mut on_chain = MockOnChainState::new();
@@ -82,4 +112,6 @@ async fn main() {
             );
         }
     }
+
+    let _ = log_mirror_task.await;
 }

@@ -213,7 +213,7 @@ async fn submit_order(
         order.settlement_preference,
         order.settlement_requester,
     );
-    guard.order_log.append(receipt.clone());
+    let log_entry = guard.order_log.append(receipt.clone()).clone();
 
     if let Some(mesh) = &guard.mesh {
         let flood_msg = common::FloodMessage {
@@ -230,6 +230,23 @@ async fn submit_order(
         // peers. Fire-and-forget: a slow/full mesh channel must never
         // block or fail a trader's HTTP response.
         let _ = mesh.sender.try_send((mesh.node_id, flood_msg));
+
+        // Stage B: broadcast the actual committed log entry (not just
+        // the bare order Flood above), so peers can verify each one
+        // really is this sequencer's next entry, not just gossip that an
+        // order existed at some point -- see
+        // protocol::WireMessage::LogEntryBroadcast's docs. Spawned
+        // rather than awaited here: this function holds a std::sync
+        // RwLock write guard (`guard`) for the rest of its body, and
+        // that must never be held across an .await.
+        let transport = mesh.transport.clone();
+        let peer_ids = mesh.peer_ids.clone();
+        tokio::spawn(async move {
+            for peer_id in peer_ids {
+                let msg = protocol::WireMessage::LogEntryBroadcast { entry: log_entry.clone() };
+                let _ = transport.send(peer_id, msg).await;
+            }
+        });
     }
 
     let matches = guard.order_book.add_order(order);
