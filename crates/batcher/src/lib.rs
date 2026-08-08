@@ -6,6 +6,7 @@ use common::{NodeId, SettlementPreference};
 use engine::Match;
 use prover::{TradeBatch, BACKEND, ProverBackend};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct SettlementBatcher {
@@ -21,7 +22,7 @@ pub struct SettlementBatcher {
     prover: &'static dyn ProverBackend,
     node_id: NodeId,
     reputation: Option<reputation::ReputationEngine>,
-    ledger: BalanceLedger,
+    ledger: Arc<Mutex<BalanceLedger>>,
 }
 
 impl SettlementBatcher {
@@ -39,19 +40,38 @@ impl SettlementBatcher {
             prover: &BACKEND,
             node_id: NodeId(0),
             reputation: None,
-            ledger: BalanceLedger::new(),
+            ledger: Arc::new(Mutex::new(BalanceLedger::new())),
         }
     }
 
-    // Records a balance for a trader in the simulated ledger (e.g. standing in for an
-    // on-chain deposit until real chain event listening exists). Without a deposit, a
-    // trader's balance is 0 and any trade against it is treated as insolvent.
+    // Shares an externally-owned ledger (e.g. one a chain-sync service is
+    // keeping up to date with real deposits/withdrawals) instead of the
+    // private, purely-simulated one `new()` creates. The batcher and
+    // whoever else holds a clone of `ledger` see and mutate the same state.
+    pub fn with_ledger(mut self, ledger: Arc<Mutex<BalanceLedger>>) -> Self {
+        self.ledger = ledger;
+        self
+    }
+
+    pub fn ledger(&self) -> Arc<Mutex<BalanceLedger>> {
+        self.ledger.clone()
+    }
+
+    // Records a balance for a trader in the ledger directly (e.g. for tests, or to
+    // stand in for a real deposit before chain-sync is wired up). Without a deposit,
+    // a trader's balance is 0 and any trade against it is treated as insolvent.
     pub fn deposit(&mut self, trader: [u8; 32], symbol: &str, amount: u64) {
-        self.ledger.deposit(trader, symbol, amount);
+        self.ledger
+            .lock()
+            .expect("ledger mutex poisoned")
+            .deposit(trader, symbol, amount);
     }
 
     pub fn balance_of(&self, trader: [u8; 32], symbol: &str) -> u64 {
-        self.ledger.balance_of(trader, symbol)
+        self.ledger
+            .lock()
+            .expect("ledger mutex poisoned")
+            .balance_of(trader, symbol)
     }
 
     pub fn with_reputation(mut self, node_id: NodeId, engine: reputation::ReputationEngine) -> Self {
@@ -164,10 +184,18 @@ impl SettlementBatcher {
 
     // The circuit backing prove_batch only supports one trade per proof (see
     // crates/prover/src/bn254.rs), so batching here means proving each trade
-    // individually against its traders' real (simulated) balances, rather than
+    // individually against its traders' real balances, rather than
     // amortizing a single proof over the whole batch. A trade that would be
     // insolvent against the ledger is dropped from the batch with a warning
     // instead of silently shipping an empty/invalid proof for it.
+    //
+    // The ledger may be shared with a concurrently-running chain-sync
+    // service (see SettlementBatcher::with_ledger), so the balance read
+    // here and the debit below aren't atomic with each other -- a real
+    // withdrawal could land in between and make the debit fail even though
+    // prove_batch's own check passed. debit() before credit() is what makes
+    // that safe: if the debit fails, the trade is dropped and nothing was
+    // credited, so a race can never mint an unbacked credit.
     fn build_batch(&mut self, trades: Vec<Match>, _tier: SettlementPreference) -> SettlementBatch {
         let mut proven_trades = Vec::with_capacity(trades.len());
         let mut proofs = Vec::with_capacity(trades.len());
@@ -175,8 +203,13 @@ impl SettlementBatcher {
 
         for trade in trades {
             let trade_value = trade.price as u64 * trade.amount as u64;
-            let maker_balance = self.ledger.balance_of(trade.maker_trader, &trade.symbol);
-            let taker_balance = self.ledger.balance_of(trade.taker_trader, &trade.symbol);
+            let (maker_balance, taker_balance) = {
+                let ledger = self.ledger.lock().expect("ledger mutex poisoned");
+                (
+                    ledger.balance_of(trade.maker_trader, &trade.symbol),
+                    ledger.balance_of(trade.taker_trader, &trade.symbol),
+                )
+            };
 
             let single_trade_batch = TradeBatch {
                 trades: vec![trade.clone()],
@@ -188,16 +221,31 @@ impl SettlementBatcher {
 
             match self.prover.prove_batch(&single_trade_batch) {
                 Ok(proof) => {
-                    // prove_batch already checked trade_value <= taker_balance, so
-                    // these ledger updates cannot fail.
-                    self.ledger.credit(trade.maker_trader, &trade.symbol, trade_value);
-                    self.ledger
-                        .debit(trade.taker_trader, &trade.symbol, trade_value)
-                        .expect("prove_batch already verified sufficient taker balance");
+                    let debited = self
+                        .ledger
+                        .lock()
+                        .expect("ledger mutex poisoned")
+                        .debit(trade.taker_trader, &trade.symbol, trade_value);
 
-                    total_value += trade_value;
-                    proven_trades.push(trade);
-                    proofs.push(proof);
+                    match debited {
+                        Ok(()) => {
+                            self.ledger
+                                .lock()
+                                .expect("ledger mutex poisoned")
+                                .credit(trade.maker_trader, &trade.symbol, trade_value);
+
+                            total_value += trade_value;
+                            proven_trades.push(trade);
+                            proofs.push(proof);
+                        }
+                        Err(reason) => {
+                            tracing::warn!(
+                                trade_id = ?trade.maker_order_id,
+                                reason,
+                                "Dropping trade from settlement batch: taker balance changed concurrently between proving and settling"
+                            );
+                        }
+                    }
                 }
                 Err(reason) => {
                     tracing::warn!(

@@ -11,7 +11,7 @@ contract SettlementFactory {
     address public admin;
     mapping(address => address) public traderEscrows;
 
-    event EscrowCreated(address indexed trader, address escrowAddress);
+    event EscrowCreated(address indexed trader, address escrowAddress, bytes32 offchainPubkey);
     event BatchSettled(bytes32 indexed batchRoot, uint256 tradeCount);
     event NodePenalized(bytes32 indexed nodePubkey, uint256 penalty);
 
@@ -21,14 +21,23 @@ contract SettlementFactory {
         admin = msg.sender;
     }
 
-    function createEscrow(address trader) external returns (address) {
+    // Self-service only: a trader creates and binds their own escrow. This is
+    // the only place the off-chain trading identity (an ed25519 pubkey used
+    // to sign orders/matches in the off-chain matching engine) is bound to an
+    // on-chain Ethereum account -- restricting this to msg.sender == trader
+    // is what makes that binding trustworthy. Without it, anyone could
+    // front-run a trader's first call with a bogus offchainPubkey and, since
+    // only one escrow is ever allowed per trader address, permanently lock
+    // them out of setting their real one.
+    function createEscrow(address trader, bytes32 offchainPubkey) external returns (address) {
+        require(msg.sender == trader, "Only self-service escrow creation");
         require(traderEscrows[trader] == address(0), "Escrow already exists");
 
         TraderEscrow escrow = new TraderEscrow();
-        escrow.initialize(trader, address(this));
+        escrow.initialize(trader, address(this), offchainPubkey);
 
         traderEscrows[trader] = address(escrow);
-        emit EscrowCreated(trader, address(escrow));
+        emit EscrowCreated(trader, address(escrow), offchainPubkey);
         return address(escrow);
     }
 

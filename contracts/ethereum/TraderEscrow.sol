@@ -9,6 +9,11 @@ interface IERC20 {
 contract TraderEscrow {
     address public factory;
     address public owner;
+    // The off-chain ed25519 pubkey used to sign orders/matches in the
+    // off-chain matching engine, bound once at creation by
+    // SettlementFactory.createEscrow. This is what lets on-chain deposits be
+    // credited to the right off-chain trading identity.
+    bytes32 public offchainPubkey;
     mapping(address => uint256) public balances;
     mapping(address => uint256) public lockedBalances;
     mapping(bytes32 => Settlement) public settlements;
@@ -41,10 +46,11 @@ contract TraderEscrow {
         _;
     }
 
-    function initialize(address _owner, address _factory) external {
+    function initialize(address _owner, address _factory, bytes32 _offchainPubkey) external {
         require(factory == address(0), "Already initialized");
         owner = _owner;
         factory = _factory;
+        offchainPubkey = _offchainPubkey;
     }
 
     function deposit(address token, uint256 amount) external payable {
