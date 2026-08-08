@@ -76,6 +76,15 @@ pub struct MultiNodeSimulation {
     // bootstrap_onchain, which must run (and succeed) before any match can
     // be gated on a real commitTrade. Empty until then.
     pub onchain_agents: HashMap<String, OnChainAgent>,
+    // Snapshot of every order as originally queued, keyed by order id.
+    // Order-book matching (engine::OrderBook::add_order) mutates/consumes
+    // resting orders unconditionally, before we know whether a gated match
+    // will actually be accepted on-chain. When one is rejected, this lets
+    // us reconstruct and reinsert exactly what was consumed -- the maker's
+    // resting remainder and/or the taker's unfilled remainder -- so a
+    // rejected match leaves the book (and therefore the agent's own
+    // open_orders view) exactly as if the match had never happened.
+    order_registry: HashMap<[u8; 32], Order>,
 }
 
 impl MultiNodeSimulation {
@@ -171,6 +180,7 @@ impl MultiNodeSimulation {
             total_volume: 0,
             step_matches: Vec::new(),
             onchain_agents: HashMap::new(),
+            order_registry: HashMap::new(),
         }
     }
 
@@ -212,6 +222,8 @@ impl MultiNodeSimulation {
         if idx >= self.nodes.len() || !self.nodes[idx].online {
             return;
         }
+
+        self.order_registry.insert(order.id, order.clone());
 
         let node = &self.nodes[idx];
         let flood_msg = FloodMessage {
@@ -344,8 +356,51 @@ impl MultiNodeSimulation {
                         error,
                         "match rejected: on-chain commitTrade failed, not applying to simulation state"
                     );
+                    self.restore_match_liquidity(&m, node_id);
                 }
             }
+        }
+    }
+
+    // Undoes exactly what add_order consumed for a single rejected match:
+    // the maker's resting remainder and the taker's unfilled remainder,
+    // reconstructed from order_registry if fully consumed (removed from
+    // the book) or simply topped back up if still resting there. Restores
+    // each side at ITS OWN original order price/side (not m.price, which
+    // is only guaranteed to equal the maker's price -- a marketable taker
+    // order can execute at a very different price than its own limit).
+    fn restore_match_liquidity(&mut self, m: &Match, node_id: u32) {
+        let Some(node) = self.nodes.iter_mut().find(|n| n.id.0 == node_id) else {
+            return;
+        };
+
+        Self::restore_order_amount(&mut node.orderbook, m.maker_order_id, m.amount, &self.order_registry);
+        Self::restore_order_amount(&mut node.orderbook, m.taker_order_id, m.amount, &self.order_registry);
+        node.matches_this_step = node.matches_this_step.saturating_sub(1);
+    }
+
+    fn restore_order_amount(
+        orderbook: &mut OrderBook,
+        order_id: [u8; 32],
+        restore_amount: u64,
+        registry: &HashMap<[u8; 32], Order>,
+    ) {
+        let Some(original) = registry.get(&order_id) else {
+            return;
+        };
+
+        let levels = match original.side {
+            OrderSide::Buy => &mut orderbook.bids,
+            OrderSide::Sell => &mut orderbook.asks,
+        };
+        let orders = levels.entry(original.price).or_default();
+
+        if let Some(existing) = orders.iter_mut().find(|o| o.id == order_id) {
+            existing.amount += restore_amount;
+        } else {
+            let mut restored = original.clone();
+            restored.amount = restore_amount;
+            orders.push(restored);
         }
     }
 

@@ -21,7 +21,7 @@ pub struct SharedState {
 pub fn create_router(shared: AppState) -> Router {
     Router::new()
         .route("/state", get(get_state))
-        .route("/state/agent/{id}", get(get_agent_state))
+        .route("/state/agent/:id", get(get_agent_state))
         .route("/action", post(post_action))
         .route("/step", post(post_step))
         .route("/health", get(health))
