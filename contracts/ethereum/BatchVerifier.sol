@@ -49,6 +49,15 @@ contract BatchVerifier {
         return _verifyGroth16(a, b, c, inputs);
     }
 
+    // Verifies e(A,B) == e(alpha,beta) * e(vk_x,gamma) * e(C,delta), the
+    // Groth16 verification equation, via the single-multi-pairing form
+    // e(A,B) * e(-alpha,beta) * e(-vk_x,gamma) * e(-C,delta) == 1
+    // using the alt_bn128 pairing precompile at address 0x08.
+    //
+    // Each of the 4 terms above is one (G1, G2) pair; the precompile expects
+    // them concatenated as 4 * 6 = 24 words: G1.x, G1.y, then G2 as
+    // (x.c1, x.c0, y.c1, y.c0) per EIP-197 -- imaginary component first.
+    // G2 points here are stored as [X, Y] with each of X/Y itself [c0, c1].
     function _verifyGroth16(
         uint256[2] memory a,
         uint256[2][2] memory b,
@@ -61,53 +70,43 @@ contract BatchVerifier {
             acc = _ecAdd(acc, scaled);
         }
 
-        uint256[2] memory negAcc = _negate(acc);
-
-        uint256[2] memory negAlpha = _negate(vk.alpha);
-        uint256[2][2] memory negDelta = [_negate(vk.delta[0]), vk.delta[1]];
-
-        uint256[4] memory pairingInput = [
-            a[0], a[1],
-            b[0][0], b[0][1]
-        ];
-
-        uint256[2] memory pairingInputGamma = [
-            negAcc[0], negAcc[1]
-        ];
-
-        uint256[2] memory pairingInputDelta = [
-            c[0], c[1]
-        ];
-
-        uint256[2] memory pairingInputAlpha = [
-            negAlpha[0], negAlpha[1]
-        ];
+        uint256[2] memory negAcc = _negateG1(acc);
+        uint256[2] memory negAlpha = _negateG1(vk.alpha);
+        uint256[2] memory negC = _negateG1(c);
 
         uint256[24] memory inputs_for_pairing;
-        inputs_for_pairing[0] = pairingInput[0];
-        inputs_for_pairing[1] = pairingInput[1];
-        inputs_for_pairing[2] = b[1][0];
-        inputs_for_pairing[3] = b[1][1];
-        inputs_for_pairing[4] = pairingInputGamma[0];
-        inputs_for_pairing[5] = pairingInputGamma[1];
-        inputs_for_pairing[6] = vk.gamma[1][0];
-        inputs_for_pairing[7] = vk.gamma[1][1];
-        inputs_for_pairing[8] = pairingInputDelta[0];
-        inputs_for_pairing[9] = pairingInputDelta[1];
-        inputs_for_pairing[10] = negDelta[1][0];
-        inputs_for_pairing[11] = negDelta[1][1];
-        inputs_for_pairing[12] = pairingInputAlpha[0];
-        inputs_for_pairing[13] = pairingInputAlpha[1];
-        inputs_for_pairing[14] = vk.beta[0][0];
-        inputs_for_pairing[15] = vk.beta[0][1];
-        inputs_for_pairing[16] = negDelta[0][0];
-        inputs_for_pairing[17] = negDelta[0][1];
-        inputs_for_pairing[18] = vk.beta[1][0];
-        inputs_for_pairing[19] = vk.beta[1][1];
-        inputs_for_pairing[20] = vk.gamma[0][0];
-        inputs_for_pairing[21] = vk.gamma[0][1];
-        inputs_for_pairing[22] = vk.alpha[0];
-        inputs_for_pairing[23] = vk.alpha[1];
+
+        // e(A, B)
+        inputs_for_pairing[0] = a[0];
+        inputs_for_pairing[1] = a[1];
+        inputs_for_pairing[2] = b[0][1];
+        inputs_for_pairing[3] = b[0][0];
+        inputs_for_pairing[4] = b[1][1];
+        inputs_for_pairing[5] = b[1][0];
+
+        // e(-alpha, beta)
+        inputs_for_pairing[6] = negAlpha[0];
+        inputs_for_pairing[7] = negAlpha[1];
+        inputs_for_pairing[8] = vk.beta[0][1];
+        inputs_for_pairing[9] = vk.beta[0][0];
+        inputs_for_pairing[10] = vk.beta[1][1];
+        inputs_for_pairing[11] = vk.beta[1][0];
+
+        // e(-vk_x, gamma)
+        inputs_for_pairing[12] = negAcc[0];
+        inputs_for_pairing[13] = negAcc[1];
+        inputs_for_pairing[14] = vk.gamma[0][1];
+        inputs_for_pairing[15] = vk.gamma[0][0];
+        inputs_for_pairing[16] = vk.gamma[1][1];
+        inputs_for_pairing[17] = vk.gamma[1][0];
+
+        // e(-C, delta)
+        inputs_for_pairing[18] = negC[0];
+        inputs_for_pairing[19] = negC[1];
+        inputs_for_pairing[20] = vk.delta[0][1];
+        inputs_for_pairing[21] = vk.delta[0][0];
+        inputs_for_pairing[22] = vk.delta[1][1];
+        inputs_for_pairing[23] = vk.delta[1][0];
 
         (bool success, bytes memory result) = address(0x08).staticcall(
             abi.encodePacked(inputs_for_pairing)
@@ -119,7 +118,12 @@ contract BatchVerifier {
         return valid;
     }
 
-    function _negate(uint256[2] memory p)
+    // Negates a G1 point (x, y) -> (x, -y). Only valid for G1 -- a G2
+    // point's Y coordinate is a full Fq2 element ([c0, c1]), not a single
+    // uint256, so it cannot be negated with this function. (A previous
+    // version of this contract incorrectly did exactly that, negating one
+    // word of a G2 point's X coordinate instead of its Y coordinate.)
+    function _negateG1(uint256[2] memory p)
         private
         pure
         returns (uint256[2] memory)

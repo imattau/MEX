@@ -9,7 +9,10 @@ use engine::Match;
 use serde::{Deserialize, Serialize};
 
 pub use backend::ProverBackend;
-pub use bn254::Bn254Groth16Backend;
+pub use bn254::{
+    decode_proof_calldata, export_verifying_key_calldata, Bn254Groth16Backend, ProofCalldata,
+    VerifyingKeyCalldata,
+};
 
 pub static BACKEND: Bn254Groth16Backend = Bn254Groth16Backend;
 

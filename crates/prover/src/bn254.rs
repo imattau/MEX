@@ -1,6 +1,6 @@
 use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey, Proof, prepare_verifying_key};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_snark::SNARK;
@@ -268,6 +268,96 @@ impl ProverBackend for Bn254Groth16Backend {
     }
 }
 
+// The raw (a, b, c, public_inputs) shape an on-chain Groth16 verifier expects
+// as calldata: each field element as a big-endian uint256. This is distinct
+// from the JSON `ProofData` prove_batch returns, which wraps ark-serialize's
+// *compressed* (and little-endian) encoding -- fine for passing the proof
+// bytes back into verify_proof, but not directly usable as EVM calldata.
+pub struct ProofCalldata {
+    pub a: [[u8; 32]; 2],
+    pub b: [[[u8; 32]; 2]; 2],
+    pub c: [[u8; 32]; 2],
+    pub public_inputs: Vec<[u8; 32]>,
+}
+
+// BN254's base and scalar fields are both 254 bits, so to_bytes_be() never
+// exceeds 32 bytes; left-pad with zeros to the fixed-width uint256 encoding
+// EVM calldata expects.
+fn field_to_be_bytes<F: PrimeField>(f: &F) -> [u8; 32] {
+    let bytes = f.into_bigint().to_bytes_be();
+    let mut out = [0u8; 32];
+    let start = out.len() - bytes.len();
+    out[start..].copy_from_slice(&bytes);
+    out
+}
+
+fn g1_to_be_bytes(point: &G1Affine) -> Result<[[u8; 32]; 2], String> {
+    let (x, y) = point.xy().ok_or("G1 point is the point at infinity")?;
+    Ok([field_to_be_bytes(x), field_to_be_bytes(y)])
+}
+
+fn g2_to_be_bytes(point: &G2Affine) -> Result<[[[u8; 32]; 2]; 2], String> {
+    let (x, y) = point.xy().ok_or("G2 point is the point at infinity")?;
+    Ok([
+        [field_to_be_bytes(&x.c0), field_to_be_bytes(&x.c1)],
+        [field_to_be_bytes(&y.c0), field_to_be_bytes(&y.c1)],
+    ])
+}
+
+// Decodes prove_batch's output into the raw calldata shape a Groth16
+// verifier's verifyProof(a, b, c, input) expects. Field-element byte order
+// here is big-endian (standard uint256 encoding) -- NOT the little-endian
+// order ark-serialize's compressed format uses internally, so this cannot
+// just re-slice the JSON bytes; it fully deserializes the proof and public
+// inputs and re-encodes each field element from scratch.
+pub fn decode_proof_calldata(proof_bytes: &[u8]) -> Result<ProofCalldata, String> {
+    let data: ProofData =
+        serde_json::from_slice(proof_bytes).map_err(|e| format!("JSON decode failed: {e}"))?;
+
+    let proof = Proof::<Bn254>::deserialize_compressed(data.proof.as_slice())
+        .map_err(|e| format!("Proof deserialization failed: {e:?}"))?;
+
+    let a = g1_to_be_bytes(&proof.a)?;
+    let b = g2_to_be_bytes(&proof.b)?;
+    let c = g1_to_be_bytes(&proof.c)?;
+
+    let mut public_inputs = Vec::with_capacity(data.public_inputs.len());
+    for input_bytes in &data.public_inputs {
+        let fr = Fr::deserialize_compressed(input_bytes.as_slice())
+            .map_err(|e| format!("Public input deserialization failed: {e:?}"))?;
+        public_inputs.push(field_to_be_bytes(&fr));
+    }
+
+    Ok(ProofCalldata { a, b, c, public_inputs })
+}
+
+// The verifying key in the same raw big-endian uint256 shape as
+// ProofCalldata, suitable as BatchVerifier.sol constructor arguments --
+// unlike export_verifying_key()'s hex-encoded *compressed* point encoding
+// (fine for display/debugging, not usable as calldata/constructor args).
+pub struct VerifyingKeyCalldata {
+    pub alpha: [[u8; 32]; 2],
+    pub beta: [[[u8; 32]; 2]; 2],
+    pub gamma: [[[u8; 32]; 2]; 2],
+    pub delta: [[[u8; 32]; 2]; 2],
+    pub ic: Vec<[[u8; 32]; 2]>,
+}
+
+pub fn export_verifying_key_calldata() -> Result<VerifyingKeyCalldata, String> {
+    let vk = prepared_vk();
+    let alpha = g1_to_be_bytes(&vk.alpha_g1)?;
+    let beta = g2_to_be_bytes(&vk.beta_g2)?;
+    let gamma = g2_to_be_bytes(&vk.gamma_g2)?;
+    let delta = g2_to_be_bytes(&vk.delta_g2)?;
+    let ic = vk
+        .gamma_abc_g1
+        .iter()
+        .map(g1_to_be_bytes)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(VerifyingKeyCalldata { alpha, beta, gamma, delta, ic })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +406,62 @@ mod tests {
         let backend = Bn254Groth16Backend;
         let proof = backend.prove_batch(&batch).unwrap();
         assert!(backend.verify_proof(&proof, &batch));
+    }
+
+    #[test]
+    fn test_decode_proof_calldata_matches_public_inputs() {
+        let maker_balance = 1_000_000u64;
+        let taker_balance = 1_000_000u64;
+        let price = 3000u64;
+        let amount = 5u64;
+        let total_value = price * amount;
+        let maker_post = maker_balance + total_value;
+        let taker_post = taker_balance - total_value;
+        let pre_root = 0u64;
+        let post_root_val = maker_post + taker_post;
+
+        let batch = TradeBatch {
+            trades: vec![Match {
+                maker_order_id: [1u8; 32],
+                taker_order_id: [2u8; 32],
+                maker_trader: [0u8; 32],
+                taker_trader: [0u8; 32],
+                price,
+                amount,
+                timestamp_us: 1700000000,
+                settlement_tier: SettlementPreference::Standard,
+                fee_basis_points: 5,
+                seller: [0u8; 32],
+                fee_payer: [0u8; 32],
+                symbol: "BTC-USD".to_string(),
+                settlement_deadline: 0,
+            }],
+            maker_balance,
+            taker_balance,
+            pre_state_root: [0u8; 32],
+            post_state_root: u64_to_bytes32(post_root_val),
+        };
+
+        let backend = Bn254Groth16Backend;
+        let proof = backend.prove_batch(&batch).unwrap();
+        let calldata = decode_proof_calldata(&proof).unwrap();
+
+        // 4 public inputs: maker_post, taker_post, pre_root, post_root (see
+        // prove_batch's `public_inputs` vec) -- each a big-endian uint256
+        // matching the plaintext u64 values used to build this batch, since
+        // none of them come close to wrapping the scalar field here.
+        assert_eq!(calldata.public_inputs.len(), 4);
+        assert_eq!(calldata.public_inputs[0], u64_to_bytes32(maker_post));
+        assert_eq!(calldata.public_inputs[1], u64_to_bytes32(taker_post));
+        assert_eq!(calldata.public_inputs[2], u64_to_bytes32(pre_root));
+        assert_eq!(calldata.public_inputs[3], u64_to_bytes32(post_root_val));
+
+        // a/c are G1 points (non-infinity for a real proof); b is G2. Just
+        // assert they're non-zero -- an actual pairing-check round trip
+        // against BatchVerifier.sol needs a real chain, exercised in the
+        // chain-ethereum crate's live tests instead of here.
+        assert_ne!(calldata.a, [[0u8; 32]; 2]);
+        assert_ne!(calldata.c, [[0u8; 32]; 2]);
+        assert_ne!(calldata.b, [[[0u8; 32]; 2]; 2]);
     }
 }
