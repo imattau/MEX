@@ -7,7 +7,7 @@ use security::{encrypt_packet, decrypt_packet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 const GEO_VERIFY_THRESHOLD: f64 = 0.8;
 
@@ -131,7 +131,19 @@ pub struct MeshNode {
     heartbeat: HeartbeatTracker,
     heartbeat_interval_ms: f64,
     max_missed_heartbeats: u32,
-    transport: Arc<Mutex<UdpTransport>>,
+    // Arc<UdpTransport>, not Arc<Mutex<UdpTransport>>: both send and recv
+    // take &self (tokio's UdpSocket is safe for concurrent send/recv from
+    // multiple tasks), so a Mutex here is not just unnecessary but
+    // actively harmful -- it previously let the background recv task's
+    // spawned loop hold the lock for the full duration of a blocking
+    // recv().await, starving every other user of the lock (forwarding
+    // sends, heartbeats, echo requests/responses) until another packet
+    // happened to arrive and free it. Under sparse traffic (e.g. exactly
+    // one flood message with nothing else in flight) this could deadlock
+    // forwarding indefinitely -- caught by
+    // protocol/tests/mesh_test.rs::test_flood_forwarding_over_udp once
+    // that test was given a real assertion instead of none.
+    transport: Arc<UdpTransport>,
     peer_addrs: HashMap<NodeId, SocketAddr>,
     mesh_key: [u8; 32],
     censorship: CensorshipMonitor,
@@ -218,7 +230,7 @@ impl MeshNode {
             heartbeat,
             heartbeat_interval_ms: config.heartbeat_interval_ms,
             max_missed_heartbeats: config.max_missed_heartbeats,
-            transport: Arc::new(Mutex::new(transport)),
+            transport: Arc::new(transport),
             peer_addrs,
             mesh_key,
             censorship: CensorshipMonitor::new(),
@@ -235,18 +247,14 @@ impl MeshNode {
     }
 
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let transport = self.transport.clone();
         let tx = self.tx.clone();
         let echo_tx = self.echo_tx.clone();
         let mesh_key = self.mesh_key;
 
-        let recv_transport = transport.clone();
+        let recv_transport = self.transport.clone();
         tokio::spawn(async move {
             loop {
-                let result = {
-                    let t = recv_transport.lock().await;
-                    t.recv().await
-                };
+                let result = recv_transport.recv().await;
                 match result {
                     Ok((from, msg)) => match msg {
                         WireMessage::Flood(fm) => {
@@ -307,7 +315,7 @@ impl MeshNode {
                     match self.flood.on_receive(flood_msg, now) {
                         Ok(forwards) => {
                             reputation::integration::on_flood_relayed(&mut self.reputation, from_node);
-                            let t = self.transport.lock().await;
+                            let t = &self.transport;
                             for (target, fwd_msg) in forwards {
                                 self.censorship.track_order(fwd_msg.order.id);
                                 if self.mesh_key != [0u8; 32] {
@@ -337,7 +345,7 @@ impl MeshNode {
                         .copied()
                         .collect();
                     let missing_count = missing.len();
-                    let t = self.transport.lock().await;
+                    let t = &self.transport;
                     let _ = t.send(echo_from, WireMessage::EchoResponse { present, missing }).await;
                     if missing_count > 0 {
                         tracing::warn!(?echo_from, %missing_count, "Echo: peer doesn't know about orders we've seen");
@@ -349,7 +357,7 @@ impl MeshNode {
 
                 _ = echo_tick.tick() => {
                     if let Some(order_id) = self.censorship.pick_random_order() {
-                        let t = self.transport.lock().await;
+                        let t = &self.transport;
                         for peer_id in self.flood.routing_table.downstream_peers.iter().map(|p| p.id) {
                             let _ = t.send(peer_id, WireMessage::EchoRequest {
                                 order_ids: vec![order_id],
@@ -364,7 +372,7 @@ impl MeshNode {
                         .unwrap_or_default()
                         .as_secs_f64();
 
-                    let t = self.transport.lock().await;
+                    let t = &self.transport;
                     for (peer_id, _) in &self.peer_addrs {
                         let sig = t.sign_heartbeat(*peer_id, now);
                         let pk = t.public_key();
