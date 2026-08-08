@@ -872,7 +872,11 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "api"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "axum",
+ "batcher",
+ "chain",
+ "chain-ethereum",
  "common",
  "ed25519-dalek",
  "engine",
@@ -890,6 +894,7 @@ dependencies = [
  "tower",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber 0.3.23",
  "validation",
 ]
 
@@ -6000,10 +6005,13 @@ dependencies = [
  "chain",
  "chain-ethereum",
  "common",
+ "ed25519-dalek",
  "engine",
  "futures-util",
  "hex",
  "prover",
+ "rand 0.8.7",
+ "reqwest",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",

@@ -18,6 +18,11 @@ metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 reputation = { path = "../reputation" }
 hex = "0.4.3"
+batcher = { version = "0.1.0", path = "../batcher" }
+chain = { version = "0.1.0", path = "../chain" }
+chain-ethereum = { version = "0.1.0", path = "../chain-ethereum" }
+alloy = "2.3.0"
+tracing-subscriber = "0.3.23"
 
 [dev-dependencies]
 ed25519-dalek = "2"

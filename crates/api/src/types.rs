@@ -38,3 +38,19 @@ pub struct OrderBookResponse {
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmCommitRequest {
+    pub maker_order_id: [u8; 32],
+    pub taker_order_id: [u8; 32],
+    // The trade_hash the trader's own commitTrade call used -- trusted
+    // opportunistically here, verified for real on-chain at settlement
+    // time (see AppState::confirmed_trade_hashes's docs).
+    pub trade_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmCommitResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}

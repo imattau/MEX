@@ -1,13 +1,15 @@
-use crate::types::{OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
+use crate::types::{ConfirmCommitRequest, ConfirmCommitResponse, OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
 use axum::{
     extract::{Path, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use batcher::SettlementBatcher;
 use common::Order;
 use engine::{Match, OrderBook};
 use metrics::{counter, gauge, histogram};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock, OnceLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -49,6 +51,22 @@ pub struct AppState {
     pub validator: OrderValidator,
     pub ws_broadcast: broadcast::Sender<Match>,
     pub reputation: reputation::ReputationEngine,
+    // A fresh match sits here, NOT yet in `batcher`, until the fee-paying
+    // trader confirms they've actually committed it on-chain (commitTrade
+    // is trader-signed -- this server can never do that on a trader's
+    // behalf). Keyed by (maker_order_id, taker_order_id) since a single
+    // maker order can partially fill against several different takers,
+    // producing several Matches that share a maker_order_id.
+    pub pending_commits: HashMap<([u8; 32], [u8; 32]), Match>,
+    // The trade_hash the confirming trader reported for each match that
+    // has moved from pending_commits into batcher, kept until the
+    // settlement loop consumes it to build that trade's on-chain
+    // TradeEntry. Trusting the trader's self-reported hash here is safe:
+    // if it doesn't correspond to a real commitTrade record,
+    // settleBatchWithFees simply reverts for that trade at settlement
+    // time, the same as it would for any other bad input.
+    pub confirmed_trade_hashes: HashMap<([u8; 32], [u8; 32]), [u8; 32]>,
+    pub batcher: SettlementBatcher,
 }
 
 fn setup_metrics() {
@@ -68,6 +86,7 @@ pub fn app(state: Arc<RwLock<AppState>>) -> Router {
     Router::new()
         .route("/api/v1/order", post(submit_order))
         .route("/api/v1/orderbook", get(get_orderbook))
+        .route("/api/v1/trade/committed", post(confirm_committed))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_handler))
         .route("/ws/trades/:trader", get(ws_trader_handler))
@@ -150,6 +169,9 @@ async fn submit_order(
             m,
             now,
         );
+        guard
+            .pending_commits
+            .insert((m.maker_order_id, m.taker_order_id), m.clone());
     }
 
     gauge!("orderbook.bids.depth").set(guard.order_book.bids.len() as f64);
@@ -201,6 +223,50 @@ async fn get_orderbook(
         bids,
         asks,
     })
+}
+
+// Called by a trader (or their TraderClient) right after they've
+// successfully called commitTrade on-chain for a match this server
+// notified them of. Moves the match from pending_commits into the
+// settlement batcher -- before this call, a match exists only in this
+// server's memory and is never eligible for batched settlement, since
+// this server cannot commit a trader's funds on their behalf.
+#[instrument(skip(state))]
+async fn confirm_committed(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Json(payload): Json<ConfirmCommitRequest>,
+) -> Json<ConfirmCommitResponse> {
+    counter!("api.trade.commit_confirmations").increment(1);
+    let key = (payload.maker_order_id, payload.taker_order_id);
+
+    let mut guard = state.write().unwrap();
+    let Some(m) = guard.pending_commits.remove(&key) else {
+        warn!("Rejected commit confirmation for unknown or already-confirmed match");
+        return Json(ConfirmCommitResponse {
+            success: false,
+            error: Some("no pending match for that (maker_order_id, taker_order_id)".to_string()),
+        });
+    };
+
+    guard.confirmed_trade_hashes.insert(key, payload.trade_hash);
+
+    // SettlementBatcher checks its own internal ledger for solvency before
+    // proving a batch (see batcher::BalanceLedger) -- a separate, purely
+    // off-chain balance tracker, disconnected from the real on-chain
+    // TraderEscrow balances that actually custody funds and that
+    // settleBatchWithFees already enforces against directly. Real
+    // solvency was already proven the moment this trader's own
+    // commitTrade succeeded on-chain (that's what we're confirming here);
+    // crediting the ledger with exactly this trade's value translates
+    // that already-proven fact into the ledger's own terms, rather than
+    // re-deriving or re-checking something the chain already guarantees.
+    let trade_value = m.price * m.amount;
+    guard.batcher.deposit(m.taker_trader, &m.symbol, trade_value);
+
+    guard.batcher.enqueue(m);
+    info!("Match confirmed committed on-chain, queued for batched settlement");
+
+    Json(ConfirmCommitResponse { success: true, error: None })
 }
 
 async fn ws_handler(

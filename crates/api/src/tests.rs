@@ -21,6 +21,9 @@ mod tests {
             validator: OrderValidator::new(100),
             ws_broadcast: tx,
             reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
         }))
     }
 
@@ -140,6 +143,9 @@ mod tests {
             validator: OrderValidator::new(100),
             ws_broadcast: tx,
             reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -250,5 +256,145 @@ mod tests {
 
         let _ = buyer_ws.close(None).await;
         let _ = bystander_ws.close(None).await;
+    }
+
+    // A fresh match must sit in pending_commits, invisible to the
+    // settlement batcher, until the fee-paying trader confirms they've
+    // actually committed it on-chain -- this server never holds a
+    // trader's key and can't do that on their behalf. Confirming moves it
+    // into the batcher and records the trader-reported trade_hash.
+    #[tokio::test]
+    async fn test_confirm_committed_moves_match_from_pending_to_batcher() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use rand::rngs::OsRng;
+
+        let (tx, _) = broadcast::channel(100);
+        let state = Arc::new(RwLock::new(AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: tx,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+        }));
+        let state_for_inspection = Arc::clone(&state);
+        let app = app(state);
+
+        let mut csprng = OsRng;
+        let sk_seller = SigningKey::generate(&mut csprng);
+        let pk_seller = sk_seller.verifying_key().to_bytes();
+        let sk_buyer = SigningKey::generate(&mut csprng);
+        let pk_buyer = sk_buyer.verifying_key().to_bytes();
+
+        fn build_and_sign(sk: &SigningKey, trader: [u8; 32], side: common::OrderSide, price: u64, amount: u64, nonce: u64) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+            let unsigned = common::Order {
+                id: order_id, trader, symbol: "ETH-USD".to_string(), side, price, amount,
+                signature: Vec::new(), nonce, expiry: 0,
+                settlement_preference: common::SettlementPreference::Standard,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount, "signature": signature,
+                "nonce": nonce, "expiry": 0,
+            })
+        }
+
+        async fn post_order(app: &axum::Router, body: &serde_json::Value) -> SubmitOrderResponse {
+            let response = app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/order")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let sell_req = build_and_sign(&sk_seller, pk_seller, common::OrderSide::Sell, 3000, 5, 1);
+        let sell_resp = post_order(&app, &sell_req).await;
+        assert!(sell_resp.success);
+
+        let buy_req = build_and_sign(&sk_buyer, pk_buyer, common::OrderSide::Buy, 3000, 5, 1);
+        let buy_resp = post_order(&app, &buy_req).await;
+        assert!(buy_resp.success);
+        assert_eq!(buy_resp.matches.len(), 1);
+        let m = &buy_resp.matches[0];
+
+        {
+            let guard = state_for_inspection.read().unwrap();
+            assert!(
+                guard.pending_commits.contains_key(&(m.maker_order_id, m.taker_order_id)),
+                "a fresh match must sit in pending_commits before commit confirmation"
+            );
+        }
+
+        let fake_trade_hash = [0x42u8; 32];
+        let confirm_body = serde_json::json!({
+            "maker_order_id": m.maker_order_id,
+            "taker_order_id": m.taker_order_id,
+            "trade_hash": fake_trade_hash,
+        });
+        let response = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/api/v1/trade/committed")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .header("X-API-Key", "dev-default-key")
+                    .body(Body::from(serde_json::to_vec(&confirm_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let confirm_resp: crate::types::ConfirmCommitResponse = serde_json::from_slice(&body).unwrap();
+        assert!(confirm_resp.success, "confirm_committed rejected a real pending match: {:?}", confirm_resp.error);
+
+        {
+            let guard = state_for_inspection.read().unwrap();
+            assert!(
+                !guard.pending_commits.contains_key(&(m.maker_order_id, m.taker_order_id)),
+                "confirmed match must be removed from pending_commits"
+            );
+            assert_eq!(
+                guard.confirmed_trade_hashes.get(&(m.maker_order_id, m.taker_order_id)),
+                Some(&fake_trade_hash),
+                "the trader-reported trade_hash must be recorded"
+            );
+        }
+
+        // Confirming the same match twice must not succeed the second
+        // time -- it's already been removed from pending_commits.
+        let response = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/api/v1/trade/committed")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .header("X-API-Key", "dev-default-key")
+                    .body(Body::from(serde_json::to_vec(&confirm_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let confirm_resp2: crate::types::ConfirmCommitResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!confirm_resp2.success, "confirming an already-confirmed match must not succeed again");
     }
 }
