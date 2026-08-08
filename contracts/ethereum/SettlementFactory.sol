@@ -216,16 +216,60 @@ contract SettlementFactory is EIP712 {
             "Invalid ZK proof"
         );
 
+        // Groups trades from the same trader's escrow, in the same token,
+        // into one settleNetted call instead of one settleWithFee call per
+        // trade -- every check runs per-trade exactly as before, only the
+        // final fund movement is batched, saving a lockedBalances SSTORE
+        // and a fee transfer per extra trade once a trader has more than
+        // one trade in this settlement batch. N is capped at
+        // MAX_BATCH_TRADES (8), so the O(n^2) grouping scan is bounded and
+        // cheap. Split into _settleGroup to avoid "stack too deep".
+        bool[] memory processed = new bool[](trades.length);
+
         for (uint256 i = 0; i < trades.length; i++) {
-            TradeEntry calldata trade = trades[i];
+            if (processed[i]) continue;
+            _settleGroup(trades, processed, i, feeConfig);
+        }
+
+        emit BatchSettled(bytes32(input[0]), trades.length);
+    }
+
+    // Validates and settles every not-yet-processed trade in `trades` that
+    // shares trades[i]'s trader and token, marking each processed[j] = true
+    // as it goes, then pays them all out through one settleNetted call.
+    // Every require here is identical, per-trade, to what settleBatchWithFees
+    // did inline before this was split out for stack-depth reasons.
+    function _settleGroup(
+        TradeEntry[] calldata trades,
+        bool[] memory processed,
+        uint256 i,
+        FeeConfig calldata feeConfig
+    ) private {
+        TradeEntry calldata head = trades[i];
+        address escrowA = traderEscrows[head.trader];
+        require(escrowA != address(0), "Escrow must exist");
+
+        uint256 groupSize = 0;
+        for (uint256 j = i; j < trades.length; j++) {
+            if (!processed[j] && trades[j].trader == head.trader && trades[j].token == head.token) {
+                groupSize++;
+            }
+        }
+
+        address[] memory recipients = new address[](groupSize);
+        uint256[] memory amounts = new uint256[](groupSize);
+        uint256 totalFee = 0;
+        uint256 idx = 0;
+
+        for (uint256 j = i; j < trades.length; j++) {
+            if (processed[j]) continue;
+            TradeEntry calldata trade = trades[j];
+            if (trade.trader != head.trader || trade.token != head.token) continue;
 
             require(
                 registry.getNode(trade.assignedNode).operator == msg.sender,
                 "Only the assigned node's operator can settle this trade"
             );
-
-            address escrowA = traderEscrows[trade.trader];
-            require(escrowA != address(0), "Escrow must exist");
 
             TraderEscrow.Settlement memory s = TraderEscrow(escrowA).getSettlement(trade.tradeHash);
             require(s.deadline > 0, "Trade not committed");
@@ -236,18 +280,16 @@ contract SettlementFactory is EIP712 {
             require(trade.counterparty == s.counterparty, "Counterparty does not match committed settlement");
             require(trade.amount + trade.fee == s.lockedAmount, "Amount/fee does not match committed settlement");
 
-            TraderEscrow(escrowA).settleWithFee(
-                trade.token,
-                trade.counterparty,
-                trade.amount,
-                trade.fee,
-                feeConfig.feeRecipient
-            );
+            recipients[idx] = trade.counterparty;
+            amounts[idx] = trade.amount;
+            totalFee += trade.fee;
+            idx++;
 
             TraderEscrow(escrowA).markSettlementSettled(trade.tradeHash);
+            processed[j] = true;
         }
 
-        emit BatchSettled(bytes32(input[0]), trades.length);
+        TraderEscrow(escrowA).settleNetted(head.token, recipients, amounts, totalFee, feeConfig.feeRecipient);
     }
 
     // Slashes only the node that was actually assigned to a trade at settlement-recording

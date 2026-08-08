@@ -99,25 +99,43 @@ contract TraderEscrow {
         emit Settled(token, recipient, amount);
     }
 
-    function settleWithFee(
+    // Settles one or more trades from this escrow in the same token as a
+    // single lockedBalances write, instead of one settleWithFee call (and
+    // one lockedBalances SSTORE) per trade. SettlementFactory groups
+    // same-trader-same-token trades from one settleBatchWithFees call
+    // before calling this -- recipients/amounts is that group's individual
+    // trade payouts (still paid out separately, since counterparties
+    // differ), totalFee is the group's combined fee (all going to the same
+    // feeRecipient, since fee destination is uniform for a whole
+    // settleBatchWithFees call). A single-trade group (recipients.length
+    // == 1) behaves identically to the old settleWithFee.
+    function settleNetted(
         address token,
-        address recipient,
-        uint256 amount,
-        uint256 fee,
+        address[] calldata recipients,
+        uint256[] calldata amounts,
+        uint256 totalFee,
         address feeRecipient
     ) external onlyFactory {
-        uint256 totalRequired = amount + fee;
+        require(recipients.length == amounts.length, "recipients/amounts length mismatch");
+
+        uint256 totalAmount = 0;
+        for (uint256 i = 0; i < amounts.length; i++) {
+            totalAmount += amounts[i];
+        }
+
+        uint256 totalRequired = totalAmount + totalFee;
         require(lockedBalances[token] >= totalRequired, "Insufficient locked balance");
         lockedBalances[token] -= totalRequired;
 
-        _transfer(token, recipient, amount);
-
-        if (fee > 0 && feeRecipient != address(0)) {
-            _transfer(token, feeRecipient, fee);
-            emit FeeDeducted(token, feeRecipient, fee);
+        for (uint256 i = 0; i < recipients.length; i++) {
+            _transfer(token, recipients[i], amounts[i]);
+            emit Settled(token, recipients[i], amounts[i]);
         }
 
-        emit Settled(token, recipient, amount);
+        if (totalFee > 0 && feeRecipient != address(0)) {
+            _transfer(token, feeRecipient, totalFee);
+            emit FeeDeducted(token, feeRecipient, totalFee);
+        }
     }
 
     function recordSettlement(
