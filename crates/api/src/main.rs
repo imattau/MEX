@@ -33,10 +33,22 @@
 //                            not a live value (see FeeCalculator's docs).
 //   MEX_FEE_VOLATILITY_INDEX Optional, >= 0.0. Feeds FeeCalculator's
 //                            volatility-premium term.
+//   MEX_RECEIPT_SIGNING_KEY  Optional, hex-encoded 32-byte ed25519 seed.
+//                            Signs order receipts (see receipts.rs) --
+//                            deliberately separate from
+//                            MEX_NODE_PRIVATE_KEY, since this key never
+//                            authorizes moving funds. If unset, a fresh
+//                            key is generated at startup with a loud
+//                            warning: receipts still work within that
+//                            process's lifetime, but a trader who wants to
+//                            hold this node accountable across restarts
+//                            needs the pubkey to stay stable, so this
+//                            should be set for any real deployment.
 
 use api::server::AppState;
 use api::settlement::SettlementConfig;
 use common::FeeCalculator;
+use ed25519_dalek::SigningKey;
 use engine::OrderBook;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -101,6 +113,25 @@ async fn main() {
         .unwrap_or(0.0);
     let fee_calculator = FeeCalculator::new(fee_base_gas_price, fee_batch_utilization, fee_volatility_index);
 
+    let receipt_signing_key: SigningKey = match std::env::var("MEX_RECEIPT_SIGNING_KEY") {
+        Ok(hex_seed) => {
+            let seed_bytes = hex::decode(hex_seed.trim_start_matches("0x")).unwrap_or_else(|e| {
+                eprintln!("MEX_RECEIPT_SIGNING_KEY is not valid hex: {e}");
+                std::process::exit(1);
+            });
+            let seed: [u8; 32] = seed_bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+                eprintln!("MEX_RECEIPT_SIGNING_KEY must be exactly 32 bytes, got {}", v.len());
+                std::process::exit(1);
+            });
+            SigningKey::from_bytes(&seed)
+        }
+        Err(_) => {
+            eprintln!("WARNING: MEX_RECEIPT_SIGNING_KEY not set -- generating an ephemeral receipt-signing key for this process only. Order receipts won't be verifiable against a stable pubkey across restarts.");
+            SigningKey::generate(&mut rand::rngs::OsRng)
+        }
+    };
+    let receipt_pubkey_hex = hex::encode(receipt_signing_key.verifying_key().to_bytes());
+
     let mut order_book = OrderBook::new(symbol.clone());
     order_book.set_active_nodes(vec![node_pubkey]);
     order_book.set_fee_calculator(fee_calculator);
@@ -115,6 +146,7 @@ async fn main() {
         pending_commits: std::collections::HashMap::new(),
         confirmed_trade_hashes: std::collections::HashMap::new(),
         batcher: batcher::SettlementBatcher::new(),
+        receipt_signing_key,
     }));
 
     let settlement_config = SettlementConfig {
@@ -131,6 +163,6 @@ async fn main() {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
-    tracing::info!(%addr, %symbol, fee_base_gas_price, fee_batch_utilization, fee_volatility_index, "MEX API server starting");
+    tracing::info!(%addr, %symbol, fee_base_gas_price, fee_batch_utilization, fee_volatility_index, %receipt_pubkey_hex, "MEX API server starting");
     axum::serve(listener, router).await.unwrap();
 }

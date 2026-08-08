@@ -1,3 +1,4 @@
+use crate::receipts::OrderReceipt;
 use common::{OrderSide, SettlementPreference, SettlementRequester};
 use engine::Match;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,11 @@ pub struct SubmitOrderResponse {
     pub order_id: [u8; 32],
     pub matches: Vec<Match>,
     pub error: Option<String>,
+    // Independent, trader-verifiable proof of when this server received
+    // the order -- see receipts.rs. None only when success is false
+    // (rejected orders never entered the book, so there's nothing
+    // ordering-sensitive to attest to).
+    pub receipt: Option<OrderReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

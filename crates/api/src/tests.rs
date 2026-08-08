@@ -24,6 +24,7 @@ mod tests {
             pending_commits: std::collections::HashMap::new(),
             confirmed_trade_hashes: std::collections::HashMap::new(),
             batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         }))
     }
 
@@ -146,6 +147,7 @@ mod tests {
             pending_commits: std::collections::HashMap::new(),
             confirmed_trade_hashes: std::collections::HashMap::new(),
             batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -279,6 +281,7 @@ mod tests {
             pending_commits: std::collections::HashMap::new(),
             confirmed_trade_hashes: std::collections::HashMap::new(),
             batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
         }));
         let state_for_inspection = Arc::clone(&state);
         let app = app(state);

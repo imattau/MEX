@@ -1,4 +1,5 @@
 pub mod types;
+pub mod receipts;
 pub mod server;
 pub mod settlement;
 pub mod tests;

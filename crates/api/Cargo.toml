@@ -23,11 +23,10 @@ chain = { version = "0.1.0", path = "../chain" }
 chain-ethereum = { version = "0.1.0", path = "../chain-ethereum" }
 alloy = "2.3.0"
 tracing-subscriber = "0.3.23"
+ed25519-dalek = "2"
+rand = "0.8"
 
 [dev-dependencies]
-ed25519-dalek = "2"
 futures-util = "0.3.33"
-hex = "0.4.3"
-rand = "0.8"
 reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = "0.24"

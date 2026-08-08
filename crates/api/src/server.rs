@@ -7,6 +7,7 @@ use axum::{
 };
 use batcher::SettlementBatcher;
 use common::Order;
+use ed25519_dalek::SigningKey;
 use engine::{Match, OrderBook};
 use metrics::{counter, gauge, histogram};
 use std::collections::HashMap;
@@ -67,6 +68,11 @@ pub struct AppState {
     // time, the same as it would for any other bad input.
     pub confirmed_trade_hashes: HashMap<([u8; 32], [u8; 32]), [u8; 32]>,
     pub batcher: SettlementBatcher,
+    // Deliberately separate from the on-chain settlement key
+    // (MEX_NODE_PRIVATE_KEY) -- this key only ever signs order receipts,
+    // never a transaction, so compromising it can't move funds. See
+    // receipts.rs.
+    pub receipt_signing_key: SigningKey,
 }
 
 fn setup_metrics() {
@@ -149,8 +155,24 @@ async fn submit_order(
             order_id,
             matches: Vec::new(),
             error: Some("Invalid order signature".to_string()),
+            receipt: None,
         });
     }
+
+    // Signed BEFORE add_order runs -- see receipts.rs's docs for why this
+    // ordering is the entire point: signing after matching would let the
+    // timestamp be chosen to fit whatever match order already happened.
+    let receipt = crate::receipts::sign_receipt(
+        &guard.receipt_signing_key,
+        order.id,
+        order.trader,
+        &order.symbol,
+        order.side,
+        order.price,
+        order.amount,
+        order.nonce,
+        order.expiry,
+    );
 
     let matches = guard.order_book.add_order(order);
     counter!("api.orders.matched").increment(matches.len() as u64);
@@ -188,6 +210,7 @@ async fn submit_order(
         order_id,
         matches,
         error: None,
+        receipt: Some(receipt),
     })
 }
 
