@@ -3,8 +3,10 @@
 // anywhere constructed a real AppState and served it as a live process.
 //
 // Env vars:
-//   MEX_API_KEY              Required by check_auth (server.rs); a dev
-//                             default is used with a loud warning if unset.
+//   MEX_API_KEY              Required by check_auth (server.rs) in a
+//                             --release build (panics at startup if
+//                             unset); a dev default is used with a loud
+//                             warning if unset in a debug build only.
 //   MEX_API_PORT              Defaults to 8080.
 //   MEX_API_SYMBOL            Defaults to "ETH-USD".
 //   MEX_RPC_URL               Required. Ethereum JSON-RPC endpoint.

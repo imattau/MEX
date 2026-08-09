@@ -83,6 +83,54 @@ mod tests {
         assert!(book_resp.asks.is_empty());
     }
 
+    #[test]
+    fn test_constant_time_eq_matches_string_equality() {
+        use crate::server::constant_time_eq;
+        assert!(constant_time_eq("dev-default-key", "dev-default-key"));
+        assert!(!constant_time_eq("dev-default-key", "wrong-key"));
+        assert!(!constant_time_eq("short", "longer-string"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_requires_no_api_key() {
+        let state = test_state();
+        let app = app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .extension(fake_connect_info())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_missing_or_wrong_api_key_is_rejected() {
+        let state = test_state();
+        let app = app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbook")
+                    .header("X-API-Key", "not-the-right-key")
+                    .extension(fake_connect_info())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn test_submit_invalid_signature_order() {
         let state = test_state();

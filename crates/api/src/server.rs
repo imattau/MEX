@@ -31,13 +31,40 @@ use validation::OrderValidator;
 
 static API_KEY: OnceLock<String> = OnceLock::new();
 
+// No silent fallback to a known default in a --release build: a
+// hardcoded key that lets the server boot unauthenticated-in-practice
+// is a real production hole, not a convenience. Gated on
+// cfg!(debug_assertions) rather than cfg!(test) so it stays zero-friction
+// for `cargo build`/`cargo test` (both debug by default, including the
+// many integration-test binaries under crates/api/tests/ that link this
+// crate as a normal --release-less dependency and so never see cfg(test)
+// themselves) while still refusing to boot silently-unauthenticated in
+// the release binary that's actually deployed.
 fn get_api_key() -> &'static str {
-    API_KEY.get_or_init(|| {
-        std::env::var("MEX_API_KEY").unwrap_or_else(|_| {
-            eprintln!("WARNING: MEX_API_KEY not set, using development default");
+    API_KEY.get_or_init(|| match std::env::var("MEX_API_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ if cfg!(debug_assertions) => {
+            eprintln!("WARNING: MEX_API_KEY not set, using development default (debug build only)");
             "dev-default-key".to_string()
-        })
+        }
+        _ => panic!("MEX_API_KEY must be set in a release build"),
     })
+}
+
+// Constant-time comparison: `==` on &str short-circuits at the first
+// mismatched byte, letting a timing attack recover the key one byte at
+// a time. Length is compared up front (also usually leaked; not the
+// part worth hiding) and then every byte pair is XORed and OR-folded so
+// the loop's timing doesn't depend on *where* a mismatch occurs.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 async fn check_auth(
@@ -48,7 +75,7 @@ async fn check_auth(
     let valid_key = headers
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == get_api_key())
+        .map(|v| constant_time_eq(v, get_api_key()))
         .unwrap_or(false);
 
     if !valid_key {
@@ -277,7 +304,18 @@ pub fn app(state: Arc<RwLock<AppState>>) -> Router {
         .route("/ws/trades/:trader", get(ws_trader_handler))
         .layer(middleware::from_fn(check_auth))
         .layer(ConcurrencyLimitLayer::new(256))
+        // Added after the auth/concurrency layers above, so it's
+        // covered by neither: a liveness/readiness probe (k8s, a load
+        // balancer, etc.) must be reachable without a credential and
+        // without competing with real traffic for the concurrency
+        // budget, or an authenticated-only probe just moves the outage
+        // from "service down" to "probe can't tell".
+        .route("/health", get(health_handler))
         .with_state(state)
+}
+
+async fn health_handler() -> impl IntoResponse {
+    StatusCode::OK
 }
 
 async fn metrics_handler() -> impl IntoResponse {

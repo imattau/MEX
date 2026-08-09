@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: build, test, clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # crates/rdma's build.rs probes for libibverbs at build time and
+      # falls back to a mock automatically if it's absent (see the
+      # crate's own build.rs) -- this step is a speed/coverage
+      # optimization, not a hard requirement.
+      - name: Install libibverbs (optional, for crates/rdma real backend)
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
+
+      - name: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets
+
+      # No -D warnings: this codebase has pre-existing clippy warnings
+      # not yet triaged (see the production-readiness audit). This gate
+      # is about catching new *errors*, not enforcing lint-clean status
+      # retroactively -- tightening it to deny warnings is a separate,
+      # deliberate follow-up once the existing ones are addressed.
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  contracts:
+    name: hardhat compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: hardhat compile
+        run: npx hardhat compile
