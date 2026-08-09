@@ -311,7 +311,9 @@ impl MultiWatchtower {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use ark_bn254::Fr;
     use ark_ff::fields::{Fp64, MontBackend, MontConfig};
+    use ark_relations::r1cs::ConstraintSystem;
     use common::SettlementPreference;
 
     #[derive(MontConfig)]
@@ -433,6 +435,114 @@ pub mod tests {
         let cs_ref = ConstraintSystemRef::new(cs);
         assert!(circuit.generate_constraints(cs_ref.clone()).is_ok());
         assert!(!cs_ref.is_satisfied().unwrap_or(true));
+    }
+
+    // Stage P6-1b follow-up: batch_circuit_one_real_trade (above) uses
+    // the tiny Fq (mod 17) test field, which is fine for a single
+    // trade's small numbers but WOULD silently wrap around for this
+    // fixture's root (up to 44920) -- circom always works mod the real
+    // BN254 scalar field, with no such wraparound at these values, so
+    // cross-checking against it needs the real field here too. These
+    // exact numbers are also what circom/input_multi_trade.json (and
+    // its _tampered variant) use -- see circom/check_equivalence.sh and
+    // EQUIVALENCE.md for the actual cross-tool witness comparison this
+    // sets up; this test alone only proves the ARKWORKS side accepts/
+    // rejects them correctly, same as every other test in this module.
+    //
+    // Values match crates/prover/src/bn254.rs's own
+    // test_bn254_prove_and_verify_multi_trade_batch fixture exactly
+    // (3 distinct trades, 3 different trader pairs' balances, 5
+    // trailing no-op padding slots) -- same total_value = 44920 that
+    // test already asserts as post_state_root, cross-referenced rather
+    // than invented fresh.
+    // `n` real trades (from the fixed 3-trade pool below) followed by
+    // (MAX_BATCH_TRADES - n) no-op padding slots -- n=3 is the
+    // multi-trade fixture, n=0 is the all-padding boundary case, both
+    // used below.
+    fn batch_circuit_multi_trade_n(
+        n: usize,
+        tamper_second_maker_post: bool,
+    ) -> DEXBatchCircuit<Fr> {
+        let all_trades = [
+            (1_000_000u64, 1_000_000u64, 5u64, 3000u64),
+            (500_000u64, 500_000u64, 3u64, 2950u64),
+            (2_000_000u64, 2_000_000u64, 7u64, 3010u64),
+        ];
+        let trades = &all_trades[..n];
+
+        let mut maker_pre = Vec::new();
+        let mut taker_pre = Vec::new();
+        let mut amount = Vec::new();
+        let mut price = Vec::new();
+        let mut maker_post = Vec::new();
+        let mut taker_post = Vec::new();
+        let mut intermediate_roots = Vec::new();
+        let mut root = Fr::from(0u64);
+
+        for i in 0..MAX_BATCH_TRADES {
+            let (mb, tb, a, p) = trades.get(i).copied().unwrap_or((0, 0, 0, 0));
+            let val = Fr::from(a) * Fr::from(p);
+            let mut mp = Fr::from(mb) + val;
+            if tamper_second_maker_post && i == 1 {
+                mp = Fr::from(999_999u64);
+            }
+            maker_pre.push(Some(Fr::from(mb)));
+            taker_pre.push(Some(Fr::from(tb)));
+            amount.push(Some(Fr::from(a)));
+            price.push(Some(Fr::from(p)));
+            maker_post.push(Some(mp));
+            taker_post.push(Some(Fr::from(tb) - val));
+            root += val;
+            if i < MAX_BATCH_TRADES - 1 {
+                intermediate_roots.push(Some(root));
+            }
+        }
+
+        DEXBatchCircuit::<Fr> {
+            maker_balance_pre: maker_pre,
+            taker_balance_pre: taker_pre,
+            amount,
+            price,
+            maker_balance_post: maker_post,
+            taker_balance_post: taker_post,
+            intermediate_roots,
+            pre_state_root: Some(Fr::from(0u64)),
+            post_state_root: Some(root),
+        }
+    }
+
+    #[test]
+    fn test_multi_trade_fixture_satisfied() {
+        let circuit = batch_circuit_multi_trade_n(3, false);
+        let cs = ConstraintSystem::<Fr>::new();
+        let cs_ref = ConstraintSystemRef::new(cs);
+        assert!(circuit.generate_constraints(cs_ref.clone()).is_ok());
+        assert!(cs_ref.is_satisfied().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_multi_trade_fixture_tampered_is_unsatisfied() {
+        let circuit = batch_circuit_multi_trade_n(3, true);
+        let cs = ConstraintSystem::<Fr>::new();
+        let cs_ref = ConstraintSystemRef::new(cs);
+        assert!(circuit.generate_constraints(cs_ref.clone()).is_ok());
+        assert!(!cs_ref.is_satisfied().unwrap_or(true));
+    }
+
+    // The all-padding boundary case -- every slot a true no-op. Matches
+    // circom/input_all_padding.json. TradeBatch::prove_batch itself
+    // refuses an empty trade LIST at the Rust-API level (see bn254.rs),
+    // but the CIRCUIT's own constraint system has no such refusal built
+    // in -- it's a perfectly satisfiable all-zero witness -- so this is
+    // a genuine boundary of the constraint system itself, worth cross-
+    // checking even though prove_batch never actually exercises it.
+    #[test]
+    fn test_all_padding_fixture_satisfied() {
+        let circuit = batch_circuit_multi_trade_n(0, false);
+        let cs = ConstraintSystem::<Fr>::new();
+        let cs_ref = ConstraintSystemRef::new(cs);
+        assert!(circuit.generate_constraints(cs_ref.clone()).is_ok());
+        assert!(cs_ref.is_satisfied().unwrap_or(false));
     }
 
     #[test]
