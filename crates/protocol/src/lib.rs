@@ -1,6 +1,7 @@
 pub mod types;
 pub mod heartbeat;
 pub mod flood;
+pub mod batch_quorum;
 pub mod latency;
 pub mod ordering;
 pub mod sequencer;
@@ -17,5 +18,6 @@ pub use flood::DeterministicFlood;
 pub use latency::PeerLatencyStats;
 pub use ordering::{OriginTimeEstimator, OrderingDecision};
 pub use sequencer::OrderSequencer;
+pub use batch_quorum::OrderBatchQuorum;
 pub use node::{MeshNode, MeshConfig, ChainNodeStatus};
 pub use transport::{UdpTransport, WireMessage};

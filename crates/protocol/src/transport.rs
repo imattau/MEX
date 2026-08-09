@@ -19,6 +19,7 @@ const MSG_MISCONDUCT_REPORT: u8 = 0x0A;
 const MSG_PING: u8 = 0x0B;
 const MSG_PONG: u8 = 0x0C;
 const MSG_HOP_WITNESS: u8 = 0x0D;
+const MSG_BATCH_PROPOSAL: u8 = 0x0E;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
@@ -102,6 +103,22 @@ pub enum WireMessage {
         order_id: [u8; 32],
         hop_node: NodeId,
         forwarded_at: f64,
+    },
+    // Stage P3a: `reporter`'s own independently-resolved sha256 hash of
+    // a batch of orders, sequenced via ITS OWN OriginTimeEstimator
+    // evidence -- see protocol::batch_quorum's docs. batch_key
+    // identifies WHICH set of order_ids this is a proposal for (a hash
+    // of the sorted order_id set, order-INsensitive, so any node that
+    // knows the same set of order_ids computes the same batch_key
+    // regardless of what order it thinks they belong in); proposed_hash
+    // is the actual claim being voted on (order-SENSITIVE). Same
+    // no-cryptographic-binding caveat as MisconductReport: nothing here
+    // proves `reporter` is who actually sent this.
+    BatchProposal {
+        batch_key: [u8; 32],
+        proposed_hash: [u8; 32],
+        reporter: NodeId,
+        timestamp: f64,
     },
 }
 
@@ -210,6 +227,9 @@ impl UdpTransport {
             WireMessage::HopWitness { .. } => {
                 (MSG_HOP_WITNESS, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
             }
+            WireMessage::BatchProposal { .. } => {
+                (MSG_BATCH_PROPOSAL, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
+            }
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -245,7 +265,7 @@ impl UdpTransport {
             }
             MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
             | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY
-            | MSG_MISCONDUCT_REPORT | MSG_PING | MSG_PONG | MSG_HOP_WITNESS => {
+            | MSG_MISCONDUCT_REPORT | MSG_PING | MSG_PONG | MSG_HOP_WITNESS | MSG_BATCH_PROPOSAL => {
                 bincode::deserialize::<WireMessage>(payload)
                     .map_err(|e| format!("Deserialize: {}", e))?
             }

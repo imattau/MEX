@@ -343,6 +343,20 @@ pub struct MeshNode {
     earliest_witness_query_tx: mpsc::Sender<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)>,
     earliest_witness_query_rx: Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)>>,
     misconduct_quorum: MisconductQuorum,
+    // Stage P3a: whether multiple independent nodes' order-batch
+    // proposals agree -- see crate::batch_quorum's docs.
+    batch_quorum: crate::batch_quorum::OrderBatchQuorum,
+    // Fires (batch_key, agreed_hash) once batch_quorum actually reaches
+    // threshold for a batch_key -- take-before-run() rule, same as
+    // confirmed_misconduct_receiver.
+    confirmed_batch_tx: mpsc::Sender<([u8; 32], [u8; 32])>,
+    confirmed_batch_rx: Option<mpsc::Receiver<([u8; 32], [u8; 32])>>,
+    // Lets propose_batch be triggered AFTER run() has taken ownership of
+    // self -- same reason chain_status_sender/compare_orders_query_sender
+    // exist: propose_batch(&mut self, ...) can't be called from outside
+    // once run() owns self. See propose_batch_sender.
+    propose_batch_tx: mpsc::Sender<([u8; 32], Vec<[u8; 32]>)>,
+    propose_batch_rx: Option<mpsc::Receiver<([u8; 32], Vec<[u8; 32]>)>>,
     // pubkey -> latest known on-chain status, pushed in by whoever owns
     // the chain connection (see set_chain_status's docs) -- empty until
     // something calls set_chain_status, which is fine: an empty map
@@ -494,6 +508,8 @@ impl MeshNode {
         let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
         let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
         let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
+        let (confirmed_batch_tx, confirmed_batch_rx) = mpsc::channel(256);
+        let (propose_batch_tx, propose_batch_rx) = mpsc::channel(256);
         let (chain_status_tx, chain_status_rx) = mpsc::channel(8);
         let (origin_time_query_tx, origin_time_query_rx) = mpsc::channel(256);
         let (compare_orders_query_tx, compare_orders_query_rx) = mpsc::channel(256);
@@ -532,6 +548,14 @@ impl MeshNode {
                 if config.require_staked_reporters { config.misconduct_stake_threshold as f64 } else { 0.0 },
                 60.0,
             ),
+            // min_reporters=2, same rationale as MisconductQuorum's
+            // constant above: this node's own proposal plus at least one
+            // independent corroborating proposal from elsewhere.
+            batch_quorum: crate::batch_quorum::OrderBatchQuorum::new(2, 60.0),
+            confirmed_batch_tx,
+            confirmed_batch_rx: Some(confirmed_batch_rx),
+            propose_batch_tx,
+            propose_batch_rx: Some(propose_batch_rx),
             chain_status: HashMap::new(),
             require_staked_reporters: config.require_staked_reporters,
             chain_status_tx,
@@ -700,6 +724,61 @@ impl MeshNode {
     // quorum for `subject` -- see MisconductQuorum's docs for why the
     // actual reputation consequence needs more than one voice before
     // this node treats it as confirmed.
+    // Fires (batch_key, agreed_hash) once this node's own batch_quorum
+    // actually reaches threshold -- take-before-run() rule, same as
+    // confirmed_misconduct_receiver.
+    pub fn confirmed_batch_receiver(&mut self) -> mpsc::Receiver<([u8; 32], [u8; 32])> {
+        self.confirmed_batch_rx.take().expect("confirmed_batch_receiver already taken")
+    }
+
+    // The channel-based counterpart to propose_batch, for a caller that
+    // doesn't own the MeshNode anymore (run() has already taken self by
+    // value) -- same take-before-run() pattern as
+    // origin_time_query_sender/compare_orders_query_sender.
+    pub fn propose_batch_sender(&self) -> mpsc::Sender<([u8; 32], Vec<[u8; 32]>)> {
+        self.propose_batch_tx.clone()
+    }
+
+    // Stage P3a: broadcasts this node's own evidence-derived resolution
+    // of `resolved_order_ids` (the actual output of
+    // sequencer::OrderSequencer::flush -- this method doesn't resolve
+    // anything itself, it only reports and votes on an already-resolved
+    // sequence) to every peer, and records it as this node's own first
+    // vote toward its own batch_quorum -- same self-counts-as-first-vote
+    // pattern report_misconduct already uses. batch_key must be
+    // batch_quorum::compute_batch_key(the same order_ids, any order) --
+    // computed by the caller, not here, since the caller is the one who
+    // knows which order_ids it resolved a sequence for.
+    pub async fn propose_batch(&mut self, batch_key: [u8; 32], resolved_order_ids: &[[u8; 32]]) {
+        let proposed_hash = crate::batch_quorum::compute_proposal_hash(resolved_order_ids);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        for peer_id in self.peer_ids() {
+            let msg = WireMessage::BatchProposal {
+                batch_key,
+                proposed_hash,
+                reporter: self.node_id,
+                timestamp,
+            };
+            let _ = self.transport.send(peer_id, msg).await;
+        }
+        self.record_batch_proposal(batch_key, self.node_id, proposed_hash, timestamp);
+    }
+
+    // Shared by propose_batch's own vote and every incoming
+    // WireMessage::BatchProposal this node receives (see run()'s
+    // batch_proposal_rx branch).
+    fn record_batch_proposal(&mut self, batch_key: [u8; 32], reporter: NodeId, proposed_hash: [u8; 32], now: f64) {
+        if let Some(agreed_hash) = self.batch_quorum.record(batch_key, reporter, proposed_hash, now) {
+            tracing::info!(?batch_key, "order batch quorum reached");
+            let _ = self.confirmed_batch_tx.try_send((batch_key, agreed_hash));
+        } else {
+            tracing::debug!(?batch_key, ?reporter, distinct_hashes = self.batch_quorum.distinct_hash_count(&batch_key), "batch proposal recorded, quorum not yet reached");
+        }
+    }
+
     pub async fn report_misconduct(&mut self, subject: NodeId, reason: String) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -826,6 +905,7 @@ impl MeshNode {
         let mut origin_time_query_rx = self.origin_time_query_rx.take().expect("run() already called");
         let mut compare_orders_query_rx = self.compare_orders_query_rx.take().expect("run() already called");
         let mut earliest_witness_query_rx = self.earliest_witness_query_rx.take().expect("run() already called");
+        let mut propose_batch_rx = self.propose_batch_rx.take().expect("run() already called");
 
         // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
         // misconduct_tx, no external caller needs raw Pong/HopWitness
@@ -833,6 +913,7 @@ impl MeshNode {
         // MisconductReport the same way CensorshipMonitor's does).
         let (pong_tx, mut pong_rx) = mpsc::channel::<(NodeId, u64, f64)>(256);
         let (hop_witness_tx, mut hop_witness_rx) = mpsc::channel::<(NodeId, [u8; 32], NodeId, f64)>(1024);
+        let (batch_proposal_tx, mut batch_proposal_rx) = mpsc::channel::<([u8; 32], [u8; 32], NodeId, f64)>(256);
         // Every incoming MisconductReport is dual-sent: misconduct_tx
         // (external, unchanged -- e.g. watchtower_node printing it) and
         // this one, which only the main loop below drains, to run it
@@ -904,6 +985,9 @@ impl MeshNode {
                         }
                         WireMessage::HopWitness { order_id, hop_node, forwarded_at } => {
                             let _ = hop_witness_tx.send((from, order_id, hop_node, forwarded_at)).await;
+                        }
+                        WireMessage::BatchProposal { batch_key, proposed_hash, reporter, timestamp } => {
+                            let _ = batch_proposal_tx.send((batch_key, proposed_hash, reporter, timestamp)).await;
                         }
                     },
                     Err(e) => {
@@ -1031,6 +1115,14 @@ impl MeshNode {
 
                 Some(event) = misconduct_internal_rx.recv() => {
                     self.apply_or_record_accusation(event.subject, event.reporter, &event.reason, event.timestamp);
+                }
+
+                Some((batch_key, proposed_hash, reporter, timestamp)) = batch_proposal_rx.recv() => {
+                    self.record_batch_proposal(batch_key, reporter, proposed_hash, timestamp);
+                }
+
+                Some((batch_key, resolved_order_ids)) = propose_batch_rx.recv() => {
+                    self.propose_batch(batch_key, &resolved_order_ids).await;
                 }
 
                 Some(snapshot) = chain_status_rx.recv() => {
