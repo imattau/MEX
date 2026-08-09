@@ -597,17 +597,26 @@ mod tests {
             }));
             let app = app(Arc::clone(&state));
 
-            let sell_req = build_and_sign(&sk_seller, pk_seller, common::OrderSide::Sell, 3000, 5, 1);
+            let sell_req =
+                build_and_sign(&sk_seller, pk_seller, common::OrderSide::Sell, 3000, 5, 1);
             let sell_resp = post_order(&app, &sell_req).await;
             assert!(sell_resp.success);
 
             let buy_req = build_and_sign(&sk_buyer, pk_buyer, common::OrderSide::Buy, 3000, 5, 1);
             let buy_resp = post_order(&app, &buy_req).await;
             assert!(buy_resp.success);
-            assert_eq!(buy_resp.matches.len(), 1, "a crossing buy/sell must match immediately in non-sequenced mode");
+            assert_eq!(
+                buy_resp.matches.len(),
+                1,
+                "a crossing buy/sell must match immediately in non-sequenced mode"
+            );
 
             let guard = state.read().unwrap();
-            assert_eq!(guard.order_log.len(), 2, "both orders must have durably-backed order_log entries before 'crashing'");
+            assert_eq!(
+                guard.order_log.len(),
+                2,
+                "both orders must have durably-backed order_log entries before 'crashing'"
+            );
             buy_resp.matches[0].clone()
             // `state` (and the sled Db it holds a PersistenceLog handle
             // to) is dropped here, at scope end -- standing in for the
@@ -640,11 +649,19 @@ mod tests {
         assert_eq!(replayed, 2, "both durably-recorded orders must be replayed");
 
         assert!(
-            recovered_state.applied_order_ids.contains(&expected_match.maker_order_id)
-                || recovered_state.applied_order_ids.contains(&expected_match.taker_order_id),
+            recovered_state
+                .applied_order_ids
+                .contains(&expected_match.maker_order_id)
+                || recovered_state
+                    .applied_order_ids
+                    .contains(&expected_match.taker_order_id),
             "replay must mark both original order ids as applied"
         );
-        assert_eq!(recovered_state.match_log.len(), 1, "replay must reproduce exactly the one match that originally occurred");
+        assert_eq!(
+            recovered_state.match_log.len(),
+            1,
+            "replay must reproduce exactly the one match that originally occurred"
+        );
         assert!(
             recovered_state.pending_commits.contains_key(&(expected_match.maker_order_id, expected_match.taker_order_id)),
             "replay must reconstruct pending_commits exactly as it stood before the simulated crash -- this match was never confirmed, so it must still be pending"
@@ -653,5 +670,248 @@ mod tests {
         // vs 5), nothing should be left resting on either side.
         assert_eq!(recovered_state.order_book.bids.len(), 0);
         assert_eq!(recovered_state.order_book.asks.len(), 0);
+    }
+
+    // Stage P4-2 live validation: the actual point of extending the WAL
+    // past P4-1 -- two matches are both confirmed committed (moved out
+    // of pending_commits, into the batcher), but only ONE of them ever
+    // gets a BatchSubmitted checkpoint (standing in for the settlement
+    // loop having actually gotten it on-chain before the simulated
+    // crash). Replay must tell these apart: the unsettled one comes back
+    // exactly as confirm_committed originally left it (in the batcher's
+    // queue, credited in the ledger, in confirmed_trade_hashes); the
+    // settled one must NOT be re-enqueued (that would risk a duplicate
+    // on-chain submission) but must still be gone from pending_commits.
+    #[tokio::test]
+    async fn test_settled_confirmations_are_not_replayed_but_unsettled_ones_are() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use rand::rngs::OsRng;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        fn build_and_sign(
+            sk: &SigningKey,
+            trader: [u8; 32],
+            side: common::OrderSide,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+        ) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+            // Instant tier: SettlementBatcher::try_flush_instant pops
+            // and proves a trade the moment process_batches() is called,
+            // with no batch-size/timer gate to fight with in a test.
+            let unsigned = common::Order {
+                id: order_id,
+                trader,
+                symbol: "ETH-USD".to_string(),
+                side,
+                price,
+                amount,
+                signature: Vec::new(),
+                nonce,
+                expiry: 0,
+                settlement_preference: common::SettlementPreference::Instant,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount, "signature": signature,
+                "nonce": nonce, "expiry": 0,
+                "settlement_preference": "Instant",
+            })
+        }
+
+        async fn post_order(app: &axum::Router, body: &serde_json::Value) -> SubmitOrderResponse {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/order")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        async fn confirm(
+            app: &axum::Router,
+            m: &engine::Match,
+        ) -> crate::types::ConfirmCommitResponse {
+            let trade_hash = [0x42u8; 32];
+            let body = serde_json::json!({
+                "maker_order_id": m.maker_order_id,
+                "taker_order_id": m.taker_order_id,
+                "trade_hash": trade_hash,
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/trade/committed")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let mut csprng = OsRng;
+        let sk1 = SigningKey::generate(&mut csprng);
+        let pk1 = sk1.verifying_key().to_bytes();
+        let sk2 = SigningKey::generate(&mut csprng);
+        let pk2 = sk2.verifying_key().to_bytes();
+        let sk3 = SigningKey::generate(&mut csprng);
+        let pk3 = sk3.verifying_key().to_bytes();
+        let sk4 = SigningKey::generate(&mut csprng);
+        let pk4 = sk4.verifying_key().to_bytes();
+
+        let (unsettled_match, settled_match) = {
+            let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+            let (tx, _) = broadcast::channel(100);
+            let state = Arc::new(RwLock::new(AppState {
+                node_id: common::NodeId(0),
+                order_book: OrderBook::new("ETH-USD".to_string()),
+                validator: OrderValidator::new(100),
+                ws_broadcast: tx,
+                reputation: reputation::ReputationEngine::new(),
+                pending_commits: std::collections::HashMap::new(),
+                confirmed_trade_hashes: std::collections::HashMap::new(),
+                batcher: batcher::SettlementBatcher::new(),
+                receipt_signing_key: SigningKey::generate(&mut OsRng),
+                order_log: orderlog::HashChainLog::new(),
+                match_log: orderlog::HashChainLog::new(),
+                mesh: None,
+                order_sequencer: None,
+                pending_order_data: std::collections::HashMap::new(),
+                applied_order_ids: std::collections::HashSet::new(),
+                persistence: Some(log.clone()),
+            }));
+            let app = app(Arc::clone(&state));
+
+            // Match 1: will be confirmed but NOT checkpointed as settled
+            // -- must survive replay as still-pending.
+            let sell1 = build_and_sign(&sk1, pk1, common::OrderSide::Sell, 3000, 5, 1);
+            post_order(&app, &sell1).await;
+            let buy1_resp = post_order(
+                &app,
+                &build_and_sign(&sk2, pk2, common::OrderSide::Buy, 3000, 5, 1),
+            )
+            .await;
+            assert_eq!(buy1_resp.matches.len(), 1);
+            let unsettled_match = buy1_resp.matches[0].clone();
+
+            // Match 2: will be confirmed AND checkpointed as settled --
+            // must NOT survive replay as pending.
+            let sell2 = build_and_sign(&sk3, pk3, common::OrderSide::Sell, 3100, 4, 1);
+            post_order(&app, &sell2).await;
+            let buy2_resp = post_order(
+                &app,
+                &build_and_sign(&sk4, pk4, common::OrderSide::Buy, 3100, 4, 1),
+            )
+            .await;
+            assert_eq!(buy2_resp.matches.len(), 1);
+            let settled_match = buy2_resp.matches[0].clone();
+
+            let confirm1 = confirm(&app, &unsettled_match).await;
+            assert!(confirm1.success, "{:?}", confirm1.error);
+            let confirm2 = confirm(&app, &settled_match).await;
+            assert!(confirm2.success, "{:?}", confirm2.error);
+
+            // Stand in for the settlement loop having actually gotten
+            // match 2 on-chain before the simulated crash -- match 1
+            // never got this checkpoint.
+            log.append_batch_submitted(vec![(
+                settled_match.maker_order_id,
+                settled_match.taker_order_id,
+            )])
+            .unwrap();
+
+            (unsettled_match, settled_match)
+            // `state` drops here, simulating a crash with nothing else
+            // surviving.
+        };
+
+        let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+        let mut recovered_state = AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: broadcast::channel(100).0,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: SigningKey::generate(&mut OsRng),
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            persistence: None,
+        };
+        crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+
+        // Neither match should still be "pending confirmation" -- both
+        // were genuinely confirmed before the crash.
+        assert!(!recovered_state.pending_commits.contains_key(&(
+            unsettled_match.maker_order_id,
+            unsettled_match.taker_order_id
+        )));
+        assert!(!recovered_state
+            .pending_commits
+            .contains_key(&(settled_match.maker_order_id, settled_match.taker_order_id)));
+
+        // The unsettled match must have its confirmation fully
+        // reconstructed: still in confirmed_trade_hashes, and still
+        // sitting in the batcher's queue awaiting settlement.
+        assert!(
+            recovered_state.confirmed_trade_hashes.contains_key(&(
+                unsettled_match.maker_order_id,
+                unsettled_match.taker_order_id
+            )),
+            "the unsettled match's confirmation must be reconstructed"
+        );
+        assert!(
+            !recovered_state
+                .confirmed_trade_hashes
+                .contains_key(&(settled_match.maker_order_id, settled_match.taker_order_id)),
+            "the settled match's confirmed_trade_hashes entry was already consumed live -- replay must not resurrect it"
+        );
+
+        let batches = recovered_state.batcher.process_batches();
+        let all_settled_ids: Vec<[u8; 32]> = batches
+            .iter()
+            .flat_map(|b| b.trades.iter().map(|t| t.maker_order_id))
+            .collect();
+        assert!(
+            all_settled_ids.contains(&unsettled_match.maker_order_id),
+            "the unsettled match must still be in the batcher's queue after replay, ready to actually settle"
+        );
+        assert!(
+            !all_settled_ids.contains(&settled_match.maker_order_id),
+            "the already-settled match must NOT be re-enqueued -- that would risk a duplicate on-chain submission"
+        );
     }
 }

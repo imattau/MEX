@@ -396,7 +396,7 @@ pub(crate) fn apply_accepted_order(
     match_timestamp_us: Option<u64>,
 ) -> Result<Vec<Match>, String> {
     if let Some(log) = &guard.persistence {
-        log.append(&order, &receipt, match_timestamp_us)?;
+        log.append_order_accepted(&order, &receipt, match_timestamp_us)?;
     }
     Ok(apply_accepted_order_locally(
         guard,
@@ -522,14 +522,89 @@ fn apply_accepted_order_locally(
 // served -- so `guard` here is a plain &mut, not a lock guard, despite
 // the name (kept for consistency with apply_accepted_order_locally's
 // parameter, which this calls through replay_accepted_order).
+// Stage P4-2: the confirm -> batch -> settle stage's core state
+// transition (see confirm_committed), shared between the live path
+// (after a successful durable WAL write) and replay. `m` must already
+// have been removed from pending_commits by the caller -- unlike Stage
+// P4-1's apply_accepted_order_locally, this alone doesn't touch
+// pending_commits, since replay needs different pending_commits handling
+// depending on whether this confirmation was ever actually settled (see
+// replay_persistence_log).
+fn confirm_committed_locally(guard: &mut AppState, m: Match, trade_hash: [u8; 32]) {
+    let key = (m.maker_order_id, m.taker_order_id);
+    guard.confirmed_trade_hashes.insert(key, trade_hash);
+    let trade_value = m.price * m.amount;
+    guard
+        .batcher
+        .deposit(m.taker_trader, &m.symbol, trade_value);
+    guard.batcher.enqueue(m);
+}
+
+// Stage P4-1/P4-2: rebuilds order_book/order_log/match_log/
+// pending_commits/applied_order_ids/confirmed_trade_hashes/batcher by
+// replaying every durably-recorded entry in `log`, in the order they
+// were originally appended -- see persistence.rs's own docs for why this
+// is sufficient (no separate snapshot format needed). Called once at
+// startup, before `state` is wrapped in Arc<RwLock<_>> and served -- so
+// `guard` here is a plain &mut, not a lock guard, despite the name (kept
+// for consistency with apply_accepted_order_locally's parameter, which
+// this calls through replay_accepted_order).
+//
+// Two passes over the same in-memory entry list: the first collects
+// every (maker_order_id, taker_order_id) key that a BatchSubmitted
+// checkpoint says was actually settled on-chain before whatever crash/
+// restart is being recovered from. The second pass replays
+// OrderAccepted entries exactly as Stage P4-1 always has, and for each
+// CommitConfirmed entry: always removes its key from pending_commits
+// (an OrderAccepted replay for the same match already put it there,
+// mirroring what apply_accepted_order originally did, and confirming it
+// removes it exactly once live too) -- but only replays the REST of
+// confirm_committed_locally's effects (re-enqueueing into the batcher,
+// re-crediting the ledger, repopulating confirmed_trade_hashes) if this
+// key is NOT in the settled set. A settled match has nothing left to
+// reconstruct: by the time build_settlement_trades ran in the original
+// live pipeline, it had already consumed confirmed_trade_hashes's entry
+// and drained the match out of the batcher's queue -- redoing that here
+// would just attempt a duplicate on-chain submission next time the
+// settlement loop runs.
 pub fn replay_persistence_log(
     guard: &mut AppState,
     log: &crate::persistence::PersistenceLog,
 ) -> Result<usize, String> {
+    use crate::persistence::WalEntry;
+
     let entries = log.replay()?;
     let count = entries.len();
-    for (order, receipt, match_timestamp_us) in entries {
-        replay_accepted_order(guard, order, receipt, match_timestamp_us);
+
+    let mut settled_keys: std::collections::HashSet<([u8; 32], [u8; 32])> =
+        std::collections::HashSet::new();
+    for entry in &entries {
+        if let WalEntry::BatchSubmitted { keys } = entry {
+            settled_keys.extend(keys.iter().copied());
+        }
+    }
+
+    for entry in entries {
+        match entry {
+            WalEntry::OrderAccepted {
+                order,
+                receipt,
+                match_timestamp_us,
+            } => {
+                replay_accepted_order(guard, order, receipt, match_timestamp_us);
+            }
+            WalEntry::CommitConfirmed { m, trade_hash } => {
+                let key = (m.maker_order_id, m.taker_order_id);
+                guard.pending_commits.remove(&key);
+                if !settled_keys.contains(&key) {
+                    confirm_committed_locally(guard, m, trade_hash);
+                }
+            }
+            WalEntry::BatchSubmitted { .. } => {
+                // Purely informational -- already folded into
+                // settled_keys above, nothing further to replay.
+            }
+        }
     }
     Ok(count)
 }
@@ -632,7 +707,24 @@ async fn confirm_committed(
         });
     };
 
-    guard.confirmed_trade_hashes.insert(key, payload.trade_hash);
+    // Stage P4-2: durably record the confirmation BEFORE any of its
+    // effects (confirmed_trade_hashes, the ledger, the batcher's queue)
+    // take effect -- fails closed, same as apply_accepted_order: on a
+    // WAL write failure, the match goes back into pending_commits so the
+    // trader can retry, rather than silently applying an unrecorded
+    // confirmation that a crash could then lose entirely.
+    if let Some(log) = &guard.persistence {
+        if let Err(e) = log.append_commit_confirmed(&m, payload.trade_hash) {
+            error!(error = %e, "failed to durably persist commit confirmation, rejecting");
+            guard.pending_commits.insert(key, m);
+            return Json(ConfirmCommitResponse {
+                success: false,
+                error: Some(format!(
+                    "internal error: could not durably record confirmation: {e}"
+                )),
+            });
+        }
+    }
 
     // SettlementBatcher checks its own internal ledger for solvency before
     // proving a batch (see batcher::BalanceLedger) -- a separate, purely
@@ -644,12 +736,7 @@ async fn confirm_committed(
     // crediting the ledger with exactly this trade's value translates
     // that already-proven fact into the ledger's own terms, rather than
     // re-deriving or re-checking something the chain already guarantees.
-    let trade_value = m.price * m.amount;
-    guard
-        .batcher
-        .deposit(m.taker_trader, &m.symbol, trade_value);
-
-    guard.batcher.enqueue(m);
+    confirm_committed_locally(&mut guard, m, payload.trade_hash);
     info!("Match confirmed committed on-chain, queued for batched settlement");
 
     Json(ConfirmCommitResponse {

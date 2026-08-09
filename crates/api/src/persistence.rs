@@ -13,34 +13,68 @@
 // tests) reproduces byte-identical order_book/order_log/match_log/
 // pending_commits state with no separate snapshot format to keep in sync.
 //
+// Stage P4-2 extends the same log to the confirm -> batch -> settle
+// stage (pending_commits exiting, confirmed_trade_hashes, the batcher's
+// internal queues). That stage has a real state machine with an
+// IRREVERSIBLE external side effect in the middle -- the on-chain
+// submit_settlement_batch call -- so it can't just replay inputs through
+// a pure function the way Stage P4-1's does; it also needs to know which
+// confirmations were already fully settled before a crash, so replay
+// doesn't attempt a duplicate on-chain submission. WalEntry::
+// BatchSubmitted is that checkpoint. See server::replay_persistence_log
+// for how the two entry kinds are reconciled during replay.
+//
 // A WAL entry is appended and fsynced (Tree::flush, blocking) BEFORE the
-// order is applied to in-memory state -- see server::apply_accepted_order
-// -- so a crash can never leave an order that was actually matched (and
-// whose result a trader may already be relying on) unrecoverable. This
-// does mean order throughput is bounded by disk fsync latency, since the
-// write happens while the caller holds AppState's write lock; batching
-// multiple orders per fsync is a real future optimization, out of scope
-// here.
+// corresponding state transition is applied -- see
+// server::apply_accepted_order and server::confirm_committed -- so a
+// crash can never leave an order or a confirmation that already took
+// effect (and that a trader may already be relying on) unrecoverable.
+// This does mean throughput on those paths is bounded by disk fsync
+// latency; batching multiple entries per fsync is a real future
+// optimization, out of scope here.
 
 use common::Order;
+use engine::Match;
 use orderlog::OrderReceipt;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WalEntry {
-    order: Order,
-    receipt: OrderReceipt,
-    match_timestamp_us: Option<u64>,
+pub enum WalEntry {
+    // Stage P4-1: exactly the inputs apply_accepted_order was called
+    // with.
+    OrderAccepted {
+        order: Order,
+        receipt: OrderReceipt,
+        match_timestamp_us: Option<u64>,
+    },
+    // Stage P4-2: a trader confirmed this match's commitTrade landed
+    // on-chain. Carries the full Match (not just its order ids) so
+    // replay can re-enqueue it into the batcher without needing to
+    // cross-reference match_log.
+    CommitConfirmed {
+        m: Match,
+        trade_hash: [u8; 32],
+    },
+    // Stage P4-2: checkpoint written AFTER a settlement chunk's
+    // submit_settlement_batch call succeeded on-chain -- every
+    // (maker_order_id, taker_order_id) key in that chunk is now fully
+    // settled. Replay uses this to recognize a CommitConfirmed entry
+    // that's already done, instead of re-enqueueing (and attempting to
+    // resubmit) something already settled.
+    BatchSubmitted {
+        keys: Vec<([u8; 32], [u8; 32])>,
+    },
 }
 
+// sled::Db and sled::Tree are cheap, Arc-backed handles -- Clone gives
+// callers (e.g. settlement.rs, which needs its own handle without
+// holding AppState's lock across an I/O + fsync) an easy way to get one
+// without any extra wrapping.
+#[derive(Clone)]
 pub struct PersistenceLog {
-    // sled::Db itself also holds the monotonic id-generator state
-    // (see append's use of generate_id) that entries's own keys are
-    // derived from -- kept alongside the named entries tree rather than
-    // used directly as a tree, so a future stage (e.g. P4-2's batch-
-    // submitted checkpoints) can add more named trees to the same
-    // on-disk database without colliding with this one's keyspace.
+    // Also holds the monotonic id-generator state (see append_entry's
+    // use of generate_id) every entry's key is derived from.
     db: sled::Db,
     entries: sled::Tree,
 }
@@ -52,24 +86,13 @@ impl PersistenceLog {
         Ok(Self { db, entries })
     }
 
-    // Durably records that apply_accepted_order is about to run with
-    // exactly these inputs. Blocks on fsync (Tree::flush) before
-    // returning Ok -- the caller must not apply the order to in-memory
-    // state until this returns Ok, or a crash between the two could
-    // leave a real match unrecoverable.
-    pub fn append(
-        &self,
-        order: &Order,
-        receipt: &OrderReceipt,
-        match_timestamp_us: Option<u64>,
-    ) -> Result<(), String> {
+    // Durably records `entry`. Blocks on fsync (Tree::flush) before
+    // returning Ok -- the caller must not apply the corresponding state
+    // transition until this returns Ok, or a crash between the two
+    // could leave it unrecoverable.
+    fn append_entry(&self, entry: &WalEntry) -> Result<(), String> {
         let seq = self.db.generate_id().map_err(|e| e.to_string())?;
-        let entry = WalEntry {
-            order: order.clone(),
-            receipt: receipt.clone(),
-            match_timestamp_us,
-        };
-        let bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
         self.entries
             .insert(seq.to_be_bytes(), bytes)
             .map_err(|e| e.to_string())?;
@@ -77,15 +100,39 @@ impl PersistenceLog {
         Ok(())
     }
 
+    pub fn append_order_accepted(
+        &self,
+        order: &Order,
+        receipt: &OrderReceipt,
+        match_timestamp_us: Option<u64>,
+    ) -> Result<(), String> {
+        self.append_entry(&WalEntry::OrderAccepted {
+            order: order.clone(),
+            receipt: receipt.clone(),
+            match_timestamp_us,
+        })
+    }
+
+    pub fn append_commit_confirmed(&self, m: &Match, trade_hash: [u8; 32]) -> Result<(), String> {
+        self.append_entry(&WalEntry::CommitConfirmed {
+            m: m.clone(),
+            trade_hash,
+        })
+    }
+
+    pub fn append_batch_submitted(&self, keys: Vec<([u8; 32], [u8; 32])>) -> Result<(), String> {
+        self.append_entry(&WalEntry::BatchSubmitted { keys })
+    }
+
     // Every durably-recorded entry, in the exact order they were
     // originally appended (big-endian u64 keys from generate_id sort
     // correctly as bytes, and sled::Tree::iter walks keys in order).
-    pub fn replay(&self) -> Result<Vec<(Order, OrderReceipt, Option<u64>)>, String> {
+    pub fn replay(&self) -> Result<Vec<WalEntry>, String> {
         let mut out = Vec::new();
         for kv in self.entries.iter() {
             let (_, v) = kv.map_err(|e| e.to_string())?;
             let entry: WalEntry = serde_json::from_slice(&v).map_err(|e| e.to_string())?;
-            out.push((entry.order, entry.receipt, entry.match_timestamp_us));
+            out.push(entry);
         }
         Ok(out)
     }
@@ -146,19 +193,27 @@ mod tests {
         for seed in 1..=5u8 {
             let order = make_order(seed);
             let receipt = make_receipt(&order);
-            log.append(&order, &receipt, Some(seed as u64 * 100))
+            log.append_order_accepted(&order, &receipt, Some(seed as u64 * 100))
                 .unwrap();
         }
 
         let replayed = log.replay().unwrap();
         assert_eq!(replayed.len(), 5);
-        for (i, (order, _receipt, ts)) in replayed.iter().enumerate() {
+        for (i, entry) in replayed.iter().enumerate() {
             let seed = (i + 1) as u8;
+            let WalEntry::OrderAccepted {
+                order,
+                match_timestamp_us,
+                ..
+            } = entry
+            else {
+                panic!("expected OrderAccepted, got {entry:?}");
+            };
             assert_eq!(
                 order.id, [seed; 32],
                 "replay must preserve original append order"
             );
-            assert_eq!(*ts, Some(seed as u64 * 100));
+            assert_eq!(*match_timestamp_us, Some(seed as u64 * 100));
         }
     }
 
@@ -169,12 +224,53 @@ mod tests {
             let log = PersistenceLog::open(dir.path()).unwrap();
             let order = make_order(9);
             let receipt = make_receipt(&order);
-            log.append(&order, &receipt, None).unwrap();
+            log.append_order_accepted(&order, &receipt, None).unwrap();
         }
         // Reopen fresh, as a real restart would.
         let log = PersistenceLog::open(dir.path()).unwrap();
         let replayed = log.replay().unwrap();
         assert_eq!(replayed.len(), 1);
-        assert_eq!(replayed[0].0.id, [9u8; 32]);
+        let WalEntry::OrderAccepted { order, .. } = &replayed[0] else {
+            panic!("expected OrderAccepted");
+        };
+        assert_eq!(order.id, [9u8; 32]);
+    }
+
+    // Stage P4-2: the three entry kinds must interleave correctly in a
+    // single ordered log -- not just each kind independently roundtrip.
+    #[test]
+    fn test_mixed_entry_kinds_replay_in_append_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let order = make_order(1);
+        let receipt = make_receipt(&order);
+        log.append_order_accepted(&order, &receipt, None).unwrap();
+
+        let m = Match {
+            maker_order_id: [1u8; 32],
+            taker_order_id: [2u8; 32],
+            maker_trader: [3u8; 32],
+            taker_trader: [4u8; 32],
+            price: 100,
+            amount: 5,
+            timestamp_us: 0,
+            settlement_tier: SettlementPreference::Standard,
+            fee_basis_points: 5,
+            seller: [4u8; 32],
+            fee_payer: [4u8; 32],
+            symbol: "ETH-USD".to_string(),
+            assigned_node: [0u8; 32],
+            settlement_deadline: 0,
+        };
+        log.append_commit_confirmed(&m, [0x42u8; 32]).unwrap();
+        log.append_batch_submitted(vec![([1u8; 32], [2u8; 32])])
+            .unwrap();
+
+        let replayed = log.replay().unwrap();
+        assert_eq!(replayed.len(), 3);
+        assert!(matches!(replayed[0], WalEntry::OrderAccepted { .. }));
+        assert!(matches!(replayed[1], WalEntry::CommitConfirmed { .. }));
+        assert!(matches!(replayed[2], WalEntry::BatchSubmitted { .. }));
     }
 }

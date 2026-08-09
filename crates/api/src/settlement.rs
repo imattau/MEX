@@ -131,6 +131,37 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                                     trades = settlement_trades.len(),
                                     "settled a batch chunk on-chain"
                                 );
+                                // Stage P4-2: checkpoint every trade in
+                                // this chunk as fully settled BEFORE
+                                // broadcasting the proof -- so a crash
+                                // right after a real on-chain submission
+                                // doesn't leave replay believing these
+                                // are still awaiting settlement (which
+                                // would attempt a duplicate submission
+                                // next restart). Doesn't need AppState's
+                                // write lock: PersistenceLog::append does
+                                // its own I/O, and the causal ordering
+                                // this relies on (a CommitConfirmed entry
+                                // always precedes the BatchSubmitted
+                                // checkpoint for the same key) is already
+                                // guaranteed by AppState's lock
+                                // serializing confirm_committed against
+                                // this loop's own batcher.process_batches
+                                // call above. A checkpoint-write failure
+                                // is logged, not retried here -- see
+                                // MEX_PERSISTENCE_PATH's own docs on the
+                                // remaining crash window this can't close
+                                // alone.
+                                let persistence_log = state.read().unwrap().persistence.clone();
+                                if let Some(log) = persistence_log {
+                                    let keys: Vec<([u8; 32], [u8; 32])> = settlement_trades
+                                        .iter()
+                                        .map(|t| (t.maker_order_id, t.taker_order_id))
+                                        .collect();
+                                    if let Err(e) = log.append_batch_submitted(keys) {
+                                        tracing::error!(error = %e, "failed to durably checkpoint a successful settlement submission -- a crash before this recovers could attempt a duplicate on-chain submission next restart");
+                                    }
+                                }
                                 broadcast_settlement_proof(&state, trade_batch, proof).await;
                             }
                             Err(e) => {
