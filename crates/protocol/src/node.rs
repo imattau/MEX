@@ -7,7 +7,7 @@ use security::{encrypt_packet, decrypt_packet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const GEO_VERIFY_THRESHOLD: f64 = 0.8;
 
@@ -328,6 +328,13 @@ pub struct MeshNode {
     censorship: CensorshipMonitor,
     latency_stats: crate::latency::PeerLatencyStats,
     hop_latency: HopLatencyMonitor,
+    origin_time: crate::ordering::OriginTimeEstimator,
+    // Lets a caller query origin_time AFTER run() has taken ownership of
+    // self (estimated_origin_time_ms can't be called from outside
+    // anymore at that point) -- see origin_time_query_sender. Same
+    // pattern as chain_status_tx/rx.
+    origin_time_query_tx: mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)>,
+    origin_time_query_rx: Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<f64>>)>>,
     misconduct_quorum: MisconductQuorum,
     // pubkey -> latest known on-chain status, pushed in by whoever owns
     // the chain connection (see set_chain_status's docs) -- empty until
@@ -481,6 +488,7 @@ impl MeshNode {
         let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
         let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
         let (chain_status_tx, chain_status_rx) = mpsc::channel(8);
+        let (origin_time_query_tx, origin_time_query_rx) = mpsc::channel(256);
 
         Ok(Self {
             node_id: config.node_id,
@@ -495,6 +503,9 @@ impl MeshNode {
             censorship: CensorshipMonitor::new(),
             latency_stats: crate::latency::PeerLatencyStats::new(),
             hop_latency: HopLatencyMonitor::new(),
+            origin_time: crate::ordering::OriginTimeEstimator::new(),
+            origin_time_query_tx,
+            origin_time_query_rx: Some(origin_time_query_rx),
             // min_reporters=2: this node's own accusation (if it's the
             // one that detected something, see report_misconduct) plus
             // at least one independent corroborating report from
@@ -563,6 +574,24 @@ impl MeshNode {
     // still do).
     pub fn peer_pubkey(&self, node_id: NodeId) -> Option<[u8; 32]> {
         self.transport.peer_pubkey(node_id)
+    }
+
+    // Stage O1: this node's own independently-derived estimate of when
+    // `order_id` was likely first emitted -- see
+    // crate::ordering::OriginTimeEstimator's docs for exactly what this
+    // is (and isn't yet) accurate for. None means this node has no
+    // established latency baseline yet for whichever peer(s) delivered
+    // this order, so no correction was possible.
+    pub fn estimated_origin_time_ms(&mut self, order_id: &[u8; 32]) -> Option<f64> {
+        self.origin_time.earliest_estimate_ms(order_id)
+    }
+
+    // The channel-based counterpart to estimated_origin_time_ms, for a
+    // caller that doesn't own the MeshNode anymore (run() has already
+    // taken self by value) -- same shape as chain_status_sender. Take
+    // before run(); each query is (order_id, reply channel).
+    pub fn origin_time_query_sender(&self) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)> {
+        self.origin_time_query_tx.clone()
     }
 
     // Like peer_pubkey, but also resolves THIS node's own NodeId to its
@@ -738,6 +767,7 @@ impl MeshNode {
         let misconduct_tx = self.misconduct_tx.clone();
         let mesh_key = self.mesh_key;
         let mut chain_status_rx = self.chain_status_rx.take().expect("run() already called");
+        let mut origin_time_query_rx = self.origin_time_query_rx.take().expect("run() already called");
 
         // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
         // misconduct_tx, no external caller needs raw Pong/HopWitness
@@ -850,6 +880,19 @@ impl MeshNode {
 
                     let order_id = flood_msg.order.id;
 
+                    // Stage O1: recorded for EVERY arrival, including a
+                    // later Err(DuplicatePacket) one below -- a duplicate
+                    // via a different upstream path is an independent
+                    // witness of this order's timing just as much as the
+                    // first-accepted arrival is (same rationale Stage 1
+                    // already established for recording redundant
+                    // arrivals). No baseline yet for `from_node` (None)
+                    // means this arrival simply can't contribute an
+                    // estimate -- not an error, just not-yet-measured.
+                    if let Some(one_way_ms) = self.latency_stats.mean_one_way_ms(from_node) {
+                        self.origin_time.record(order_id, from_node, now - one_way_ms);
+                    }
+
                     // Sent IMMEDIATELY, before on_receive's forwarding
                     // decision and before any artificial_forward_delay_ms
                     // -- this is the fix for the obvious hole in an
@@ -935,6 +978,10 @@ impl MeshNode {
                 Some(snapshot) = chain_status_rx.recv() => {
                     tracing::debug!(entries = snapshot.len(), "chain_status snapshot updated");
                     self.chain_status = snapshot;
+                }
+
+                Some((order_id, reply)) = origin_time_query_rx.recv() => {
+                    let _ = reply.send(self.origin_time.earliest_estimate_ms(&order_id));
                 }
 
                 Some((from_wire, order_id, hop_node, forwarded_at)) = hop_witness_rx.recv() => {

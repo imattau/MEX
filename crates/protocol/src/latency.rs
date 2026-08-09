@@ -76,6 +76,18 @@ impl PeerLatencyStats {
         Some(one_way_mean + tolerance)
     }
 
+    // The plain best-estimate one-way latency to `peer` -- half the mean
+    // RTT, with none of expected_one_way_bound_ms's extra tolerance
+    // padding. That padding exists to avoid flagging ordinary jitter as
+    // anomalous (a detection concern); ordering::OriginTimeEstimator
+    // wants the closest real estimate of actual transit time instead, so
+    // padding it would only push every corrected timestamp later than
+    // it needs to be, for no benefit.
+    pub fn mean_one_way_ms(&self, peer: NodeId) -> Option<f64> {
+        let (mean, _) = self.mean_stddev(peer)?;
+        Some(mean / 2.0)
+    }
+
     // None (not yet enough data to judge) is treated as "not anomalous"
     // by callers -- a node with no established baseline for a peer yet
     // has no basis to accuse it of anything.
