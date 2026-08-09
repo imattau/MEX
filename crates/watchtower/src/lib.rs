@@ -169,6 +169,39 @@ impl WatchtowerClient {
             }
         }
     }
+
+    // Pure detection, deliberately decoupled from OnChainClient: unlike
+    // monitor_batch/check_fee_compliance/check_deadline_compliance above
+    // (built for the mock-based dispute-system tests, modeling
+    // slash/dispute actions this deployment's actual contracts don't
+    // expose -- there's no on-chain "slash a trader" or "raise a
+    // dispute" call to make; an invalid proof is rejected atomically by
+    // settleBatchWithFees's own on-chain verifier instead), these two
+    // just report which trades in a batch are wrong, so a real caller
+    // (crates/api/src/settlement.rs's settlement loop) can decide what
+    // to actually do about it against a real ChainAdapter -- which does
+    // NOT implement the mock-only OnChainClient trait.
+    pub fn fee_violations(batch: &TradeBatch) -> Vec<usize> {
+        batch
+            .trades
+            .iter()
+            .enumerate()
+            .filter(|(_, trade)| {
+                trade.fee_basis_points != trade.settlement_tier.fee_basis_points()
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn deadline_violations(batch: &TradeBatch, current_time: u64) -> Vec<usize> {
+        batch
+            .trades
+            .iter()
+            .enumerate()
+            .filter(|(_, trade)| current_time > trade.settlement_deadline)
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +324,42 @@ mod tests {
         client.check_deadline_compliance(&batch, 200, &mut on_chain);
 
         assert!(on_chain.missed_deadlines() > 0);
+    }
+
+    #[test]
+    fn test_fee_violations_flags_only_the_mismatched_trade() {
+        let mut batch = test_batch();
+        batch.trades.push(batch.trades[0].clone());
+        batch.trades[1].fee_basis_points = 999; // wrong
+
+        let violations = WatchtowerClient::fee_violations(&batch);
+
+        assert_eq!(violations, vec![1]);
+    }
+
+    #[test]
+    fn test_fee_violations_empty_when_all_correct() {
+        let batch = test_batch();
+        assert!(WatchtowerClient::fee_violations(&batch).is_empty());
+    }
+
+    #[test]
+    fn test_deadline_violations_flags_only_the_expired_trade() {
+        let mut batch = test_batch();
+        batch.trades.push(batch.trades[0].clone());
+        batch.trades[0].settlement_deadline = 100;
+        batch.trades[1].settlement_deadline = 300;
+
+        let violations = WatchtowerClient::deadline_violations(&batch, 200);
+
+        assert_eq!(violations, vec![0]);
+    }
+
+    #[test]
+    fn test_deadline_violations_empty_when_nothing_expired() {
+        let mut batch = test_batch();
+        batch.trades[0].settlement_deadline = 300;
+        assert!(WatchtowerClient::deadline_violations(&batch, 200).is_empty());
     }
 
     // Stage P4-4b: the mock must distinguish real (trader, trade_hash)

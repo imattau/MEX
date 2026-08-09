@@ -137,6 +137,79 @@ pub async fn run_settlement_loop(
                     continue;
                 }
 
+                // Watchtower pre-flight, run against the real chain adapter
+                // right before we'd otherwise spend gas submitting this
+                // chunk. See watchtower::WatchtowerClient's docs on why
+                // these are plain detection calls, not the mock-based
+                // dispute/slash flow: this deployment's actual contracts
+                // reject an invalid proof atomically inside
+                // settleBatchWithFees itself (no separate dispute step to
+                // raise), and there is no on-chain "slash a trader" call to
+                // make for a fee mismatch -- so the only real, safe action
+                // available here is to skip a chunk we already know is
+                // wrong (saving the doomed transaction's gas and getting a
+                // loud log instead of a silent on-chain revert) and, for a
+                // genuinely missed deadline, actually report it on-chain
+                // via submit_missed_deadline_report -- previously
+                // implemented but never called from anywhere in this
+                // binary.
+                if !chain_adapter.prover().verify_proof(proof, trade_batch) {
+                    tracing::error!(
+                        assigned_node = %hex::encode(chunk_assigned_node),
+                        count,
+                        "watchtower: locally-generated proof failed local verification -- refusing to submit this chunk, this indicates a bug in this node's own batching/proving pipeline, not a chain issue"
+                    );
+                    continue;
+                }
+
+                let fee_violations = watchtower::WatchtowerClient::fee_violations(trade_batch);
+                if !fee_violations.is_empty() {
+                    tracing::error!(
+                        assigned_node = %hex::encode(chunk_assigned_node),
+                        violating_trades = ?fee_violations,
+                        "watchtower: chunk contains trades whose fee_basis_points doesn't match their settlement_tier -- refusing to submit, this indicates a bug upstream of settlement (matching/batching), not a chain issue"
+                    );
+                    continue;
+                }
+
+                let now_secs = std::time::UNIX_EPOCH
+                    .elapsed()
+                    .unwrap_or_default()
+                    .as_secs();
+                let deadline_violations =
+                    watchtower::WatchtowerClient::deadline_violations(trade_batch, now_secs);
+                if !deadline_violations.is_empty() {
+                    // settleBatchWithFees validates every trade in the
+                    // chunk inside one transaction (require per trade in a
+                    // loop) -- one expired trade reverts the WHOLE chunk,
+                    // not just itself, so submitting anyway would just
+                    // waste gas on a guaranteed-failing tx every interval
+                    // until something external (the trader's own
+                    // claimSlash) removes it. Skipping here, like the fee-
+                    // violation case above, is the safe choice: an expired
+                    // trade was never going to settle through this path
+                    // again regardless (see SettlementFactory.claimSlash's
+                    // docs -- that's the trader-initiated path for a
+                    // missed deadline, not this node re-attempting
+                    // settlement). Reporting it on-chain first is still
+                    // real, useful work: this is the one piece of this
+                    // check that DOES have a genuine on-chain action
+                    // (NodeRegistry.recordMissedDeadline, implemented but
+                    // never actually called from anywhere until now).
+                    tracing::warn!(
+                        assigned_node = %hex::encode(chunk_assigned_node),
+                        violating_trades = ?deadline_violations,
+                        "watchtower: chunk contains trades whose settlement_deadline has already passed -- reporting a missed deadline for the assigned node and skipping this chunk's submission"
+                    );
+                    if let Err(e) = chain_adapter
+                        .submit_missed_deadline_report(chunk_assigned_node)
+                        .await
+                    {
+                        tracing::error!(error = %e, assigned_node = %hex::encode(chunk_assigned_node), "watchtower: failed to report missed deadline on-chain");
+                    }
+                    continue;
+                }
+
                 match build_settlement_trades(&state, &chain_sync, chunk) {
                     Some(settlement_trades) => {
                         let fee_config = SettlementFeeConfig {
