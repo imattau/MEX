@@ -335,6 +335,8 @@ pub struct MeshNode {
     // pattern as chain_status_tx/rx.
     origin_time_query_tx: mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)>,
     origin_time_query_rx: Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<f64>>)>>,
+    compare_orders_query_tx: mpsc::Sender<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)>,
+    compare_orders_query_rx: Option<mpsc::Receiver<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)>>,
     misconduct_quorum: MisconductQuorum,
     // pubkey -> latest known on-chain status, pushed in by whoever owns
     // the chain connection (see set_chain_status's docs) -- empty until
@@ -489,6 +491,7 @@ impl MeshNode {
         let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
         let (chain_status_tx, chain_status_rx) = mpsc::channel(8);
         let (origin_time_query_tx, origin_time_query_rx) = mpsc::channel(256);
+        let (compare_orders_query_tx, compare_orders_query_rx) = mpsc::channel(256);
 
         Ok(Self {
             node_id: config.node_id,
@@ -506,6 +509,8 @@ impl MeshNode {
             origin_time: crate::ordering::OriginTimeEstimator::new(),
             origin_time_query_tx,
             origin_time_query_rx: Some(origin_time_query_rx),
+            compare_orders_query_tx,
+            compare_orders_query_rx: Some(compare_orders_query_rx),
             // min_reporters=2: this node's own accusation (if it's the
             // one that detected something, see report_misconduct) plus
             // at least one independent corroborating report from
@@ -592,6 +597,22 @@ impl MeshNode {
     // before run(); each query is (order_id, reply channel).
     pub fn origin_time_query_sender(&self) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)> {
         self.origin_time_query_tx.clone()
+    }
+
+    // Stage O2: ranks two orders using this node's own recorded
+    // estimates -- see crate::ordering::OriginTimeEstimator::
+    // compare_orders and OrderingDecision's docs for exactly what this
+    // does (and doesn't) guarantee.
+    pub fn compare_orders(&mut self, order_a: &[u8; 32], order_b: &[u8; 32]) -> Option<crate::ordering::OrderingDecision> {
+        self.origin_time.compare_orders(order_a, order_b)
+    }
+
+    // The channel-based counterpart to compare_orders, for a caller that
+    // doesn't own the MeshNode anymore -- same shape as
+    // origin_time_query_sender. Take before run(); each query is
+    // (order_a, order_b, reply channel).
+    pub fn compare_orders_query_sender(&self) -> mpsc::Sender<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)> {
+        self.compare_orders_query_tx.clone()
     }
 
     // Like peer_pubkey, but also resolves THIS node's own NodeId to its
@@ -768,6 +789,7 @@ impl MeshNode {
         let mesh_key = self.mesh_key;
         let mut chain_status_rx = self.chain_status_rx.take().expect("run() already called");
         let mut origin_time_query_rx = self.origin_time_query_rx.take().expect("run() already called");
+        let mut compare_orders_query_rx = self.compare_orders_query_rx.take().expect("run() already called");
 
         // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
         // misconduct_tx, no external caller needs raw Pong/HopWitness
@@ -982,6 +1004,10 @@ impl MeshNode {
 
                 Some((order_id, reply)) = origin_time_query_rx.recv() => {
                     let _ = reply.send(self.origin_time.earliest_estimate_ms(&order_id));
+                }
+
+                Some((order_a, order_b, reply)) = compare_orders_query_rx.recv() => {
+                    let _ = reply.send(self.origin_time.compare_orders(&order_a, &order_b));
                 }
 
                 Some((from_wire, order_id, hop_node, forwarded_at)) = hop_witness_rx.recv() => {

@@ -16,6 +16,7 @@ reputation = { path = "../reputation" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 prover = { path = "../prover" }
 orderlog = { path = "../orderlog" }
+sha2 = "0.10"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

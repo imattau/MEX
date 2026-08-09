@@ -14,6 +14,6 @@ pub use types::FloodError;
 pub use heartbeat::HeartbeatTracker;
 pub use flood::DeterministicFlood;
 pub use latency::PeerLatencyStats;
-pub use ordering::OriginTimeEstimator;
+pub use ordering::{OriginTimeEstimator, OrderingDecision};
 pub use node::{MeshNode, MeshConfig, ChainNodeStatus};
 pub use transport::{UdpTransport, WireMessage};
