@@ -100,12 +100,44 @@ pub trait ChainAdapter: Send + Sync {
         stake: u64,
     ) -> impl Future<Output = Result<(), String>> + Send;
 
-    fn get_node_stake(&self, pubkey: OnChainAccount) -> impl Future<Output = Result<u64, String>> + Send;
-    fn is_node_active(&self, pubkey: OnChainAccount) -> impl Future<Output = Result<bool, String>> + Send;
+    fn get_node_stake(
+        &self,
+        pubkey: OnChainAccount,
+    ) -> impl Future<Output = Result<u64, String>> + Send;
+    fn is_node_active(
+        &self,
+        pubkey: OnChainAccount,
+    ) -> impl Future<Output = Result<bool, String>> + Send;
     fn get_node_reputation(
         &self,
         pubkey: OnChainAccount,
     ) -> impl Future<Output = Result<(u32, u8, u64), String>> + Send;
+
+    // Stage P4-4b: was this specific trade already settled on-chain? Maps
+    // to TraderEscrow.getSettlement(tradeHash).settled, on `trader`'s own
+    // escrow contract (SettlementFactory.traderEscrows resolves which
+    // escrow that is). `trader` must be the trade's PAYER -- the same
+    // account that originally called commitTrade for it, i.e. whichever
+    // side SettlementTrade::trader identifies (see that struct's docs) --
+    // not the counterparty; a trade's settlement record only exists on
+    // the payer's escrow. A trader with no escrow at all (never
+    // deposited) trivially has never settled anything, so that case
+    // returns Ok(false) rather than an error.
+    //
+    // Exists for exactly one purpose right now: recovering from the
+    // narrow crash window Stage P4-2's local WAL checkpoint can't cover
+    // on its own -- a real on-chain submission that succeeded, followed
+    // by a crash before the local BatchSubmitted checkpoint's fsync
+    // completed, would otherwise make replay believe the trade is still
+    // pending and attempt a real duplicate submission next restart (see
+    // Stage P4-4c). Querying the chain directly is the only source of
+    // truth that can actually resolve that ambiguity; the WAL alone
+    // cannot.
+    fn is_trade_settled(
+        &self,
+        trader: OnChainAccount,
+        trade_hash: [u8; 32],
+    ) -> impl Future<Output = Result<bool, String>> + Send;
 
     fn prover(&self) -> &dyn ProverBackend;
 }

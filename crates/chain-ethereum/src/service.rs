@@ -108,8 +108,8 @@ impl<P: Provider> SyncService<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::TokenRegistry;
     use crate::listener::http_provider;
+    use crate::registry::TokenRegistry;
 
     // A minimal liveness check for the run/shutdown mechanics themselves --
     // not a real chain poll (see chain-ethereum's live tests, run manually
@@ -124,10 +124,7 @@ mod tests {
         let provider = http_provider("http://127.0.0.1:1").await.unwrap();
         let tokens = TokenRegistry::new();
         let sync = ChainSync::new(provider, [0u8; 20], tokens, 0, 0);
-        let store = SyncStore::open(
-            tempfile::tempdir().unwrap().keep(),
-        )
-        .unwrap();
+        let store = SyncStore::open(tempfile::tempdir().unwrap().keep()).unwrap();
 
         let mut service = SyncService::new(sync, store, Duration::from_millis(10));
         let (tx, rx) = watch::channel(false);

@@ -129,7 +129,11 @@ mod tests {
         // NOT change what compute_trade_hash derives from the same terms.
         let mut t = base.clone();
         t.trade_hash = [0xFFu8; 32];
-        assert_eq!(compute_trade_hash(&t).unwrap(), base_hash, "trade_hash field itself must not affect derivation");
+        assert_eq!(
+            compute_trade_hash(&t).unwrap(),
+            base_hash,
+            "trade_hash field itself must not affect derivation"
+        );
     }
 
     #[test]

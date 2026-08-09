@@ -225,9 +225,7 @@ impl<P: Provider> ChainSync<P> {
     }
 }
 
-pub async fn http_provider(
-    rpc_url: &str,
-) -> Result<impl Provider + Clone, String> {
+pub async fn http_provider(rpc_url: &str) -> Result<impl Provider + Clone, String> {
     let url = rpc_url
         .parse()
         .map_err(|e| format!("invalid RPC URL: {e}"))?;

@@ -19,6 +19,12 @@ pub struct MockOnChainState {
     pub settled_batches: std::collections::HashSet<[u8; 32]>,
     pub missed_deadlines: HashSet<[u8; 32]>,
     pub fee_violations: HashSet<[u8; 32]>,
+    // Stage P4-4b: (trader, trade_hash) pairs a test wants is_trade_settled
+    // to report as already-settled -- everything else reports false,
+    // matching a trader who genuinely never committed/settled that trade.
+    // Populated directly by tests (see Stage P4-4c's reconciliation
+    // tests), never mutated by this mock itself.
+    pub settled_trades: HashSet<(OnChainAccount, [u8; 32])>,
 }
 
 impl MockOnChainState {
@@ -30,24 +36,56 @@ impl MockOnChainState {
             settled_batches: std::collections::HashSet::new(),
             missed_deadlines: HashSet::new(),
             fee_violations: HashSet::new(),
+            settled_trades: HashSet::new(),
         }
     }
 }
 
 impl ChainAdapter for MockOnChainState {
-    fn chain_id(&self) -> &'static str { "mock" }
-    fn native_denomination(&self) -> &'static str { "MOCK" }
+    fn chain_id(&self) -> &'static str {
+        "mock"
+    }
+    fn native_denomination(&self) -> &'static str {
+        "MOCK"
+    }
     async fn submit_settlement_batch(
-        &self, _trades: &[SettlementTrade], _proof: &[u8], _fee_config: SettlementFeeConfig,
+        &self,
+        _trades: &[SettlementTrade],
+        _proof: &[u8],
+        _fee_config: SettlementFeeConfig,
     ) -> Result<String, String> {
         Ok("mock_tx_hash".into())
     }
-    async fn submit_missed_deadline_report(&self, _pubkey: OnChainAccount) -> Result<(), String> { Ok(()) }
-    async fn register_node(&self, _pubkey: OnChainAccount, _geo: &str, _stake: u64) -> Result<(), String> { Ok(()) }
-    async fn get_node_stake(&self, _pubkey: OnChainAccount) -> Result<u64, String> { Ok(0) }
-    async fn is_node_active(&self, _pubkey: OnChainAccount) -> Result<bool, String> { Ok(false) }
-    async fn get_node_reputation(&self, _pubkey: OnChainAccount) -> Result<(u32, u8, u64), String> { Ok((5000, 0, 0)) }
-    fn prover(&self) -> &dyn ProverBackend { &BACKEND }
+    async fn submit_missed_deadline_report(&self, _pubkey: OnChainAccount) -> Result<(), String> {
+        Ok(())
+    }
+    async fn register_node(
+        &self,
+        _pubkey: OnChainAccount,
+        _geo: &str,
+        _stake: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn get_node_stake(&self, _pubkey: OnChainAccount) -> Result<u64, String> {
+        Ok(0)
+    }
+    async fn is_node_active(&self, _pubkey: OnChainAccount) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn get_node_reputation(&self, _pubkey: OnChainAccount) -> Result<(u32, u8, u64), String> {
+        Ok((5000, 0, 0))
+    }
+    async fn is_trade_settled(
+        &self,
+        trader: OnChainAccount,
+        trade_hash: [u8; 32],
+    ) -> Result<bool, String> {
+        Ok(self.settled_trades.contains(&(trader, trade_hash)))
+    }
+    fn prover(&self) -> &dyn ProverBackend {
+        &BACKEND
+    }
 }
 
 impl OnChainClient for MockOnChainState {
@@ -108,11 +146,7 @@ impl WatchtowerClient {
         true
     }
 
-    pub fn check_fee_compliance(
-        &self,
-        batch: &TradeBatch,
-        on_chain: &mut impl OnChainClient,
-    ) {
+    pub fn check_fee_compliance(&self, batch: &TradeBatch, on_chain: &mut impl OnChainClient) {
         for trade in &batch.trades {
             let expected_bps = trade.settlement_tier.fee_basis_points();
             if trade.fee_basis_points != expected_bps {
@@ -257,5 +291,38 @@ mod tests {
         client.check_deadline_compliance(&batch, 200, &mut on_chain);
 
         assert!(on_chain.missed_deadlines() > 0);
+    }
+
+    // Stage P4-4b: the mock must distinguish real (trader, trade_hash)
+    // pairs from everything else -- a reconciliation check must never
+    // report "settled" for a trade that was never marked as such, and
+    // must never confuse two different traders' otherwise-identical
+    // trade_hash.
+    #[tokio::test]
+    async fn test_mock_is_trade_settled_only_matches_recorded_pairs() {
+        let mut on_chain = MockOnChainState::new();
+        let trader_a: OnChainAccount = [1u8; 32];
+        let trader_b: OnChainAccount = [2u8; 32];
+        let trade_hash = [0xABu8; 32];
+        on_chain.settled_trades.insert((trader_a, trade_hash));
+
+        assert!(on_chain
+            .is_trade_settled(trader_a, trade_hash)
+            .await
+            .unwrap());
+        assert!(
+            !on_chain
+                .is_trade_settled(trader_b, trade_hash)
+                .await
+                .unwrap(),
+            "a different trader with the same trade_hash must not read as settled"
+        );
+        assert!(
+            !on_chain
+                .is_trade_settled(trader_a, [0xCDu8; 32])
+                .await
+                .unwrap(),
+            "an unrecorded trade_hash for the same trader must not read as settled"
+        );
     }
 }

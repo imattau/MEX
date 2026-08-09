@@ -67,6 +67,36 @@ sol! {
             returns (uint32 score, uint8 level, uint64 lastUpdate);
         function getNode(bytes32 nodePubkey) external view returns (NodeInfo memory);
     }
+
+    // Stage P4-4b: only the two read calls reconciliation needs --
+    // resolving which escrow contract belongs to a trader, then reading
+    // that trade's settlement record on it. traderEscrows is Solidity's
+    // auto-generated public-mapping getter (SettlementFactory.sol's
+    // `mapping(address => address) public traderEscrows`), not a
+    // hand-written function.
+    #[sol(rpc)]
+    interface ISettlementFactoryEscrowLookup {
+        function traderEscrows(address trader) external view returns (address);
+    }
+
+    // Field order/types must match TraderEscrow.sol's Settlement struct
+    // exactly for ABI decoding to line up -- see that struct's own docs
+    // on the packing rationale (not relevant here, this only reads it).
+    struct Settlement {
+        uint40 deadline;
+        bool refunded;
+        bool settled;
+        bool slashed;
+        address token;
+        bytes32 assignedNode;
+        uint256 lockedAmount;
+        address counterparty;
+    }
+
+    #[sol(rpc)]
+    interface ITraderEscrow {
+        function getSettlement(bytes32 tradeHash) external view returns (Settlement memory);
+    }
 }
 
 // Left-zero-padded 20-byte-address <-> chain::OnChainAccount ([u8; 32])
@@ -192,15 +222,29 @@ impl ChainAdapter for EthereumAdapter {
 
         let calldata = decode_proof_calldata(proof)?;
 
-        let entries: Vec<ISettlementFactory::TradeEntry> =
-            trades.iter().map(trade_to_entry).collect::<Result<_, _>>()?;
+        let entries: Vec<ISettlementFactory::TradeEntry> = trades
+            .iter()
+            .map(trade_to_entry)
+            .collect::<Result<_, _>>()?;
 
-        let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
-        let b = [
-            [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
-            [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+        let a = [
+            U256::from_be_bytes(calldata.a[0]),
+            U256::from_be_bytes(calldata.a[1]),
         ];
-        let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
+        let b = [
+            [
+                U256::from_be_bytes(calldata.b[0][0]),
+                U256::from_be_bytes(calldata.b[0][1]),
+            ],
+            [
+                U256::from_be_bytes(calldata.b[1][0]),
+                U256::from_be_bytes(calldata.b[1][1]),
+            ],
+        ];
+        let c = [
+            U256::from_be_bytes(calldata.c[0]),
+            U256::from_be_bytes(calldata.c[1]),
+        ];
         let input: Vec<U256> = calldata
             .public_inputs
             .iter()
@@ -283,10 +327,7 @@ impl ChainAdapter for EthereumAdapter {
             .map_err(|e| format!("isActiveNode call failed: {e}"))
     }
 
-    async fn get_node_reputation(
-        &self,
-        pubkey: OnChainAccount,
-    ) -> Result<(u32, u8, u64), String> {
+    async fn get_node_reputation(&self, pubkey: OnChainAccount) -> Result<(u32, u8, u64), String> {
         let registry = INodeRegistry::new(self.registry_address, &self.provider);
         let result = registry
             .getReputation(FixedBytes::from(pubkey))
@@ -294,6 +335,34 @@ impl ChainAdapter for EthereumAdapter {
             .await
             .map_err(|e| format!("getReputation call failed: {e}"))?;
         Ok((result.score, result.level, result.lastUpdate))
+    }
+
+    async fn is_trade_settled(
+        &self,
+        trader: OnChainAccount,
+        trade_hash: [u8; 32],
+    ) -> Result<bool, String> {
+        let trader_address = account_to_address(trader)?;
+        let factory = ISettlementFactoryEscrowLookup::new(self.factory_address, &self.provider);
+        let escrow_address = factory
+            .traderEscrows(trader_address)
+            .call()
+            .await
+            .map_err(|e| format!("traderEscrows call failed: {e}"))?;
+
+        if escrow_address.is_zero() {
+            // No escrow ever created for this trader -- nothing could
+            // possibly have been settled through it.
+            return Ok(false);
+        }
+
+        let escrow = ITraderEscrow::new(escrow_address, &self.provider);
+        let settlement = escrow
+            .getSettlement(FixedBytes::from(trade_hash))
+            .call()
+            .await
+            .map_err(|e| format!("getSettlement call failed: {e}"))?;
+        Ok(settlement.settled)
     }
 
     fn prover(&self) -> &dyn ProverBackend {

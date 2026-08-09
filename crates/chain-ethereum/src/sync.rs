@@ -39,7 +39,10 @@ pub fn apply_event(ledger: &mut BalanceLedger, event: &ChainEvent) {
 
 fn resolve_amount(symbol: Option<&str>, amount: u128, kind: &str) -> Option<(String, u64)> {
     let Some(symbol) = symbol else {
-        tracing::warn!(kind, "chain event for unknown token, skipping (not in TokenRegistry)");
+        tracing::warn!(
+            kind,
+            "chain event for unknown token, skipping (not in TokenRegistry)"
+        );
         return None;
     };
     let Ok(amount_u64) = u64::try_from(amount) else {

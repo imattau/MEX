@@ -48,8 +48,7 @@ impl SyncStore {
         let mut batch = Batch::default();
 
         for event in events {
-            let value =
-                serde_json::to_vec(event).map_err(|e| format!("serialize failed: {e}"))?;
+            let value = serde_json::to_vec(event).map_err(|e| format!("serialize failed: {e}"))?;
             let mut key = EVENT_PREFIX.to_vec();
             key.extend_from_slice(&next_seq.to_be_bytes());
             batch.insert(key, value);
