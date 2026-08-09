@@ -70,9 +70,14 @@ pub async fn run_mesh_chain_status_loop(config: MeshChainStatusConfig) {
             snapshot.insert(*pubkey, ChainNodeStatus { active, stake });
         }
 
-        tracing::debug!(entries = snapshot.len(), "mesh chain-status loop: pushing fresh snapshot");
+        tracing::debug!(
+            entries = snapshot.len(),
+            "mesh chain-status loop: pushing fresh snapshot"
+        );
         if config.chain_status_tx.send(snapshot).await.is_err() {
-            tracing::warn!("mesh chain-status loop: mesh node's chain_status channel closed, stopping");
+            tracing::warn!(
+                "mesh chain-status loop: mesh node's chain_status channel closed, stopping"
+            );
             return;
         }
     }

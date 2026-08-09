@@ -40,7 +40,13 @@ fn addr(port: u16) -> std::net::SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 
-fn build_order(trader: [u8; 32], side: common::OrderSide, price: u64, amount: u64, nonce: u64) -> common::Order {
+fn build_order(
+    trader: [u8; 32],
+    side: common::OrderSide,
+    price: u64,
+    amount: u64,
+    nonce: u64,
+) -> common::Order {
     let mut order_id = [0u8; 32];
     order_id[0..16].copy_from_slice(&trader[0..16]);
     order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
@@ -79,7 +85,10 @@ fn now_ms() -> f64 {
 }
 
 async fn query_witness_evidence(
-    sender: &tokio::sync::mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>)>,
+    sender: &tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>,
+    )>,
     order_id: [u8; 32],
 ) -> Option<(NodeId, f64)> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -120,7 +129,10 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
         node_id: NodeId(SERVER_MESH_ID),
         region: Region::UsEast1,
         listen_addr: mesh_listen_addr,
-        peers: vec![(NodeId(EXTERNAL_PEER_ID), external_peer_addr, [0u8; 32]), (NodeId(WITNESS_ID), witness_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(EXTERNAL_PEER_ID), external_peer_addr, [0u8; 32]),
+            (NodeId(WITNESS_ID), witness_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -129,13 +141,18 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let witness = MeshNode::new(MeshConfig {
         node_id: NodeId(WITNESS_ID),
         region: Region::UsEast1,
         listen_addr: witness_addr,
-        peers: vec![(NodeId(EXTERNAL_PEER_ID), external_peer_addr, [0u8; 32]), (NodeId(SERVER_MESH_ID), mesh_listen_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(EXTERNAL_PEER_ID), external_peer_addr, [0u8; 32]),
+            (NodeId(SERVER_MESH_ID), mesh_listen_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -144,7 +161,9 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let witness_evidence_query = witness.earliest_witness_query_sender();
     let witness_propose = witness.propose_batch_sender();
 
@@ -182,6 +201,7 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
         order_sequencer: Some(OrderSequencer::new()),
         pending_order_data: std::collections::HashMap::new(),
         applied_order_ids: std::collections::HashSet::new(),
+        persistence: None,
     }));
 
     tokio::spawn(api::run_order_sequencing_loop(
@@ -213,7 +233,8 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
     let mut buyer_ws = {
         let url = format!("ws://{http_addr}/ws/trades/{}", hex::encode(pk_buyer));
         let mut req = url.into_client_request().unwrap();
-        req.headers_mut().insert("X-API-Key", "dev-default-key".parse().unwrap());
+        req.headers_mut()
+            .insert("X-API-Key", "dev-default-key".parse().unwrap());
         let (ws, _) = connect_async(req).await.unwrap();
         ws
     };
@@ -228,19 +249,29 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
     let submit_start = Instant::now();
 
     let sell_req = sign_and_jsonify(&sk_seller, &sell_order);
-    let sell_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+    let sell_resp: SubmitOrderResponse = client
+        .post(format!("{base}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&sell_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(sell_resp.success && sell_resp.pending && sell_resp.matches.is_empty());
 
     let buy_req = sign_and_jsonify(&sk_buyer, &buy_order);
-    let buy_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+    let buy_resp: SubmitOrderResponse = client
+        .post(format!("{base}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&buy_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(buy_resp.success && buy_resp.pending && buy_resp.matches.is_empty());
 
     // Relay both orders to BOTH the server's mesh node AND the witness --
@@ -248,10 +279,22 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
     // network-time evidence.
     for order in [&sell_order, &buy_order] {
         let t = now_ms();
-        let msg_to_server = FloodMessage { order: order.clone(), hop_count: 0, path: vec![NodeId(EXTERNAL_PEER_ID)], timestamp: t, source_region: Region::UsEast1 };
+        let msg_to_server = FloodMessage {
+            order: order.clone(),
+            hop_count: 0,
+            path: vec![NodeId(EXTERNAL_PEER_ID)],
+            timestamp: t,
+            source_region: Region::UsEast1,
+        };
         let msg_to_witness = msg_to_server.clone();
-        external_peer.send(NodeId(SERVER_MESH_ID), WireMessage::Flood(msg_to_server)).await.unwrap();
-        external_peer.send(NodeId(WITNESS_ID), WireMessage::Flood(msg_to_witness)).await.unwrap();
+        external_peer
+            .send(NodeId(SERVER_MESH_ID), WireMessage::Flood(msg_to_server))
+            .await
+            .unwrap();
+        external_peer
+            .send(NodeId(WITNESS_ID), WireMessage::Flood(msg_to_witness))
+            .await
+            .unwrap();
     }
 
     // Give evidence a moment to land, then have the witness independently
@@ -273,7 +316,10 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
     }
     let witness_resolved = witness_sequencer.flush(&witness_evidence);
     let witness_batch_key = batch_quorum::compute_batch_key(&witness_resolved);
-    witness_propose.send((witness_batch_key, witness_resolved)).await.unwrap();
+    witness_propose
+        .send((witness_batch_key, witness_resolved))
+        .await
+        .unwrap();
 
     // The match must arrive comfortably before QUORUM_TIMEOUT_MS would
     // even matter -- proving real quorum confirmation, not the fail-open

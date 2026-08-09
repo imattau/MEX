@@ -66,7 +66,13 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
             return;
         }
     };
-    let mut chain_sync = ChainSync::new(sync_provider, *factory_addr.as_ref(), TokenRegistry::new(), 0, 0);
+    let mut chain_sync = ChainSync::new(
+        sync_provider,
+        *factory_addr.as_ref(),
+        TokenRegistry::new(),
+        0,
+        0,
+    );
 
     tracing::info!("settlement loop started");
 
@@ -84,8 +90,11 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
 
         for batch in batches {
             let mut idx = 0;
-            for ((proof, &count), trade_batch) in
-                batch.proofs.iter().zip(&batch.proof_trade_counts).zip(&batch.trade_batches)
+            for ((proof, &count), trade_batch) in batch
+                .proofs
+                .iter()
+                .zip(&batch.proof_trade_counts)
+                .zip(&batch.trade_batches)
             {
                 let chunk = &batch.trades[idx..idx + count];
                 idx += count;
@@ -117,10 +126,16 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                             .await
                         {
                             Ok(tx) => {
-                                tracing::info!(tx, trades = settlement_trades.len(), "settled a batch chunk on-chain");
+                                tracing::info!(
+                                    tx,
+                                    trades = settlement_trades.len(),
+                                    "settled a batch chunk on-chain"
+                                );
                                 broadcast_settlement_proof(&state, trade_batch, proof).await;
                             }
-                            Err(e) => tracing::error!(error = %e, "settleBatchWithFees failed for a chunk"),
+                            Err(e) => {
+                                tracing::error!(error = %e, "settleBatchWithFees failed for a chunk")
+                            }
                         }
                     }
                     None => {
@@ -177,7 +192,9 @@ fn build_settlement_trades(
     for m in chunk {
         let trade_hash = {
             let mut guard = state.write().unwrap();
-            guard.confirmed_trade_hashes.remove(&(m.maker_order_id, m.taker_order_id))?
+            guard
+                .confirmed_trade_hashes
+                .remove(&(m.maker_order_id, m.taker_order_id))?
         };
 
         let (payer_pubkey, counterparty_pubkey) = if m.fee_payer == m.maker_trader {

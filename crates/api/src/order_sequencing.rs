@@ -108,7 +108,9 @@ pub async fn run_order_sequencing_loop(
         for order_id in &pending_ids {
             let (tx, rx) = oneshot::channel();
             if witness_query_tx.send((*order_id, tx)).await.is_err() {
-                tracing::warn!("order sequencing loop: mesh witness query channel closed, stopping");
+                tracing::warn!(
+                    "order sequencing loop: mesh witness query channel closed, stopping"
+                );
                 return;
             }
             match rx.await {
@@ -131,10 +133,15 @@ pub async fn run_order_sequencing_loop(
                     // propagation/convergence time (O1's live tests
                     // showed ~20-30ms) is what keeps this the rare case
                     // rather than the common one.
-                    tracing::debug!(?order_id, "order sequencing loop: no evidence yet, will be ranked last in this batch");
+                    tracing::debug!(
+                        ?order_id,
+                        "order sequencing loop: no evidence yet, will be ranked last in this batch"
+                    );
                 }
                 Err(_) => {
-                    tracing::warn!("order sequencing loop: mesh witness reply channel closed, stopping");
+                    tracing::warn!(
+                        "order sequencing loop: mesh witness reply channel closed, stopping"
+                    );
                     return;
                 }
             }
@@ -151,18 +158,30 @@ pub async fn run_order_sequencing_loop(
         let batch_key = protocol::batch_quorum::compute_batch_key(&resolved);
         let my_hash = protocol::batch_quorum::compute_proposal_hash(&resolved);
 
-        if propose_batch_tx.send((batch_key, resolved.clone())).await.is_err() {
-            tracing::warn!(?batch_key, "order sequencing loop: propose_batch channel closed, stopping");
+        if propose_batch_tx
+            .send((batch_key, resolved.clone()))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                ?batch_key,
+                "order sequencing loop: propose_batch channel closed, stopping"
+            );
             return;
         }
 
-        let confirmed = wait_for_batch_confirmation(&mut confirmed_batch_rx, batch_key, quorum_timeout).await;
+        let confirmed =
+            wait_for_batch_confirmation(&mut confirmed_batch_rx, batch_key, quorum_timeout).await;
 
         let mut guard = state.write().unwrap();
         match confirmed {
             Some(agreed_hash) if agreed_hash == my_hash => {
                 metrics::counter!("api.sequencing.batch_confirmed_by_quorum").increment(1);
-                tracing::info!(?batch_key, orders = resolved.len(), "order batch confirmed by cross-node quorum, applying");
+                tracing::info!(
+                    ?batch_key,
+                    orders = resolved.len(),
+                    "order batch confirmed by cross-node quorum, applying"
+                );
                 apply_resolved_batch(&mut guard, resolved, &evidence);
             }
             Some(_other_hash) => {
@@ -194,7 +213,11 @@ pub async fn run_order_sequencing_loop(
 // entry (the rare fallback case -- see this file's docs earlier) gets
 // None, falling back to this node's own wall clock for just that order,
 // same as the non-sequenced path always has.
-fn apply_resolved_batch(guard: &mut AppState, resolved: Vec<[u8; 32]>, evidence: &HashMap<[u8; 32], (NodeId, f64)>) {
+fn apply_resolved_batch(
+    guard: &mut AppState,
+    resolved: Vec<[u8; 32]>,
+    evidence: &HashMap<[u8; 32], (NodeId, f64)>,
+) {
     for order_id in resolved {
         let Some((order, receipt)) = guard.pending_order_data.remove(&order_id) else {
             // Genuinely shouldn't happen -- every order_id here came
@@ -202,18 +225,42 @@ fn apply_resolved_batch(guard: &mut AppState, resolved: Vec<[u8; 32]>, evidence:
             // inserting into pending_order_data (see server.rs's
             // submit_order). Logged, not panicked: an ordering bug here
             // shouldn't take the whole server down.
-            tracing::warn!(?order_id, "order sequencing loop: resolved order_id had no pending data");
+            tracing::warn!(
+                ?order_id,
+                "order sequencing loop: resolved order_id had no pending data"
+            );
             continue;
         };
-        let match_timestamp_us = evidence.get(&order_id).map(|(_, estimate_ms)| (estimate_ms * 1000.0) as u64);
+        let match_timestamp_us = evidence
+            .get(&order_id)
+            .map(|(_, estimate_ms)| (estimate_ms * 1000.0) as u64);
         let start = Instant::now();
-        let matches = apply_accepted_order(guard, order, receipt, match_timestamp_us);
+        let matches = match apply_accepted_order(guard, order, receipt, match_timestamp_us) {
+            Ok(m) => m,
+            Err(e) => {
+                // Stage P4-1: a durable-write failure here means this
+                // order is dropped from this flush -- it was already
+                // removed from pending_order_data above, and isn't
+                // durably recorded, so it's genuinely lost from this
+                // node's perspective. Not retried: a WAL that's failing
+                // (e.g. disk full) is an operational emergency this loop
+                // can't fix by itself, and blocking the whole batch on
+                // one order would stall every other order in it too.
+                tracing::error!(error = %e, ?order_id, "failed to durably persist sequenced order -- dropped, not applied");
+                continue;
+            }
+        };
         metrics::counter!("api.orders.matched").increment(matches.len() as u64);
-        metrics::histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
+        metrics::histogram!("api.orders.match_latency_us")
+            .record(start.elapsed().as_micros() as f64);
         if matches.is_empty() {
             tracing::debug!(?order_id, "sequenced order added to book with no matches");
         } else {
-            tracing::info!(?order_id, matches = matches.len(), "sequenced order matched successfully");
+            tracing::info!(
+                ?order_id,
+                matches = matches.len(),
+                "sequenced order matched successfully"
+            );
         }
     }
 }

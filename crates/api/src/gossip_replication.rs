@@ -54,7 +54,9 @@ pub async fn run_gossip_replication_loop(
         // after this node already committed it, e.g. another peer
         // replaying old traffic). Re-queueing either would re-apply the
         // same order twice.
-        if guard.pending_order_data.contains_key(&order_id) || guard.applied_order_ids.contains(&order_id) {
+        if guard.pending_order_data.contains_key(&order_id)
+            || guard.applied_order_ids.contains(&order_id)
+        {
             continue;
         }
 
@@ -63,7 +65,11 @@ pub async fn run_gossip_replication_loop(
         // buggy peer could otherwise gossip a fabricated order and have
         // it silently queued for real matching.
         if !guard.validator.validate_order(&order) {
-            tracing::warn!(?order_id, ?from_node, "gossip replication loop: received an order with an invalid signature, discarding");
+            tracing::warn!(
+                ?order_id,
+                ?from_node,
+                "gossip replication loop: received an order with an invalid signature, discarding"
+            );
             continue;
         }
 
@@ -84,7 +90,11 @@ pub async fn run_gossip_replication_loop(
         guard.order_sequencer.as_mut().unwrap().add(order_id);
         guard.pending_order_data.insert(order_id, (order, receipt));
         metrics::counter!("api.orders.queued_from_gossip").increment(1);
-        tracing::debug!(?order_id, ?from_node, "order queued for network-time sequencing from mesh gossip");
+        tracing::debug!(
+            ?order_id,
+            ?from_node,
+            "order queued for network-time sequencing from mesh gossip"
+        );
     }
 
     tracing::warn!("gossip replication loop: flood channel closed, stopping");

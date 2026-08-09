@@ -892,6 +892,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sled",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower",

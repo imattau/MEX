@@ -38,7 +38,13 @@ fn addr(port: u16) -> std::net::SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 
-fn build_order(trader: [u8; 32], side: common::OrderSide, price: u64, amount: u64, nonce: u64) -> common::Order {
+fn build_order(
+    trader: [u8; 32],
+    side: common::OrderSide,
+    price: u64,
+    amount: u64,
+    nonce: u64,
+) -> common::Order {
     let mut order_id = [0u8; 32];
     order_id[0..16].copy_from_slice(&trader[0..16]);
     order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
@@ -82,7 +88,10 @@ async fn spawn_replica(
         node_id: NodeId(node_id),
         region: Region::UsEast1,
         listen_addr: mesh_addr,
-        peers: peers.into_iter().map(|(id, addr)| (id, addr, [0u8; 32])).collect(),
+        peers: peers
+            .into_iter()
+            .map(|(id, addr)| (id, addr, [0u8; 32]))
+            .collect(),
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -91,7 +100,9 @@ async fn spawn_replica(
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let mesh_handle = MeshHandle {
         node_id: NodeId(node_id),
@@ -127,6 +138,7 @@ async fn spawn_replica(
         order_sequencer: Some(OrderSequencer::new()),
         pending_order_data: std::collections::HashMap::new(),
         applied_order_ids: std::collections::HashSet::new(),
+        persistence: None,
     }));
 
     tokio::spawn(api::run_order_sequencing_loop(
@@ -137,7 +149,10 @@ async fn spawn_replica(
         confirmed_batch_rx,
         Duration::from_millis(quorum_timeout_ms),
     ));
-    tokio::spawn(api::run_gossip_replication_loop(Arc::clone(&state), flood_rx));
+    tokio::spawn(api::run_gossip_replication_loop(
+        Arc::clone(&state),
+        flood_rx,
+    ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_addr = listener.local_addr().unwrap();
@@ -151,7 +166,9 @@ async fn spawn_replica(
 
 #[tokio::test]
 async fn test_replica_never_submitted_to_still_applies_orders_via_gossip_alone() {
-    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
     const REPLICA_A_ID: u32 = 5;
     const REPLICA_B_ID: u32 = 6; // > A, so A's mesh treats B as downstream and forwards to it
     let a_mesh_addr = addr(17020);
@@ -174,8 +191,22 @@ async fn test_replica_never_submitted_to_still_applies_orders_via_gossip_alone()
     // for that).
     const QUORUM_TIMEOUT_MS: u64 = 200;
 
-    let a_http = spawn_replica(REPLICA_A_ID, a_mesh_addr, vec![(NodeId(REPLICA_B_ID), b_mesh_addr)], WINDOW_MS, QUORUM_TIMEOUT_MS).await;
-    let b_http = spawn_replica(REPLICA_B_ID, b_mesh_addr, vec![(NodeId(REPLICA_A_ID), a_mesh_addr)], WINDOW_MS, QUORUM_TIMEOUT_MS).await;
+    let a_http = spawn_replica(
+        REPLICA_A_ID,
+        a_mesh_addr,
+        vec![(NodeId(REPLICA_B_ID), b_mesh_addr)],
+        WINDOW_MS,
+        QUORUM_TIMEOUT_MS,
+    )
+    .await;
+    let b_http = spawn_replica(
+        REPLICA_B_ID,
+        b_mesh_addr,
+        vec![(NodeId(REPLICA_A_ID), a_mesh_addr)],
+        WINDOW_MS,
+        QUORUM_TIMEOUT_MS,
+    )
+    .await;
 
     // Let real Ping/Pong establish A<->B's mutual latency baseline
     // before anything is measured against it.
@@ -192,7 +223,8 @@ async fn test_replica_never_submitted_to_still_applies_orders_via_gossip_alone()
     let mut buyer_ws_on_b = {
         let url = format!("ws://{b_http}/ws/trades/{}", hex::encode(pk_buyer));
         let mut req = url.into_client_request().unwrap();
-        req.headers_mut().insert("X-API-Key", "dev-default-key".parse().unwrap());
+        req.headers_mut()
+            .insert("X-API-Key", "dev-default-key".parse().unwrap());
         let (ws, _) = connect_async(req).await.unwrap();
         ws
     };
@@ -205,30 +237,51 @@ async fn test_replica_never_submitted_to_still_applies_orders_via_gossip_alone()
 
     // BOTH submitted to A ONLY.
     let sell_req = sign_and_jsonify(&sk_seller, &sell_order);
-    let sell_resp: SubmitOrderResponse = client.post(format!("http://{a_http}/api/v1/order"))
+    let sell_resp: SubmitOrderResponse = client
+        .post(format!("http://{a_http}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&sell_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
-    assert!(sell_resp.success && sell_resp.pending, "sell order rejected by replica A: {:?}", sell_resp.error);
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        sell_resp.success && sell_resp.pending,
+        "sell order rejected by replica A: {:?}",
+        sell_resp.error
+    );
 
     let buy_req = sign_and_jsonify(&sk_buyer, &buy_order);
-    let buy_resp: SubmitOrderResponse = client.post(format!("http://{a_http}/api/v1/order"))
+    let buy_resp: SubmitOrderResponse = client
+        .post(format!("http://{a_http}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&buy_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
-    assert!(buy_resp.success && buy_resp.pending, "buy order rejected by replica A: {:?}", buy_resp.error);
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        buy_resp.success && buy_resp.pending,
+        "buy order rejected by replica A: {:?}",
+        buy_resp.error
+    );
 
     // Replica B's websocket must receive the match -- it can only have
     // learned about either order via gossip from A, applied them through
     // its OWN order_sequencer/gossip_replication pipeline, and matched
     // them in its OWN order_book.
-    let match_msg = tokio::time::timeout(Duration::from_millis(2 * (WINDOW_MS + QUORUM_TIMEOUT_MS) + 1000), buyer_ws_on_b.next())
-        .await
-        .expect("replica B must eventually apply and match both orders via gossip alone")
-        .unwrap()
-        .unwrap();
+    let match_msg = tokio::time::timeout(
+        Duration::from_millis(2 * (WINDOW_MS + QUORUM_TIMEOUT_MS) + 1000),
+        buyer_ws_on_b.next(),
+    )
+    .await
+    .expect("replica B must eventually apply and match both orders via gossip alone")
+    .unwrap()
+    .unwrap();
     let received: engine::Match = match match_msg {
         tokio_tungstenite::tungstenite::Message::Text(t) => serde_json::from_str(&t).unwrap(),
         other => panic!("unexpected message type: {other:?}"),

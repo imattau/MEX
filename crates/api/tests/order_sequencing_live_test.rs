@@ -44,7 +44,13 @@ fn addr(port: u16) -> std::net::SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
 
-fn build_order(trader: [u8; 32], side: common::OrderSide, price: u64, amount: u64, nonce: u64) -> common::Order {
+fn build_order(
+    trader: [u8; 32],
+    side: common::OrderSide,
+    price: u64,
+    amount: u64,
+    nonce: u64,
+) -> common::Order {
     let mut order_id = [0u8; 32];
     order_id[0..16].copy_from_slice(&trader[0..16]);
     order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
@@ -128,7 +134,9 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let mesh_handle = MeshHandle {
         node_id: NodeId(MESH_NODE_ID),
@@ -163,6 +171,7 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         order_sequencer: Some(OrderSequencer::new()),
         pending_order_data: std::collections::HashMap::new(),
         applied_order_ids: std::collections::HashSet::new(),
+        persistence: None,
     }));
 
     tokio::spawn(api::run_order_sequencing_loop(
@@ -194,7 +203,8 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
     let mut buyer_ws = {
         let url = format!("ws://{http_addr}/ws/trades/{}", hex::encode(pk_buyer));
         let mut req = url.into_client_request().unwrap();
-        req.headers_mut().insert("X-API-Key", "dev-default-key".parse().unwrap());
+        req.headers_mut()
+            .insert("X-API-Key", "dev-default-key".parse().unwrap());
         let (ws, _) = connect_async(req).await.unwrap();
         ws
     };
@@ -207,32 +217,67 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
     let buy_order = build_order(pk_buyer, common::OrderSide::Buy, 3000, 5, 1);
 
     let sell_req = sign_and_jsonify(&sk_seller, &sell_order);
-    let sell_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+    let sell_resp: SubmitOrderResponse = client
+        .post(format!("{base}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&sell_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
-    assert!(sell_resp.success, "sell order rejected: {:?}", sell_resp.error);
-    assert!(sell_resp.pending, "with order-sequencing enabled, submit_order must ack with pending=true");
-    assert!(sell_resp.matches.is_empty(), "a pending response must never carry matches -- they haven't been resolved yet");
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        sell_resp.success,
+        "sell order rejected: {:?}",
+        sell_resp.error
+    );
+    assert!(
+        sell_resp.pending,
+        "with order-sequencing enabled, submit_order must ack with pending=true"
+    );
+    assert!(
+        sell_resp.matches.is_empty(),
+        "a pending response must never carry matches -- they haven't been resolved yet"
+    );
 
     let buy_req = sign_and_jsonify(&sk_buyer, &buy_order);
-    let buy_resp: SubmitOrderResponse = client.post(format!("{base}/api/v1/order"))
+    let buy_resp: SubmitOrderResponse = client
+        .post(format!("{base}/api/v1/order"))
         .header("X-API-Key", "dev-default-key")
         .json(&buy_req)
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(buy_resp.success, "buy order rejected: {:?}", buy_resp.error);
-    assert!(buy_resp.pending, "with order-sequencing enabled, submit_order must ack with pending=true");
-    assert!(buy_resp.matches.is_empty(), "a pending response must never carry matches -- they haven't been resolved yet");
+    assert!(
+        buy_resp.pending,
+        "with order-sequencing enabled, submit_order must ack with pending=true"
+    );
+    assert!(
+        buy_resp.matches.is_empty(),
+        "a pending response must never carry matches -- they haven't been resolved yet"
+    );
 
     // Give the server's own self-injected Flood a moment's head start,
     // then relay the SAME two orders from the external peer -- the
     // witnessed hop that actually lets OriginTimeEstimator produce a
     // real estimate (see this file's docs).
     for order in [&sell_order, &buy_order] {
-        let msg = FloodMessage { order: order.clone(), hop_count: 0, path: vec![NodeId(EXTERNAL_PEER_ID)], timestamp: now_ms(), source_region: Region::UsEast1 };
-        external_peer.send(NodeId(MESH_NODE_ID), WireMessage::Flood(msg)).await.unwrap();
+        let msg = FloodMessage {
+            order: order.clone(),
+            hop_count: 0,
+            path: vec![NodeId(EXTERNAL_PEER_ID)],
+            timestamp: now_ms(),
+            source_region: Region::UsEast1,
+        };
+        external_peer
+            .send(NodeId(MESH_NODE_ID), WireMessage::Flood(msg))
+            .await
+            .unwrap();
     }
 
     // Past the flush window -- the loop should have resolved and applied
@@ -246,7 +291,10 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         tokio_tungstenite::tungstenite::Message::Text(t) => serde_json::from_str(&t).unwrap(),
         other => panic!("unexpected message type: {other:?}"),
     };
-    assert!(received.maker_trader == pk_buyer || received.taker_trader == pk_buyer, "the async match must actually involve the buyer who submitted it");
+    assert!(
+        received.maker_trader == pk_buyer || received.taker_trader == pk_buyer,
+        "the async match must actually involve the buyer who submitted it"
+    );
 
     println!("PASS: submit_order acked immediately with pending=true/empty matches; the real match arrived asynchronously over the websocket after the sequencing loop applied both orders in resolved order.");
 

@@ -1,6 +1,15 @@
-use crate::types::{ConfirmCommitRequest, ConfirmCommitResponse, LogRootResponse, OrderBookResponse, PriceLevel, SubmitOrderRequest, SubmitOrderResponse};
+use crate::types::{
+    ConfirmCommitRequest, ConfirmCommitResponse, LogRootResponse, OrderBookResponse, PriceLevel,
+    SubmitOrderRequest, SubmitOrderResponse,
+};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::{
-    extract::{Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        ws::{Message, WebSocket},
+        Path, Query, State, WebSocketUpgrade,
+    },
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -9,17 +18,14 @@ use batcher::SettlementBatcher;
 use common::Order;
 use ed25519_dalek::SigningKey;
 use engine::{Match, OrderBook};
-use orderlog::{HashChainLog, LogEntry, OrderReceipt};
 use metrics::{counter, gauge, histogram};
+use orderlog::{HashChainLog, LogEntry, OrderReceipt};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 use tower::limit::ConcurrencyLimitLayer;
-use axum::http::{HeaderMap, StatusCode, Request};
-use axum::middleware::{self, Next};
-use axum::response::Response;
-use tracing::{info, warn, debug, error, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use validation::OrderValidator;
 
 static API_KEY: OnceLock<String> = OnceLock::new();
@@ -33,7 +39,11 @@ fn get_api_key() -> &'static str {
     })
 }
 
-async fn check_auth(headers: HeaderMap, request: Request<axum::body::Body>, next: Next) -> Result<Response, StatusCode> {
+async fn check_auth(
+    headers: HeaderMap,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let valid_key = headers
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
@@ -118,6 +128,16 @@ pub struct AppState {
     // time). Grows unboundedly for now -- fine for this prototype, not
     // yet pruned/bounded.
     pub applied_order_ids: std::collections::HashSet<[u8; 32]>,
+    // Stage P4-1: None (default, no behavior change) means order-accept/
+    // apply/match state (order_book, order_log, match_log,
+    // pending_commits, applied_order_ids) lives only in memory, exactly
+    // as before this existed -- lost on restart. Some durably records
+    // apply_accepted_order's inputs before applying them, and
+    // main::replay_persistence_log rebuilds all of the above from that
+    // log on startup -- see persistence.rs's own docs for the full
+    // design and why replaying inputs (not snapshotting derived state)
+    // is sufficient.
+    pub persistence: Option<crate::persistence::PersistenceLog>,
 }
 
 pub struct MeshHandle {
@@ -136,12 +156,16 @@ pub struct MeshHandle {
     // active/staked snapshot into the mesh's MisconductQuorum gating
     // (require_staked_reporters) after run() has already taken ownership
     // of the MeshNode -- see MeshNode::chain_status_sender's docs.
-    pub chain_status_tx: mpsc::Sender<std::collections::HashMap<[u8; 32], protocol::ChainNodeStatus>>,
+    pub chain_status_tx:
+        mpsc::Sender<std::collections::HashMap<[u8; 32], protocol::ChainNodeStatus>>,
     // Stage P2: lets the order-sequencing flush loop (order_sequencing.rs)
     // ask the running mesh node for a (witnessing_hop, estimate_ms)
     // snapshot per pending order_id -- see
     // protocol::MeshNode::earliest_witness_query_sender's docs.
-    pub earliest_witness_query_tx: mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(common::NodeId, f64)>>)>,
+    pub earliest_witness_query_tx: mpsc::Sender<(
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<(common::NodeId, f64)>>,
+    )>,
     // Stage P3b: lets the order-sequencing flush loop broadcast its
     // resolved batch to mesh peers and vote for it, gating actual
     // application on cross-node quorum instead of applying unilaterally
@@ -270,7 +294,9 @@ async fn submit_order(
         // client accidentally double-submitting (or a race with this
         // exact order arriving via gossip from another node moments
         // earlier) must not queue or apply it twice.
-        if guard.pending_order_data.contains_key(&order_id) || guard.applied_order_ids.contains(&order_id) {
+        if guard.pending_order_data.contains_key(&order_id)
+            || guard.applied_order_ids.contains(&order_id)
+        {
             counter!("api.orders.duplicate_rejected").increment(1);
             return Json(SubmitOrderResponse {
                 success: false,
@@ -283,7 +309,9 @@ async fn submit_order(
         }
         let sequencer = guard.order_sequencer.as_mut().unwrap();
         sequencer.add(order.id);
-        guard.pending_order_data.insert(order.id, (order, receipt.clone()));
+        guard
+            .pending_order_data
+            .insert(order.id, (order, receipt.clone()));
         counter!("api.orders.queued_for_sequencing").increment(1);
         debug!(order_id = ?order_id, "order queued for network-time sequencing");
         return Json(SubmitOrderResponse {
@@ -296,7 +324,22 @@ async fn submit_order(
         });
     }
 
-    let matches = apply_accepted_order(&mut guard, order, receipt.clone(), None);
+    let matches = match apply_accepted_order(&mut guard, order, receipt.clone(), None) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(error = %e, order_id = ?order_id, "failed to durably persist accepted order, rejecting");
+            return Json(SubmitOrderResponse {
+                success: false,
+                order_id,
+                matches: Vec::new(),
+                error: Some(format!(
+                    "internal error: could not durably record order: {e}"
+                )),
+                receipt: None,
+                pending: false,
+            });
+        }
+    };
     counter!("api.orders.matched").increment(matches.len() as u64);
     histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
 
@@ -339,11 +382,60 @@ async fn submit_order(
 // own wall clock) only for an order that reached this point with no
 // evidence at all -- consistent with every other "no evidence" fallback
 // in this pipeline (see sequencer::OrderSequencer's docs).
-pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: OrderReceipt, match_timestamp_us: Option<u64>) -> Vec<Match> {
+// Stage P4-1: durably records (order, receipt, match_timestamp_us) --
+// exactly the inputs below -- BEFORE applying them, when persistence is
+// configured (see AppState::persistence's docs). Fails closed: if the WAL
+// write itself fails, this returns Err without touching any in-memory
+// state, rather than silently degrading to the old lose-it-on-crash
+// behavior. None (no persistence configured) always succeeds, matching
+// every other optional-feature default in this codebase.
+pub(crate) fn apply_accepted_order(
+    guard: &mut AppState,
+    order: Order,
+    receipt: OrderReceipt,
+    match_timestamp_us: Option<u64>,
+) -> Result<Vec<Match>, String> {
+    if let Some(log) = &guard.persistence {
+        log.append(&order, &receipt, match_timestamp_us)?;
+    }
+    Ok(apply_accepted_order_locally(
+        guard,
+        order,
+        receipt,
+        match_timestamp_us,
+        true,
+    ))
+}
+
+// Stage P4-1: replays a single already-durably-recorded WAL entry on
+// startup, reconstructing order_book/order_log/match_log/pending_commits/
+// applied_order_ids state exactly as it stood before the last crash/
+// restart -- see main::replay_persistence_log for the full boot-time
+// orchestration. Never re-appends to the WAL (these entries already ARE
+// the log) and never floods to mesh (these orders already propagated,
+// once, the first time around -- re-flooding stale entries would also
+// just get rejected by DeterministicFlood::on_receive's anti-replay
+// check, see Stage P3c-2's docs on that exact mechanism).
+pub(crate) fn replay_accepted_order(
+    guard: &mut AppState,
+    order: Order,
+    receipt: OrderReceipt,
+    match_timestamp_us: Option<u64>,
+) {
+    apply_accepted_order_locally(guard, order, receipt, match_timestamp_us, false);
+}
+
+fn apply_accepted_order_locally(
+    guard: &mut AppState,
+    order: Order,
+    receipt: OrderReceipt,
+    match_timestamp_us: Option<u64>,
+    flood_to_mesh: bool,
+) -> Vec<Match> {
     guard.applied_order_ids.insert(order.id);
     let log_entry = guard.order_log.append(receipt.clone()).clone();
 
-    if let Some(mesh) = &guard.mesh {
+    if let Some(mesh) = guard.mesh.as_ref().filter(|_| flood_to_mesh) {
         // Stage P3c-2 found a real bug here: this USED to be
         // receipt.received_at_us (the original HTTP submission time),
         // harmless when apply_accepted_order always ran immediately
@@ -360,7 +452,8 @@ pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs_f64() * 1000.0;
+            .as_secs_f64()
+            * 1000.0;
         let flood_msg = common::FloodMessage {
             order: order.clone(),
             hop_count: 0,
@@ -388,7 +481,9 @@ pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: 
         let peer_ids = mesh.peer_ids.clone();
         tokio::spawn(async move {
             for peer_id in peer_ids {
-                let msg = protocol::WireMessage::LogEntryBroadcast { entry: log_entry.clone() };
+                let msg = protocol::WireMessage::LogEntryBroadcast {
+                    entry: log_entry.clone(),
+                };
                 let _ = transport.send(peer_id, msg).await;
             }
         });
@@ -407,12 +502,7 @@ pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: 
             .unwrap_or_default()
             .as_secs_f64();
         let node_id = guard.node_id;
-        reputation::integration::on_order_matched(
-            &mut guard.reputation,
-            node_id,
-            m,
-            now,
-        );
+        reputation::integration::on_order_matched(&mut guard.reputation, node_id, m, now);
         guard
             .pending_commits
             .insert((m.maker_order_id, m.taker_order_id), m.clone());
@@ -424,10 +514,28 @@ pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: 
     matches
 }
 
+// Stage P4-1: rebuilds order_book/order_log/match_log/pending_commits/
+// applied_order_ids by replaying every durably-recorded entry in `log`,
+// in the order they were originally appended -- see persistence.rs's own
+// docs for why this is sufficient (no separate snapshot format needed).
+// Called once at startup, before `state` is wrapped in Arc<RwLock<_>> and
+// served -- so `guard` here is a plain &mut, not a lock guard, despite
+// the name (kept for consistency with apply_accepted_order_locally's
+// parameter, which this calls through replay_accepted_order).
+pub fn replay_persistence_log(
+    guard: &mut AppState,
+    log: &crate::persistence::PersistenceLog,
+) -> Result<usize, String> {
+    let entries = log.replay()?;
+    let count = entries.len();
+    for (order, receipt, match_timestamp_us) in entries {
+        replay_accepted_order(guard, order, receipt, match_timestamp_us);
+    }
+    Ok(count)
+}
+
 #[instrument(skip(state))]
-async fn get_orderbook(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> Json<OrderBookResponse> {
+async fn get_orderbook(State(state): State<Arc<RwLock<AppState>>>) -> Json<OrderBookResponse> {
     counter!("api.orderbook.requests").increment(1);
     let guard = state.read().unwrap();
 
@@ -466,7 +574,10 @@ struct SinceQuery {
 
 async fn order_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
     let guard = state.read().unwrap();
-    Json(LogRootResponse { root: guard.order_log.root(), len: guard.order_log.len() as u64 })
+    Json(LogRootResponse {
+        root: guard.order_log.root(),
+        len: guard.order_log.len() as u64,
+    })
 }
 
 // Fetches order receipts from `since` (inclusive) onward -- an auditor
@@ -484,7 +595,10 @@ async fn order_log_entries(
 
 async fn match_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
     let guard = state.read().unwrap();
-    Json(LogRootResponse { root: guard.match_log.root(), len: guard.match_log.len() as u64 })
+    Json(LogRootResponse {
+        root: guard.match_log.root(),
+        len: guard.match_log.len() as u64,
+    })
 }
 
 async fn match_log_entries(
@@ -531,12 +645,17 @@ async fn confirm_committed(
     // that already-proven fact into the ledger's own terms, rather than
     // re-deriving or re-checking something the chain already guarantees.
     let trade_value = m.price * m.amount;
-    guard.batcher.deposit(m.taker_trader, &m.symbol, trade_value);
+    guard
+        .batcher
+        .deposit(m.taker_trader, &m.symbol, trade_value);
 
     guard.batcher.enqueue(m);
     info!("Match confirmed committed on-chain, queued for batched settlement");
 
-    Json(ConfirmCommitResponse { success: true, error: None })
+    Json(ConfirmCommitResponse {
+        success: true,
+        error: None,
+    })
 }
 
 async fn ws_handler(
@@ -608,7 +727,11 @@ async fn ws_trader_handler(
         .into_response()
 }
 
-async fn handle_trader_socket(mut socket: WebSocket, state: Arc<RwLock<AppState>>, trader: [u8; 32]) {
+async fn handle_trader_socket(
+    mut socket: WebSocket,
+    state: Arc<RwLock<AppState>>,
+    trader: [u8; 32],
+) {
     let mut rx = {
         let guard = state.read().unwrap();
         guard.ws_broadcast.subscribe()

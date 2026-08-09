@@ -130,6 +130,25 @@
 //                            node with no peers running sequencing will
 //                            always hit this timeout and fall back,
 //                            reproducing Stage P2's exact behavior.
+//   MEX_PERSISTENCE_PATH      Optional. Filesystem path for a durable
+//                             write-ahead log (sled-backed) of every
+//                             accepted/applied order -- see persistence.rs
+//                             for the full design. Unset (default) means
+//                             order_book/order_log/match_log/
+//                             pending_commits/applied_order_ids live only
+//                             in memory, exactly as before this existed:
+//                             lost on restart. When set, this node
+//                             replays the log to rebuild that state on
+//                             every startup before serving any traffic.
+//                             Covers only the accept -> apply/match stage
+//                             (Stage P4-1) -- the confirm -> batch ->
+//                             settle stage (pending_commits exiting,
+//                             confirmed_trade_hashes, the batcher's
+//                             internal queues) is NOT yet durable; a
+//                             crash between a trader's commit confirmation
+//                             and that trade's on-chain settlement can
+//                             still lose track of it. Deliberately
+//                             flagged, not silently assumed solved.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -172,13 +191,16 @@ async fn main() {
     let factory_address = require_env("MEX_FACTORY_ADDRESS");
     let registry_address = require_env("MEX_REGISTRY_ADDRESS");
     let node_pubkey_hex = require_env("MEX_SETTLEMENT_NODE_PUBKEY");
-    let node_pubkey_bytes = hex::decode(node_pubkey_hex.trim_start_matches("0x"))
-        .unwrap_or_else(|e| {
+    let node_pubkey_bytes =
+        hex::decode(node_pubkey_hex.trim_start_matches("0x")).unwrap_or_else(|e| {
             eprintln!("MEX_SETTLEMENT_NODE_PUBKEY is not valid hex: {e}");
             std::process::exit(1);
         });
     let node_pubkey: [u8; 32] = node_pubkey_bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
-        eprintln!("MEX_SETTLEMENT_NODE_PUBKEY must be exactly 32 bytes, got {}", v.len());
+        eprintln!(
+            "MEX_SETTLEMENT_NODE_PUBKEY must be exactly 32 bytes, got {}",
+            v.len()
+        );
         std::process::exit(1);
     });
 
@@ -208,7 +230,11 @@ async fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
-    let fee_calculator = FeeCalculator::new(fee_base_gas_price, fee_batch_utilization, fee_volatility_index);
+    let fee_calculator = FeeCalculator::new(
+        fee_base_gas_price,
+        fee_batch_utilization,
+        fee_volatility_index,
+    );
 
     let receipt_signing_key: SigningKey = match std::env::var("MEX_RECEIPT_SIGNING_KEY") {
         Ok(hex_seed) => {
@@ -217,7 +243,10 @@ async fn main() {
                 std::process::exit(1);
             });
             let seed: [u8; 32] = seed_bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
-                eprintln!("MEX_RECEIPT_SIGNING_KEY must be exactly 32 bytes, got {}", v.len());
+                eprintln!(
+                    "MEX_RECEIPT_SIGNING_KEY must be exactly 32 bytes, got {}",
+                    v.len()
+                );
                 std::process::exit(1);
             });
             SigningKey::from_bytes(&seed)
@@ -261,7 +290,8 @@ async fn main() {
     // see propose_batch_tx's own capture there for why this can't live
     // inside MeshHandle itself.
     let mut confirmed_batch_rx: Option<tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>> = None;
-    let mut flood_rx: Option<tokio::sync::mpsc::Receiver<(common::NodeId, common::FloodMessage)>> = None;
+    let mut flood_rx: Option<tokio::sync::mpsc::Receiver<(common::NodeId, common::FloodMessage)>> =
+        None;
     let mesh = match std::env::var("MEX_MESH_NODE_ID") {
         Ok(id_str) => {
             let mesh_node_id: u32 = id_str.parse().unwrap_or_else(|e| {
@@ -334,15 +364,18 @@ async fn main() {
             // dust identities reach quorum) while looking like real
             // stake-weighting is in effect. Fail loud instead.
             let misconduct_stake_threshold: u64 = if require_staked_reporters {
-                require_env("MEX_MESH_STAKE_QUORUM_THRESHOLD").parse().unwrap_or_else(|e| {
-                    eprintln!("MEX_MESH_STAKE_QUORUM_THRESHOLD is not a valid u64: {e}");
-                    std::process::exit(1);
-                })
+                require_env("MEX_MESH_STAKE_QUORUM_THRESHOLD")
+                    .parse()
+                    .unwrap_or_else(|e| {
+                        eprintln!("MEX_MESH_STAKE_QUORUM_THRESHOLD is not a valid u64: {e}");
+                        std::process::exit(1);
+                    })
             } else {
                 0
             };
             // Computed before `peers` is moved into MeshConfig below.
-            let chain_peer_pubkeys: Vec<[u8; 32]> = peers.iter()
+            let chain_peer_pubkeys: Vec<[u8; 32]> = peers
+                .iter()
                 .map(|(_, _, pk)| *pk)
                 .filter(|pk| *pk != [0u8; 32])
                 .collect();
@@ -385,20 +418,31 @@ async fn main() {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(30);
-                tokio::spawn(api::run_mesh_chain_status_loop(api::MeshChainStatusConfig {
-                    rpc_url: rpc_url.clone(),
-                    node_private_key: node_private_key.clone(),
-                    factory_address: factory_address.clone(),
-                    registry_address: registry_address.clone(),
-                    peer_pubkeys: chain_peer_pubkeys,
-                    poll_interval: Duration::from_secs(chain_status_poll_secs),
-                    chain_status_tx: chain_status_tx.clone(),
-                }));
+                tokio::spawn(api::run_mesh_chain_status_loop(
+                    api::MeshChainStatusConfig {
+                        rpc_url: rpc_url.clone(),
+                        node_private_key: node_private_key.clone(),
+                        factory_address: factory_address.clone(),
+                        registry_address: registry_address.clone(),
+                        peer_pubkeys: chain_peer_pubkeys,
+                        poll_interval: Duration::from_secs(chain_status_poll_secs),
+                        chain_status_tx: chain_status_tx.clone(),
+                    },
+                ));
             }
 
             tokio::spawn(mesh_node.run());
             tracing::info!(mesh_node_id, %listen_addr, require_staked_reporters, "gossip mesh enabled");
-            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx, earliest_witness_query_tx, propose_batch_tx })
+            Some(MeshHandle {
+                node_id: common::NodeId(mesh_node_id),
+                region,
+                sender,
+                transport,
+                peer_ids,
+                chain_status_tx,
+                earliest_witness_query_tx,
+                propose_batch_tx,
+            })
         }
         Err(_) => None,
     };
@@ -409,18 +453,30 @@ async fn main() {
     // is active when every order is actually still applied immediately.
     let order_sequencing_window_ms: Option<u64> = std::env::var("MEX_ORDER_SEQUENCING_WINDOW_MS")
         .ok()
-        .map(|s| s.parse().unwrap_or_else(|e| {
-            eprintln!("MEX_ORDER_SEQUENCING_WINDOW_MS is not a valid u64: {e}");
-            std::process::exit(1);
-        }));
+        .map(|s| {
+            s.parse().unwrap_or_else(|e| {
+                eprintln!("MEX_ORDER_SEQUENCING_WINDOW_MS is not a valid u64: {e}");
+                std::process::exit(1);
+            })
+        });
     if order_sequencing_window_ms.is_some() && mesh.is_none() {
         eprintln!("MEX_ORDER_SEQUENCING_WINDOW_MS is set but no mesh is configured (MEX_MESH_NODE_ID unset) -- order-sequencing needs real network-time evidence, which requires a mesh. Set MEX_MESH_NODE_ID or unset MEX_ORDER_SEQUENCING_WINDOW_MS.");
         std::process::exit(1);
     }
     let order_sequencer = order_sequencing_window_ms.map(|_| protocol::OrderSequencer::new());
 
+    let persistence_log = match std::env::var("MEX_PERSISTENCE_PATH") {
+        Ok(path) if !path.trim().is_empty() => {
+            Some(api::PersistenceLog::open(&path).unwrap_or_else(|e| {
+                eprintln!("failed to open persistence log at '{path}': {e}");
+                std::process::exit(1);
+            }))
+        }
+        _ => None,
+    };
+
     let (ws_broadcast, _) = tokio::sync::broadcast::channel(1024);
-    let state = Arc::new(RwLock::new(AppState {
+    let mut app_state = AppState {
         node_id: common::NodeId(0),
         order_book,
         validator: validation::OrderValidator::new(10_000),
@@ -436,7 +492,30 @@ async fn main() {
         order_sequencer,
         pending_order_data: std::collections::HashMap::new(),
         applied_order_ids: std::collections::HashSet::new(),
-    }));
+        persistence: None,
+    };
+
+    // Stage P4-1: rebuild order_book/order_log/match_log/pending_commits/
+    // applied_order_ids from durable storage BEFORE this node starts
+    // accepting any live traffic -- see persistence.rs's docs and
+    // server::replay_persistence_log for why replaying the same inputs
+    // apply_accepted_order originally ran with is sufficient to
+    // reproduce exact pre-crash state.
+    if let Some(log) = &persistence_log {
+        match api::replay_persistence_log(&mut app_state, log) {
+            Ok(count) => tracing::info!(
+                replayed_entries = count,
+                "replayed persisted order-accept/apply log"
+            ),
+            Err(e) => {
+                eprintln!("failed to replay persistence log: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    app_state.persistence = persistence_log;
+
+    let state = Arc::new(RwLock::new(app_state));
 
     if let Some(window_ms) = order_sequencing_window_ms {
         // mesh.is_some() was already enforced above, so the MeshHandle
@@ -445,8 +524,22 @@ async fn main() {
         // the witness/propose senders from state instead of holding a
         // second separate clone through the branch above: simpler to
         // read straight off the constructed AppState.
-        let witness_query_tx = state.read().unwrap().mesh.as_ref().unwrap().earliest_witness_query_tx.clone();
-        let propose_batch_tx = state.read().unwrap().mesh.as_ref().unwrap().propose_batch_tx.clone();
+        let witness_query_tx = state
+            .read()
+            .unwrap()
+            .mesh
+            .as_ref()
+            .unwrap()
+            .earliest_witness_query_tx
+            .clone();
+        let propose_batch_tx = state
+            .read()
+            .unwrap()
+            .mesh
+            .as_ref()
+            .unwrap()
+            .propose_batch_tx
+            .clone();
         let quorum_timeout_ms: u64 = std::env::var("MEX_ORDER_SEQUENCING_QUORUM_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -456,7 +549,9 @@ async fn main() {
             Duration::from_millis(window_ms),
             witness_query_tx,
             propose_batch_tx,
-            confirmed_batch_rx.expect("mesh.is_some() was enforced above, so confirmed_batch_rx must have been captured"),
+            confirmed_batch_rx.expect(
+                "mesh.is_some() was enforced above, so confirmed_batch_rx must have been captured",
+            ),
             Duration::from_millis(quorum_timeout_ms),
         ));
         // Stage P3c-2: feeds orders this node only learns about via
@@ -466,7 +561,8 @@ async fn main() {
         // separate opt-in.
         tokio::spawn(api::run_gossip_replication_loop(
             Arc::clone(&state),
-            flood_rx.expect("mesh.is_some() was enforced above, so flood_rx must have been captured"),
+            flood_rx
+                .expect("mesh.is_some() was enforced above, so flood_rx must have been captured"),
         ));
         tracing::info!(window_ms, quorum_timeout_ms, "order sequencing enabled");
     }
@@ -480,7 +576,10 @@ async fn main() {
         poll_interval: Duration::from_secs(poll_secs),
         own_settlement_pubkey: node_pubkey,
     };
-    tokio::spawn(api::run_settlement_loop(Arc::clone(&state), settlement_config));
+    tokio::spawn(api::run_settlement_loop(
+        Arc::clone(&state),
+        settlement_config,
+    ));
 
     let router = api::app(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
