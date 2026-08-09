@@ -48,6 +48,7 @@ async fn spawn_gated_detector(id: u32, listen_addr: std::net::SocketAddr) -> Mes
         schedule: None,
         artificial_forward_delay_ms: None,
         require_staked_reporters: true,
+        misconduct_stake_threshold: 0,
     })
     .await
     .unwrap()

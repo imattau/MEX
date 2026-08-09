@@ -76,6 +76,17 @@
 //                            old any-NodeId-counts behavior exactly.
 //   MEX_MESH_CHAIN_STATUS_POLL_SECS  Optional, only used if
 //                            MEX_MESH_REQUIRE_STAKE is set. Defaults 30.
+//   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
+//                            is set (ignored otherwise). Minimum COMBINED
+//                            on-chain stake, across at least 2 distinct
+//                            eligible reporters, before a misconduct
+//                            accusation is confirmed -- see
+//                            protocol::MeshNode's MisconductQuorum docs.
+//                            No default: an unset value here would
+//                            silently fall back to a 0 threshold, which
+//                            reproduces Stage 4b/4c's plain active/
+//                            inactive gate rather than real stake
+//                            weighting, so this fails loud instead.
 
 use api::server::{AppState, MeshHandle};
 use api::settlement::SettlementConfig;
@@ -234,6 +245,19 @@ async fn main() {
             let require_staked_reporters = std::env::var("MEX_MESH_REQUIRE_STAKE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
+            // Stage 4d: required, not defaulted, whenever chain gating is
+            // on -- an unset/weak default here would silently reproduce
+            // Stage 4b/4c's plain pass/fail gate (any two staked-above-
+            // dust identities reach quorum) while looking like real
+            // stake-weighting is in effect. Fail loud instead.
+            let misconduct_stake_threshold: u64 = if require_staked_reporters {
+                require_env("MEX_MESH_STAKE_QUORUM_THRESHOLD").parse().unwrap_or_else(|e| {
+                    eprintln!("MEX_MESH_STAKE_QUORUM_THRESHOLD is not a valid u64: {e}");
+                    std::process::exit(1);
+                })
+            } else {
+                0
+            };
             // Computed before `peers` is moved into MeshConfig below.
             let chain_peer_pubkeys: Vec<[u8; 32]> = peers.iter()
                 .map(|(_, _, pk)| *pk)
@@ -252,6 +276,7 @@ async fn main() {
                 schedule: None,
                 artificial_forward_delay_ms: None,
                 require_staked_reporters,
+                misconduct_stake_threshold,
             })
             .await
             .unwrap_or_else(|e| {

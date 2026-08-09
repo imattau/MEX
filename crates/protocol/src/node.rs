@@ -251,28 +251,55 @@ pub struct ChainNodeStatus {
     pub stake: u64,
 }
 
+// Stage 4d: each recorded vote now carries a WEIGHT (see
+// MeshNode::reporter_weight), not just a distinct-reporter tally --
+// closes the last gap Stage 4b/4c's docs flagged: a pass/fail active
+// gate still gave an adversary staking the on-chain minimum under
+// several identities one full vote per identity, same as one identity
+// with 100x the stake. Quorum now requires BOTH min_reporters distinct
+// voices (kept as a hard floor -- see below for why) AND their combined
+// weight to clear stake_threshold.
+//
+// min_reporters is deliberately NOT replaced by the weight condition
+// alone: without it, a single sufficiently-staked reporter could
+// unilaterally trigger a reputation consequence, which is exactly the
+// single-voice attack surface Stage 3 existed to close in the first
+// place. Weighting strengthens what a vote is worth; it doesn't relax
+// the requirement that more than one independent voice agree.
+//
+// With require_staked_reporters off, MeshNode::reporter_weight returns a
+// flat 1.0 for every reporter and stake_threshold is 0 (see MeshNode::
+// new) -- min_reporters is then the only binding constraint, reproducing
+// Stage 3's exact distinct-count behavior.
 struct MisconductQuorum {
-    // subject -> (reporter -> last_accusation_time)
-    accusations: HashMap<NodeId, HashMap<NodeId, f64>>,
-    threshold: usize,
+    // subject -> (reporter -> (weight, last_accusation_time))
+    accusations: HashMap<NodeId, HashMap<NodeId, (f64, f64)>>,
+    min_reporters: usize,
+    stake_threshold: f64,
     window_secs: f64,
 }
 
 impl MisconductQuorum {
-    fn new(threshold: usize, window_secs: f64) -> Self {
-        Self { accusations: HashMap::new(), threshold, window_secs }
+    fn new(min_reporters: usize, stake_threshold: f64, window_secs: f64) -> Self {
+        Self { accusations: HashMap::new(), min_reporters, stake_threshold, window_secs }
     }
 
-    // Records `reporter`'s accusation of `subject` at `now`, expiring any
-    // of that subject's accusations older than window_secs first (so a
-    // handful of stale reports from long ago can't quietly accumulate
-    // into a quorum). Returns (quorum_now_met, distinct_reporter_count).
-    fn record(&mut self, subject: NodeId, reporter: NodeId, now: f64) -> (bool, usize) {
+    // Records `reporter`'s accusation of `subject`, worth `weight`, at
+    // `now` -- expiring any of that subject's accusations older than
+    // window_secs first (so a handful of stale reports from long ago
+    // can't quietly accumulate into a quorum). A repeat report from the
+    // same reporter replaces its previous weight/timestamp rather than
+    // accumulating (still one vote per distinct reporter, just refreshed
+    // -- see MeshNode's docs on report spam not manufacturing quorum).
+    // Returns (quorum_now_met, distinct_reporter_count, total_weight).
+    fn record(&mut self, subject: NodeId, reporter: NodeId, weight: f64, now: f64) -> (bool, usize, f64) {
         let reporters = self.accusations.entry(subject).or_default();
-        reporters.retain(|_, last_seen| now - *last_seen < self.window_secs);
-        reporters.insert(reporter, now);
+        reporters.retain(|_, (_, last_seen)| now - *last_seen < self.window_secs);
+        reporters.insert(reporter, (weight, now));
         let count = reporters.len();
-        (count >= self.threshold, count)
+        let total_weight: f64 = reporters.values().map(|(w, _)| *w).sum();
+        let quorum_met = count >= self.min_reporters && total_weight >= self.stake_threshold;
+        (quorum_met, count, total_weight)
     }
 }
 
@@ -381,6 +408,16 @@ pub struct MeshConfig {
     // nothing depending on that changes unless a real chain connection
     // is wired up and this is explicitly turned on (see api/src/main.rs).
     pub require_staked_reporters: bool,
+    // Stage 4d: minimum COMBINED on-chain stake (see ChainNodeStatus)
+    // across all of a subject's distinct eligible reporters before
+    // MisconductQuorum treats the accusation as confirmed. Only
+    // meaningful when require_staked_reporters is true -- ignored
+    // (effectively 0) otherwise, since reporter_weight always returns
+    // 1.0 per reporter when chain gating is off, and min_reporters (a
+    // fixed floor of 2, not configurable) remains the only binding
+    // constraint in that case, reproducing Stage 3's exact behavior. 0
+    // in every call site that leaves require_staked_reporters false.
+    pub misconduct_stake_threshold: u64,
 }
 
 impl MeshNode {
@@ -458,12 +495,19 @@ impl MeshNode {
             censorship: CensorshipMonitor::new(),
             latency_stats: crate::latency::PeerLatencyStats::new(),
             hop_latency: HopLatencyMonitor::new(),
-            // Threshold=2: this node's own accusation (if it's the one
-            // that detected something, see report_misconduct) plus at
-            // least one independent corroborating report from elsewhere.
-            // Arbitrary for this prototype -- a real deployment would
-            // want this configurable and almost certainly higher.
-            misconduct_quorum: MisconductQuorum::new(2, 60.0),
+            // min_reporters=2: this node's own accusation (if it's the
+            // one that detected something, see report_misconduct) plus
+            // at least one independent corroborating report from
+            // elsewhere. Arbitrary for this prototype -- a real
+            // deployment would want this configurable and almost
+            // certainly higher. stake_threshold is 0 unless
+            // require_staked_reporters is on (see
+            // misconduct_stake_threshold's docs on why 0 is a no-op).
+            misconduct_quorum: MisconductQuorum::new(
+                2,
+                if config.require_staked_reporters { config.misconduct_stake_threshold as f64 } else { 0.0 },
+                60.0,
+            ),
             chain_status: HashMap::new(),
             require_staked_reporters: config.require_staked_reporters,
             chain_status_tx,
@@ -558,18 +602,23 @@ impl MeshNode {
         self.chain_status_tx.clone()
     }
 
-    // Whether `reporter`'s vote should count toward MisconductQuorum --
-    // always true unless require_staked_reporters is on, in which case
-    // it also needs to resolve to a pubkey this node's chain_status
-    // marks active. See ChainNodeStatus's docs for why this is a gate,
-    // not a stake-weighted vote.
-    fn is_chain_eligible(&self, reporter: NodeId) -> bool {
+    // Stage 4d: how much `reporter`'s vote is actually WORTH toward
+    // MisconductQuorum -- 1.0 flat (every reporter counts equally)
+    // unless require_staked_reporters is on, in which case it's that
+    // reporter's real on-chain stake if (and only if) chain_status marks
+    // them active, or 0.0 (no vote at all) if they're inactive or don't
+    // resolve to a known pubkey. 0.0 is exactly the old is_chain_eligible
+    // rejection case -- MisconductQuorum::record still requires
+    // min_reporters distinct non-zero votes regardless of how much any
+    // one of them is worth, so a single, even enormous, stake can't
+    // unilaterally confirm an accusation (see MisconductQuorum's docs).
+    fn reporter_weight(&self, reporter: NodeId) -> f64 {
         if !self.require_staked_reporters {
-            return true;
+            return 1.0;
         }
-        match self.reporter_pubkey(reporter) {
-            Some(pk) => self.chain_status.get(&pk).is_some_and(|s| s.active),
-            None => false,
+        match self.reporter_pubkey(reporter).and_then(|pk| self.chain_status.get(&pk)) {
+            Some(status) if status.active => status.stake as f64,
+            _ => 0.0,
         }
     }
 
@@ -608,17 +657,18 @@ impl MeshNode {
     // (reputation::integration::on_misconduct_reported) once
     // MisconductQuorum says enough distinct reporters agree.
     fn apply_or_record_accusation(&mut self, subject: NodeId, reporter: NodeId, reason: &str, now: f64) {
-        if !self.is_chain_eligible(reporter) {
+        let weight = self.reporter_weight(reporter);
+        if weight <= 0.0 {
             tracing::debug!(?subject, ?reporter, "accusation ignored: reporter is not an active staked identity per the last chain_status snapshot");
             return;
         }
-        let (quorum_met, count) = self.misconduct_quorum.record(subject, reporter, now);
+        let (quorum_met, count, total_weight) = self.misconduct_quorum.record(subject, reporter, weight, now);
         if quorum_met {
-            tracing::warn!(?subject, reporter_count = count, "misconduct quorum reached, applying reputation consequence");
+            tracing::warn!(?subject, reporter_count = count, total_weight, "misconduct quorum reached, applying reputation consequence");
             reputation::integration::on_misconduct_reported(&mut self.reputation, subject, reporter, reason);
             let _ = self.confirmation_tx.try_send(subject);
         } else {
-            tracing::debug!(?subject, reporter_count = count, threshold = self.misconduct_quorum.threshold, "misconduct accusation recorded, quorum not yet reached");
+            tracing::debug!(?subject, reporter_count = count, total_weight, min_reporters = self.misconduct_quorum.min_reporters, stake_threshold = self.misconduct_quorum.stake_threshold, "misconduct accusation recorded, quorum not yet reached");
         }
     }
 

@@ -100,6 +100,7 @@ async fn main() {
         schedule: None,
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
+        misconduct_stake_threshold: 0,
     })
     .await
     .unwrap_or_else(|e| panic!("failed to bind mesh listener on {listen_addr}: {e}"));

@@ -85,6 +85,7 @@ async fn spawn_relay(
         schedule: None,
         artificial_forward_delay_ms,
         require_staked_reporters: false,
+        misconduct_stake_threshold: 0,
     })
     .await
     .unwrap()

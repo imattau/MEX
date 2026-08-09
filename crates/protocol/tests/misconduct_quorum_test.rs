@@ -39,6 +39,7 @@ async fn spawn_detector(id: u32, listen_addr: std::net::SocketAddr) -> MeshNode 
         schedule: None,
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
+        misconduct_stake_threshold: 0,
     })
     .await
     .unwrap()
