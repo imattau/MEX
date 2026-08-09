@@ -115,11 +115,34 @@ pub enum OrderingDecision {
     TieBroken(CmpOrdering),
 }
 
-fn tie_break_key(order_id: &[u8; 32], witnessing_hop: NodeId) -> [u8; 32] {
+pub(crate) fn tie_break_key(order_id: &[u8; 32], witnessing_hop: NodeId) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(order_id);
     hasher.update(witnessing_hop.0.to_be_bytes());
     hasher.finalize().into()
+}
+
+// The pure comparison logic behind compare_orders, factored out so
+// sequencer::OrderSequencer can rank a whole BATCH of orders using the
+// exact same rule against a pre-fetched evidence snapshot, instead of
+// duplicating it. `evidence_a`/`evidence_b` are each (witnessing_hop,
+// estimated_origin_time_ms), already resolved by the caller.
+pub(crate) fn compare_by_evidence(
+    order_a: &[u8; 32],
+    evidence_a: (NodeId, f64),
+    order_b: &[u8; 32],
+    evidence_b: (NodeId, f64),
+) -> OrderingDecision {
+    let (hop_a, t_a) = evidence_a;
+    let (hop_b, t_b) = evidence_b;
+
+    if (t_a - t_b).abs() >= AMBIGUITY_WINDOW_MS {
+        return OrderingDecision::ByTimestamp(t_a.partial_cmp(&t_b).unwrap());
+    }
+
+    let key_a = tie_break_key(order_a, hop_a);
+    let key_b = tie_break_key(order_b, hop_b);
+    OrderingDecision::TieBroken(key_a.cmp(&key_b))
 }
 
 pub struct OriginTimeEstimator {
@@ -181,8 +204,10 @@ impl OriginTimeEstimator {
 
     // Same as earliest_estimate_ms, but also returns WHICH hop produced
     // it -- compare_orders needs the hop identity for its tie-break
-    // input, not just the timestamp.
-    fn earliest_witness(&mut self, order_id: &[u8; 32]) -> Option<(NodeId, f64)> {
+    // input, not just the timestamp. pub(crate), not private: Stage P1's
+    // sequencer module needs a (hop, estimate) snapshot for a whole
+    // batch of orders, fetched once up front -- see its own docs.
+    pub(crate) fn earliest_witness(&mut self, order_id: &[u8; 32]) -> Option<(NodeId, f64)> {
         let entries = self.estimates.get(order_id)?;
         let has_honest = entries.iter().any(|(_, _, anomalous)| !anomalous);
         entries
@@ -198,16 +223,9 @@ impl OriginTimeEstimator {
     // haven't observed). See OrderingDecision's docs for what
     // ByTimestamp vs TieBroken means and why.
     pub fn compare_orders(&mut self, order_a: &[u8; 32], order_b: &[u8; 32]) -> Option<OrderingDecision> {
-        let (hop_a, t_a) = self.earliest_witness(order_a)?;
-        let (hop_b, t_b) = self.earliest_witness(order_b)?;
-
-        if (t_a - t_b).abs() >= AMBIGUITY_WINDOW_MS {
-            return Some(OrderingDecision::ByTimestamp(t_a.partial_cmp(&t_b).unwrap()));
-        }
-
-        let key_a = tie_break_key(order_a, hop_a);
-        let key_b = tie_break_key(order_b, hop_b);
-        Some(OrderingDecision::TieBroken(key_a.cmp(&key_b)))
+        let wa = self.earliest_witness(order_a)?;
+        let wb = self.earliest_witness(order_b)?;
+        Some(compare_by_evidence(order_a, wa, order_b, wb))
     }
 }
 
