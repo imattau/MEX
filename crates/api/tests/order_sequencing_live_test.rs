@@ -89,6 +89,13 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
     const MESH_NODE_ID: u32 = 5;
     const EXTERNAL_PEER_ID: u32 = 10;
     const WINDOW_MS: u64 = 200;
+    // This test has no OTHER mesh node running order-sequencing to
+    // propose a corroborating batch hash -- it exercises Stage P3b's
+    // fail-open path (no quorum reached in time -> apply this node's own
+    // resolution anyway, loudly logged as unconfirmed), same as a lone
+    // sequencer with no peers would in a real deployment. Kept short so
+    // this test doesn't spend long sitting in that wait.
+    const QUORUM_TIMEOUT_MS: u64 = 150;
 
     // The external peer: answers Pings (so the server's mesh node
     // establishes a real latency baseline to it) and, later, relays each
@@ -108,7 +115,7 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         });
     }
 
-    let mesh_node = MeshNode::new(MeshConfig {
+    let mut mesh_node = MeshNode::new(MeshConfig {
         node_id: NodeId(MESH_NODE_ID),
         region: Region::UsEast1,
         listen_addr: mesh_listen_addr,
@@ -131,8 +138,11 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         peer_ids: mesh_node.peer_ids(),
         chain_status_tx: mesh_node.chain_status_sender(),
         earliest_witness_query_tx: mesh_node.earliest_witness_query_sender(),
+        propose_batch_tx: mesh_node.propose_batch_sender(),
     };
     let witness_query_tx = mesh_handle.earliest_witness_query_tx.clone();
+    let propose_batch_tx = mesh_handle.propose_batch_tx.clone();
+    let confirmed_batch_rx = mesh_node.confirmed_batch_receiver();
 
     tokio::spawn(mesh_node.run());
 
@@ -158,6 +168,9 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         Arc::clone(&state),
         Duration::from_millis(WINDOW_MS),
         witness_query_tx,
+        propose_batch_tx,
+        confirmed_batch_rx,
+        Duration::from_millis(QUORUM_TIMEOUT_MS),
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -223,7 +236,7 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
 
     // Past the flush window -- the loop should have resolved and applied
     // both orders by now, producing a match.
-    let match_msg = tokio::time::timeout(Duration::from_millis(WINDOW_MS * 3), buyer_ws.next())
+    let match_msg = tokio::time::timeout(Duration::from_millis(WINDOW_MS + QUORUM_TIMEOUT_MS + 500), buyer_ws.next())
         .await
         .expect("buyer socket must eventually receive the match once the sequencing loop applies both orders")
         .unwrap()

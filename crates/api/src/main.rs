@@ -92,7 +92,25 @@
 //                            websocket (ws_broadcast). Unset (default) =
 //                            every order applied and matched
 //                            synchronously, exactly as before this
-//                            existed -- no behavior change.
+//                            existed -- no behavior change. As of Stage
+//                            P3b, a resolved batch is also PROPOSED to
+//                            mesh peers and gated on cross-node quorum
+//                            (see MEX_ORDER_SEQUENCING_QUORUM_TIMEOUT_MS)
+//                            before being applied, not applied the
+//                            instant this node's own window closes.
+//   MEX_ORDER_SEQUENCING_QUORUM_TIMEOUT_MS  Optional, only used if
+//                            MEX_ORDER_SEQUENCING_WINDOW_MS is set.
+//                            Defaults 500. How long the sequencing loop
+//                            waits for at least one other distinct mesh
+//                            peer to independently propose the SAME
+//                            resolved hash before falling back to
+//                            applying its own local resolution anyway
+//                            (loudly logged as unconfirmed when that
+//                            happens) -- see order_sequencing.rs's docs
+//                            for the full fail-open rationale. A lone
+//                            node with no peers running sequencing will
+//                            always hit this timeout and fall back,
+//                            reproducing Stage P2's exact behavior.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -196,6 +214,10 @@ async fn main() {
     order_book.set_active_nodes(vec![node_pubkey]);
     order_book.set_fee_calculator(fee_calculator);
 
+    // Populated inside the match arm below, if a mesh gets constructed --
+    // see propose_batch_tx's own capture there for why this can't live
+    // inside MeshHandle itself.
+    let mut confirmed_batch_rx: Option<tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>> = None;
     let mesh = match std::env::var("MEX_MESH_NODE_ID") {
         Ok(id_str) => {
             let mesh_node_id: u32 = id_str.parse().unwrap_or_else(|e| {
@@ -281,7 +303,7 @@ async fn main() {
                 .filter(|pk| *pk != [0u8; 32])
                 .collect();
 
-            let mesh_node = protocol::MeshNode::new(protocol::MeshConfig {
+            let mut mesh_node = protocol::MeshNode::new(protocol::MeshConfig {
                 node_id: common::NodeId(mesh_node_id),
                 region,
                 listen_addr,
@@ -305,6 +327,13 @@ async fn main() {
             let peer_ids = mesh_node.peer_ids();
             let chain_status_tx = mesh_node.chain_status_sender();
             let earliest_witness_query_tx = mesh_node.earliest_witness_query_sender();
+            let propose_batch_tx = mesh_node.propose_batch_sender();
+            // Not clonable (single-consumer), and only the sequencing
+            // flush loop needs it -- carried out of this match arm via
+            // the outer confirmed_batch_rx binding below, since it can't
+            // live in MeshHandle (which is Clone-friendly by design; a
+            // Receiver isn't).
+            confirmed_batch_rx = Some(mesh_node.confirmed_batch_receiver());
 
             if require_staked_reporters {
                 let chain_status_poll_secs: u64 = std::env::var("MEX_MESH_CHAIN_STATUS_POLL_SECS")
@@ -324,7 +353,7 @@ async fn main() {
 
             tokio::spawn(mesh_node.run());
             tracing::info!(mesh_node_id, %listen_addr, require_staked_reporters, "gossip mesh enabled");
-            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx, earliest_witness_query_tx })
+            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx, earliest_witness_query_tx, propose_batch_tx })
         }
         Err(_) => None,
     };
@@ -367,16 +396,24 @@ async fn main() {
         // mesh.is_some() was already enforced above, so the MeshHandle
         // built inside the match arm above is available here via
         // state.mesh -- but that's already moved into `state`. Re-derive
-        // the witness sender from state instead of holding a second
-        // separate clone through the branch above: simpler to read
-        // straight off the constructed AppState.
+        // the witness/propose senders from state instead of holding a
+        // second separate clone through the branch above: simpler to
+        // read straight off the constructed AppState.
         let witness_query_tx = state.read().unwrap().mesh.as_ref().unwrap().earliest_witness_query_tx.clone();
+        let propose_batch_tx = state.read().unwrap().mesh.as_ref().unwrap().propose_batch_tx.clone();
+        let quorum_timeout_ms: u64 = std::env::var("MEX_ORDER_SEQUENCING_QUORUM_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(500);
         tokio::spawn(api::run_order_sequencing_loop(
             Arc::clone(&state),
             Duration::from_millis(window_ms),
             witness_query_tx,
+            propose_batch_tx,
+            confirmed_batch_rx.expect("mesh.is_some() was enforced above, so confirmed_batch_rx must have been captured"),
+            Duration::from_millis(quorum_timeout_ms),
         ));
-        tracing::info!(window_ms, "order sequencing enabled");
+        tracing::info!(window_ms, quorum_timeout_ms, "order sequencing enabled");
     }
 
     let settlement_config = SettlementConfig {

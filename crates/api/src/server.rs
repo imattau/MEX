@@ -134,6 +134,12 @@ pub struct MeshHandle {
     // snapshot per pending order_id -- see
     // protocol::MeshNode::earliest_witness_query_sender's docs.
     pub earliest_witness_query_tx: mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(common::NodeId, f64)>>)>,
+    // Stage P3b: lets the order-sequencing flush loop broadcast its
+    // resolved batch to mesh peers and vote for it, gating actual
+    // application on cross-node quorum instead of applying unilaterally
+    // the moment its own local window closes -- see
+    // protocol::MeshNode::propose_batch_sender's docs.
+    pub propose_batch_tx: mpsc::Sender<([u8; 32], Vec<[u8; 32]>)>,
 }
 
 fn setup_metrics() {
