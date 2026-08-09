@@ -165,7 +165,9 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                                 broadcast_settlement_proof(&state, trade_batch, proof).await;
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "settleBatchWithFees failed for a chunk")
+                                tracing::error!(error = %e, trades = settlement_trades.len(), "settleBatchWithFees failed for a chunk -- re-queueing every trade in it for retry next interval");
+                                let mut guard = state.write().unwrap();
+                                restore_failed_chunk(&mut guard, chunk, &settlement_trades);
                             }
                         }
                     }
@@ -205,6 +207,39 @@ async fn broadcast_settlement_proof(
         if let Err(e) = transport.send(peer_id, msg).await {
             tracing::warn!(?peer_id, error = %e, "failed to broadcast settlement proof to peer");
         }
+    }
+}
+
+// Stage P4-4a: undoes what build_settlement_trades (below) and
+// batcher.process_batches (in run_settlement_loop, above) already did to
+// this chunk's trades BEFORE the just-failed submit_settlement_batch
+// call was even made -- confirmed_trade_hashes' entries were already
+// consumed, and the trades were already drained out of the batcher's
+// queue. Without this, a failed submission (a network hiccup, an
+// out-of-gas, or Stage P4-4c's future "already settled on-chain"
+// reconciliation case) would silently drop every trade in the chunk from
+// all local bookkeeping, forever, with no retry -- a real, pre-existing
+// bug independent of persistence, found while scoping P4-4.
+//
+// `chunk` and `settlement_trades` are the same length, in the same
+// order (build_settlement_trades only ever returns Some(..) once every
+// trade in `chunk` succeeded, pushing exactly one SettlementTrade per
+// input Match in iteration order) -- zip is safe. No new durable WAL
+// entry is needed for this alone: these trades' CommitConfirmed entries
+// are still on disk, and no BatchSubmitted checkpoint was ever written
+// for them (that only happens after a successful submission) -- the WAL
+// already correctly reflects "still pending"; only this in-memory state
+// had drifted from it.
+fn restore_failed_chunk(
+    guard: &mut AppState,
+    chunk: &[engine::Match],
+    settlement_trades: &[SettlementTrade],
+) {
+    for (m, st) in chunk.iter().zip(settlement_trades) {
+        guard
+            .confirmed_trade_hashes
+            .insert((m.maker_order_id, m.taker_order_id), st.trade_hash);
+        guard.batcher.enqueue(m.clone());
     }
 }
 
@@ -262,4 +297,144 @@ fn resolve_address(chain_sync: &ChainSync<impl Provider>, pubkey: [u8; 32]) -> O
         let owner = chain_sync.escrows().owner_of(*escrow)?;
         (owner.offchain_pubkey == pubkey).then_some(Address::from(owner.trader))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chain::Token;
+    use ed25519_dalek::SigningKey;
+    use engine::Match;
+    use rand::rngs::OsRng;
+
+    fn make_match(seed: u8) -> Match {
+        Match {
+            maker_order_id: [seed; 32],
+            taker_order_id: [seed + 1; 32],
+            maker_trader: [seed + 2; 32],
+            taker_trader: [seed + 3; 32],
+            price: 100,
+            amount: 10,
+            timestamp_us: 0,
+            // Instant tier flushes immediately on process_batches(), no
+            // batch-size/timer gate to fight with in a test.
+            settlement_tier: common::SettlementPreference::Instant,
+            fee_basis_points: 5,
+            seller: [seed + 3; 32],
+            fee_payer: [seed + 3; 32],
+            symbol: "ETH-USD".to_string(),
+            assigned_node: [0u8; 32],
+            settlement_deadline: 0,
+        }
+    }
+
+    fn make_settlement_trade(m: &Match, trade_hash: [u8; 32]) -> SettlementTrade {
+        SettlementTrade {
+            maker_order_id: m.maker_order_id,
+            taker_order_id: m.taker_order_id,
+            trader: m.taker_trader,
+            counterparty: m.maker_trader,
+            token: Token::Native,
+            amount: m.price * m.amount,
+            fee: 0,
+            deadline: m.settlement_deadline,
+            trade_hash,
+            assigned_node: m.assigned_node,
+        }
+    }
+
+    fn test_state() -> AppState {
+        let (tx, _) = tokio::sync::broadcast::channel(100);
+        AppState {
+            node_id: common::NodeId(0),
+            order_book: engine::OrderBook::new("ETH-USD".to_string()),
+            validator: validation::OrderValidator::new(100),
+            ws_broadcast: tx,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: SigningKey::generate(&mut OsRng),
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            persistence: None,
+        }
+    }
+
+    // Stage P4-4a: the actual bug being fixed -- before this,
+    // build_settlement_trades and process_batches had already drained
+    // these trades out of confirmed_trade_hashes and the batcher's
+    // queue BEFORE a submission was even attempted, so a failed
+    // submission dropped them forever. restore_failed_chunk must put
+    // both back exactly as they stood before that draining.
+    #[test]
+    fn test_restore_failed_chunk_reinstates_confirmed_hashes_and_batcher_queue() {
+        let mut state = test_state();
+
+        let m1 = make_match(1);
+        let m2 = make_match(10);
+        let hash1 = [0xAAu8; 32];
+        let hash2 = [0xBBu8; 32];
+        let chunk = vec![m1.clone(), m2.clone()];
+        let settlement_trades = vec![
+            make_settlement_trade(&m1, hash1),
+            make_settlement_trade(&m2, hash2),
+        ];
+
+        // Simulate what build_settlement_trades + process_batches already
+        // did before the failed submission: both trades are gone from
+        // confirmed_trade_hashes and would already have been drained out
+        // of the batcher's internal queues (nothing to simulate there --
+        // an empty batcher already reflects "drained").
+        assert!(state.confirmed_trade_hashes.is_empty());
+        state
+            .batcher
+            .deposit(m1.taker_trader, &m1.symbol, u64::MAX / 2);
+        state
+            .batcher
+            .deposit(m2.taker_trader, &m2.symbol, u64::MAX / 2);
+
+        restore_failed_chunk(&mut state, &chunk, &settlement_trades);
+
+        assert_eq!(
+            state
+                .confirmed_trade_hashes
+                .get(&(m1.maker_order_id, m1.taker_order_id)),
+            Some(&hash1),
+            "trade 1's confirmed_trade_hashes entry must be restored with its original trade_hash"
+        );
+        assert_eq!(
+            state
+                .confirmed_trade_hashes
+                .get(&(m2.maker_order_id, m2.taker_order_id)),
+            Some(&hash2),
+            "trade 2's confirmed_trade_hashes entry must be restored with its original trade_hash"
+        );
+
+        // Both trades must be back in the batcher's queue, ready to be
+        // picked up and retried on the next process_batches() call(s) --
+        // try_flush_instant only pops one trade per call, so two calls
+        // are needed to drain both.
+        let mut settled_ids: Vec<[u8; 32]> = Vec::new();
+        for _ in 0..2 {
+            let batches = state.batcher.process_batches();
+            settled_ids.extend(
+                batches
+                    .iter()
+                    .flat_map(|b| b.trades.iter().map(|t| t.maker_order_id)),
+            );
+        }
+        assert!(
+            settled_ids.contains(&m1.maker_order_id),
+            "trade 1 must be back in the batcher's queue after restore_failed_chunk"
+        );
+        assert!(
+            settled_ids.contains(&m2.maker_order_id),
+            "trade 2 must be back in the batcher's queue after restore_failed_chunk"
+        );
+    }
 }
