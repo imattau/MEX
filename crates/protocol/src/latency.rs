@@ -97,6 +97,33 @@ impl PeerLatencyStats {
             None => false,
         }
     }
+
+    // Stage O3's reason for existing: is_anomalous is deliberately
+    // ONE-SIDED (only "too slow") -- entirely correct for its purpose
+    // (misconduct/withholding detection, where nobody cares if a relay
+    // was suspiciously PROMPT). But ordering::OriginTimeEstimator's
+    // estimates are computed as `local_arrival_time - this baseline`
+    // (see PeerLatencyStats' docs on mean_one_way_ms), which means a
+    // peer that INFLATES its own measured baseline -- simply by delaying
+    // its own Pong replies, since RTT here is derived entirely from our
+    // own clock and a peer can never make it appear SMALLER than
+    // physically possible -- can make every order estimate computed via
+    // it look artificially EARLY, even while forwarding and witnessing
+    // everything else honestly. That's a real backdating/priority-
+    // grinding vector, and is_anomalous alone would never catch it
+    // (a genuinely fast, honestly-witnessed transit against an
+    // artificially inflated baseline looks like the OPPOSITE of "too
+    // slow"). This is the other half of the same tolerance band
+    // is_anomalous checks, used only to flag a witness as untrustworthy
+    // for ORDERING (see MeshNode::handle_hop_latency_result), never for
+    // misconduct reporting -- being suspiciously fast isn't provable
+    // misconduct the way being slow is.
+    pub fn is_implausibly_fast(&self, peer: NodeId, observed_one_way_ms: f64) -> bool {
+        let Some((mean, stddev)) = self.mean_stddev(peer) else { return false; };
+        let one_way_mean = mean / 2.0;
+        let tolerance = (stddev * ANOMALY_STDDEV_MULTIPLIER).max(MIN_TOLERANCE_MS);
+        observed_one_way_ms < one_way_mean - tolerance
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +158,41 @@ mod tests {
         for &s in &samples {
             assert!(!stats.is_anomalous(NodeId(1), s / 2.0), "sample {s} (one-way {}) should not be anomalous against a baseline built partly from itself", s / 2.0);
         }
+    }
+
+    #[test]
+    fn test_no_samples_never_flags_implausibly_fast() {
+        let stats = PeerLatencyStats::new();
+        assert!(!stats.is_implausibly_fast(NodeId(1), 0.0));
+    }
+
+    #[test]
+    fn test_implausibly_fast_flags_suspiciously_quick_transit() {
+        let mut stats = PeerLatencyStats::new();
+        // Baseline: consistent ~500ms RTT -> ~250ms one-way mean. A
+        // large baseline (as an inflated/manipulated one would be, the
+        // actual attack this check targets) so MIN_TOLERANCE_MS's floor
+        // doesn't swallow the entire plausible range down to zero.
+        for _ in 0..20 {
+            stats.record_rtt(NodeId(1), 500.0);
+        }
+        assert!(!stats.is_implausibly_fast(NodeId(1), 250.0), "a transit matching the baseline exactly must not be flagged");
+        assert!(!stats.is_implausibly_fast(NodeId(1), 230.0), "modest, plausible jitter below the mean must not be flagged");
+        assert!(stats.is_implausibly_fast(NodeId(1), 0.5), "a transit far faster than the established baseline must be flagged as implausible");
+    }
+
+    #[test]
+    fn test_implausibly_fast_and_anomalous_are_mutually_exclusive() {
+        let mut stats = PeerLatencyStats::new();
+        for _ in 0..20 {
+            stats.record_rtt(NodeId(1), 500.0);
+        }
+        // Too slow: anomalous, but not implausibly fast.
+        assert!(stats.is_anomalous(NodeId(1), 5000.0));
+        assert!(!stats.is_implausibly_fast(NodeId(1), 5000.0));
+        // Too fast: implausibly fast, but not anomalous (is_anomalous
+        // is deliberately one-sided -- see its own docs).
+        assert!(stats.is_implausibly_fast(NodeId(1), 0.5));
+        assert!(!stats.is_anomalous(NodeId(1), 0.5));
     }
 }

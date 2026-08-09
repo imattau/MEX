@@ -32,11 +32,35 @@
 // never touching a remote clock), clock skew between nodes' own local
 // clocks is a real, unaddressed assumption here.
 //
-// This stage deliberately does NOT yet factor in HopLatencyMonitor's
-// anomaly verdicts (a withholding relay's delayed arrival would just
-// produce a later, uncorrected estimate, same as ordinary jitter) --
-// resisting deliberate manipulation by preferring corroborated,
-// non-anomalous witnesses is a later stage's job, not this one's.
+// Stage O3: a withholding relay delaying its forward would, on its own,
+// just produce a later, uncorrected estimate for whichever order it sat
+// on -- indistinguishable at this layer from ordinary jitter, UNLESS
+// something else is available to prefer over it. That something is
+// HopLatencyMonitor's existing anomaly verdicts (Stage 1-3): every
+// recorded estimate here can be retroactively flagged anomalous (see
+// mark_anomalous) once the matching HopWitness confirms this specific
+// hop's observed transit time blew past its own established baseline.
+// earliest_witness/earliest_estimate_ms/compare_orders then prefer
+// non-anomalous witnesses whenever at least one is available for that
+// order, falling back to whatever's recorded (even if flagged) only when
+// NOTHING non-anomalous has been seen yet -- a single, uncorroborated
+// observation is still real evidence (same reasoning Stage 1 already
+// established for misconduct detection), just the last resort here.
+//
+// This is exactly the payoff of the whole earlier misconduct-detection
+// arc for ORDERING, not just policing: a node with genuine topological
+// redundancy (an honest second path for the same order, Stage 2's
+// diamond-topology case) will have that honest path's estimate win over
+// a manipulated one automatically, with no separate reconciliation step.
+//
+// Real, acknowledged limit: classification is asynchronous and NOT
+// guaranteed complete by the time a query runs. `anomalous` defaults to
+// false at record time (assumed honest until proven otherwise) -- a
+// witness whose matching HopWitness simply hasn't arrived yet, or whose
+// verdict hasn't been computed yet, looks identical to a genuinely
+// honest one at query time. This mechanism reflects the best evidence
+// available AT THE MOMENT OF QUERY, not a promise that manipulation
+// in-flight has already been caught.
 //
 // Stage O2: compare_orders below turns two orders' estimates into an
 // actual ranking. Two estimates within AMBIGUITY_WINDOW_MS of each other
@@ -99,12 +123,15 @@ fn tie_break_key(order_id: &[u8; 32], witnessing_hop: NodeId) -> [u8; 32] {
 }
 
 pub struct OriginTimeEstimator {
-    // order_id -> every (witnessing_hop, estimated_origin_time_ms) this
-    // node has independently derived for it so far -- kept as a Vec, not
-    // just the running minimum, since a later stage (robustness against
-    // a withholding relay) needs to distinguish estimates by which hop
-    // produced them, not just their value.
-    estimates: lru::LruCache<[u8; 32], Vec<(NodeId, f64)>>,
+    // order_id -> every (witnessing_hop, estimated_origin_time_ms,
+    // anomalous) this node has independently derived for it so far --
+    // kept as a Vec, not just the running minimum, since Stage O2's
+    // tie-break needs to distinguish estimates by which hop produced
+    // them, and Stage O3's anomaly-preference needs all of them, not
+    // just the best one. `anomalous` starts false at record() time
+    // (nothing known yet) and can be flipped later by mark_anomalous --
+    // see this module's docs on why classification is asynchronous.
+    estimates: lru::LruCache<[u8; 32], Vec<(NodeId, f64, bool)>>,
 }
 
 impl Default for OriginTimeEstimator {
@@ -120,31 +147,48 @@ impl OriginTimeEstimator {
 
     pub fn record(&mut self, order_id: [u8; 32], witnessing_hop: NodeId, estimate_ms: f64) {
         if let Some(v) = self.estimates.get_mut(&order_id) {
-            v.push((witnessing_hop, estimate_ms));
+            v.push((witnessing_hop, estimate_ms, false));
         } else {
-            self.estimates.put(order_id, vec![(witnessing_hop, estimate_ms)]);
+            self.estimates.put(order_id, vec![(witnessing_hop, estimate_ms, false)]);
         }
     }
 
-    // The earliest (minimum) estimate recorded for this order -- any
-    // additional hop or delay can only push an estimate LATER than the
-    // truth (see this module's docs on under-correction), never earlier,
-    // so the minimum across however many independent witnesses this node
-    // has seen is the best available estimate, not an arbitrary pick.
+    // Stage O3: retroactively flags the estimate recorded for
+    // (order_id, witnessing_hop) as anomalous, once HopLatencyMonitor's
+    // matching verdict says this specific hop's observed transit time
+    // blew past its own established baseline. A no-op if no such
+    // estimate was recorded (e.g. this node had no latency baseline yet
+    // for that hop at arrival time, so record() never ran for it).
+    pub fn mark_anomalous(&mut self, order_id: [u8; 32], witnessing_hop: NodeId) {
+        if let Some(v) = self.estimates.get_mut(&order_id) {
+            for entry in v.iter_mut() {
+                if entry.0 == witnessing_hop {
+                    entry.2 = true;
+                }
+            }
+        }
+    }
+
+    // The earliest (minimum) estimate recorded for this order, preferring
+    // non-anomalous witnesses whenever at least one exists for this
+    // order (see this module's docs on why) -- any additional hop or
+    // delay can only push an honest estimate LATER than the truth, never
+    // earlier, so the minimum among the preferred pool is the best
+    // available estimate, not an arbitrary pick.
     pub fn earliest_estimate_ms(&mut self, order_id: &[u8; 32]) -> Option<f64> {
-        self.estimates
-            .get(order_id)
-            .and_then(|v| v.iter().map(|(_, t)| *t).fold(None, |acc, t| Some(acc.map_or(t, |a: f64| a.min(t)))))
+        self.earliest_witness(order_id).map(|(_, t)| t)
     }
 
     // Same as earliest_estimate_ms, but also returns WHICH hop produced
     // it -- compare_orders needs the hop identity for its tie-break
     // input, not just the timestamp.
     fn earliest_witness(&mut self, order_id: &[u8; 32]) -> Option<(NodeId, f64)> {
-        self.estimates
-            .get(order_id)?
+        let entries = self.estimates.get(order_id)?;
+        let has_honest = entries.iter().any(|(_, _, anomalous)| !anomalous);
+        entries
             .iter()
-            .copied()
+            .filter(|(_, _, anomalous)| !has_honest || !anomalous)
+            .map(|(hop, t, _)| (*hop, *t))
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
     }
 
@@ -255,5 +299,61 @@ mod tests {
             }
             other => panic!("expected both directions to be tie-broken, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_anomalous_witness_ignored_when_honest_alternative_exists() {
+        let mut est = OriginTimeEstimator::new();
+        // A manipulated relay's estimate: numerically EARLIER than the
+        // honest one (it made the order look like it arrived sooner than
+        // it really did, e.g. by backdating) -- if anomaly-preference
+        // weren't applied, the smaller (manipulated) value would win
+        // purely on being numerically smaller.
+        est.record([1u8; 32], NodeId(1), 500.0);
+        est.record([1u8; 32], NodeId(2), 900.0);
+        est.mark_anomalous([1u8; 32], NodeId(1));
+
+        assert_eq!(est.earliest_estimate_ms(&[1u8; 32]), Some(900.0), "the anomalous (and numerically smaller) witness must be ignored in favor of the honest one");
+    }
+
+    #[test]
+    fn test_anomalous_witness_used_as_fallback_when_no_honest_alternative() {
+        let mut est = OriginTimeEstimator::new();
+        est.record([1u8; 32], NodeId(1), 500.0);
+        est.mark_anomalous([1u8; 32], NodeId(1));
+
+        // No corroborating honest path exists -- a single, even flagged,
+        // observation is still the best (only) evidence available, same
+        // reasoning HopLatencyMonitor's has_corroborating_non_anomalous_hop
+        // already uses for misconduct detection.
+        assert_eq!(est.earliest_estimate_ms(&[1u8; 32]), Some(500.0), "with no honest alternative, the flagged witness should still be used as a fallback");
+    }
+
+    #[test]
+    fn test_mark_anomalous_is_a_noop_for_unknown_order_or_hop() {
+        let mut est = OriginTimeEstimator::new();
+        est.record([1u8; 32], NodeId(1), 500.0);
+        est.mark_anomalous([1u8; 32], NodeId(99)); // different hop, never recorded
+        est.mark_anomalous([2u8; 32], NodeId(1)); // different order, never recorded
+        assert_eq!(est.earliest_estimate_ms(&[1u8; 32]), Some(500.0), "marking an unrelated (order, hop) pair must not affect an unrelated recorded estimate");
+    }
+
+    #[test]
+    fn test_compare_orders_prefers_honest_witness_over_manipulated_one() {
+        let mut est = OriginTimeEstimator::new();
+        // Order A: a withholding relay tries to make A look like it
+        // arrived AFTER order B by backdating a large delay onto its own
+        // witness -- but an honest second path for A also exists and
+        // wasn't manipulated.
+        est.record([1u8; 32], NodeId(1), 2000.0); // manipulated, late
+        est.record([1u8; 32], NodeId(2), 500.0);  // honest, early
+        est.mark_anomalous([1u8; 32], NodeId(1));
+
+        est.record([2u8; 32], NodeId(3), 900.0);
+
+        // With the manipulated witness discarded, A's honest estimate
+        // (500.0) is clearly before B's (900.0) -- correct despite the
+        // manipulation attempt.
+        assert_eq!(est.compare_orders(&[1u8; 32], &[2u8; 32]), Some(OrderingDecision::ByTimestamp(CmpOrdering::Less)));
     }
 }

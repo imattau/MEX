@@ -733,9 +733,27 @@ impl MeshNode {
     async fn handle_hop_latency_result(&mut self, order_id: [u8; 32], hop_node: NodeId, observed_ms: f64) {
         let anomalous = self.latency_stats.is_anomalous(hop_node, observed_ms);
         self.hop_latency.record_verdict(order_id, hop_node, observed_ms, anomalous);
+
+        // Stage O3: checked independently of `anomalous` -- is_anomalous
+        // is deliberately one-sided (too slow only, see its own docs),
+        // but a witness that's suspiciously FAST relative to this hop's
+        // baseline (e.g. from a relay that inflated its own measured
+        // latency via delayed Pong replies, making its witnessed
+        // estimates look artificially early) is exactly the case
+        // OriginTimeEstimator needs to distrust for ordering purposes,
+        // even though it's never misconduct-reportable the way
+        // withholding is.
+        if self.latency_stats.is_implausibly_fast(hop_node, observed_ms) {
+            self.origin_time.mark_anomalous(order_id, hop_node);
+        }
+
         if !anomalous {
             return;
         }
+        // Retroactively tells OriginTimeEstimator this specific hop's
+        // estimate for this order shouldn't be trusted over an honest
+        // alternative either -- see its docs.
+        self.origin_time.mark_anomalous(order_id, hop_node);
         let bound = self.latency_stats.expected_one_way_bound_ms(hop_node).unwrap_or(0.0);
         let corroborated = self.hop_latency.has_corroborating_non_anomalous_hop(&order_id, hop_node);
         tracing::warn!(?hop_node, observed_ms, bound_ms = bound, corroborated, "hop transit time exceeds established latency baseline");
