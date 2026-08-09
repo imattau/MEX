@@ -74,3 +74,21 @@ jobs:
 
       - name: hardhat compile
         run: npx hardhat compile
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Written without a local Docker daemon available to test it
+      # against -- this job IS the verification. If it goes red, the
+      # Dockerfile is wrong, not this comment.
+      - name: docker build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: mex-api:ci

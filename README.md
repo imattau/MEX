@@ -98,9 +98,25 @@ startup rather than falling back to a known default); a debug build
 (`cargo run` without `--release`) uses a dev default with a loud warning
 if unset, so local development needs no setup.
 
+Or via Docker:
+
+```sh
+docker build -t mex-api .
+docker run -p 8080:8080 \
+  -e MEX_API_KEY=... -e MEX_RPC_URL=... -e MEX_NODE_PRIVATE_KEY=... \
+  -e MEX_FACTORY_ADDRESS=... -e MEX_REGISTRY_ADDRESS=... \
+  -e MEX_SETTLEMENT_NODE_PUBKEY=... \
+  mex-api
+```
+
+The image ships the same dev-only `trusted_setup.bin` this repo already
+has checked in (see "Known limitations" below) at `/app/trusted_setup.bin`
+via `MEX_TRUSTED_SETUP_PATH` -- override that env var to point at a real
+ceremony's output once one exists.
+
 CI (`.github/workflows/ci.yml`) runs `cargo build/test/clippy/fmt` across
-the workspace and a Hardhat contract-compile check on every push/PR to
-`master`.
+the workspace, a Hardhat contract-compile check, and a `docker build` of
+the image above, on every push/PR to `master`.
 
 ## Known limitations
 
@@ -114,9 +130,10 @@ the workspace and a Hardhat contract-compile check on every push/PR to
 - **Only Ethereum is wired into a runnable binary.** `chain-solana` and
   `chain-cosmwasm` exist as adapters but nothing in `crates/api` or
   elsewhere constructs and runs against them yet.
-- **No deployment automation.** No Dockerfile or orchestration manifests
-  exist; running this in production today means building and deploying
-  the `api` binary (and the contracts) by hand.
+- **No orchestration manifests.** A `Dockerfile` exists and is built in
+  CI, but there's no k8s/compose/etc. deployment manifest yet -- running
+  this in production today means building the image (or the `api`
+  binary directly) and deploying/configuring it by hand.
 - **clippy is not run with `-D warnings`** in CI -- the codebase has
   pre-existing lint warnings not yet triaged. Tightening this is a
   deliberate future step once they're addressed, not an oversight.

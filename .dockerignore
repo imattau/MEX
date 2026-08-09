@@ -1,0 +1,11 @@
+target/
+node_modules/
+artifacts/
+cache/
+.git/
+agents/
+agent_memory/
+*.md
+contracts/
+scripts/
+.github/
