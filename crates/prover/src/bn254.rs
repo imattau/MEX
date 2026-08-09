@@ -1,16 +1,16 @@
 use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{BigInteger, PrimeField};
-use ark_groth16::{Groth16, ProvingKey, VerifyingKey, Proof, prepare_verifying_key};
-use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use ark_groth16::{prepare_verifying_key, Groth16, Proof, ProvingKey, VerifyingKey};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::{DEXBatchCircuit, TradeBatch, MAX_BATCH_TRADES};
 use crate::backend::ProverBackend;
+use crate::{DEXBatchCircuit, TradeBatch, MAX_BATCH_TRADES};
 
 fn bytes_to_fe(data: &[u8; 32]) -> Fr {
     Fr::from_be_bytes_mod_order(data)
@@ -72,7 +72,10 @@ fn g2_to_tuple(point: &G2Affine) -> serde_json::Value {
 // each trade here can involve completely unrelated counterparties; only
 // the root ties them together, by accumulating each trade's value.
 fn padded_witness(trades: &[(u64, u64, u64, u64)], pre_root: Fr) -> DEXBatchCircuit<Fr> {
-    assert!(trades.len() <= MAX_BATCH_TRADES, "padded_witness caller must enforce the batch-size limit itself");
+    assert!(
+        trades.len() <= MAX_BATCH_TRADES,
+        "padded_witness caller must enforce the batch-size limit itself"
+    );
 
     let mut maker_pre = Vec::with_capacity(MAX_BATCH_TRADES);
     let mut taker_pre = Vec::with_capacity(MAX_BATCH_TRADES);
@@ -85,7 +88,8 @@ fn padded_witness(trades: &[(u64, u64, u64, u64)], pre_root: Fr) -> DEXBatchCirc
     let mut root = pre_root;
 
     for i in 0..MAX_BATCH_TRADES {
-        let (maker_bal_u64, taker_bal_u64, amt_u64, prc_u64) = trades.get(i).copied().unwrap_or((0, 0, 0, 0));
+        let (maker_bal_u64, taker_bal_u64, amt_u64, prc_u64) =
+            trades.get(i).copied().unwrap_or((0, 0, 0, 0));
         let maker_bal = Fr::from(maker_bal_u64);
         let taker_bal = Fr::from(taker_bal_u64);
         let amt = Fr::from(amt_u64);
@@ -221,7 +225,9 @@ impl ProverBackend for Bn254Groth16Backend {
                 batch.trades.len()
             ));
         }
-        if batch.trades.len() != batch.maker_balances.len() || batch.trades.len() != batch.taker_balances.len() {
+        if batch.trades.len() != batch.maker_balances.len()
+            || batch.trades.len() != batch.taker_balances.len()
+        {
             return Err(format!(
                 "trades ({}), maker_balances ({}), and taker_balances ({}) must all be the same length",
                 batch.trades.len(), batch.maker_balances.len(), batch.taker_balances.len()
@@ -249,7 +255,9 @@ impl ProverBackend for Bn254Groth16Backend {
             .collect();
         let pre_root = bytes_to_fe(&batch.pre_state_root);
         let circuit = padded_witness(&trade_data, pre_root);
-        let post_root = circuit.post_state_root.expect("padded_witness always sets post_state_root");
+        let post_root = circuit
+            .post_state_root
+            .expect("padded_witness always sets post_state_root");
 
         let pk = proving_key();
         let mut rng = OsRng;
@@ -293,7 +301,9 @@ impl ProverBackend for Bn254Groth16Backend {
         if batch.trades.is_empty() || batch.trades.len() > MAX_BATCH_TRADES {
             return false;
         }
-        if batch.trades.len() != batch.maker_balances.len() || batch.trades.len() != batch.taker_balances.len() {
+        if batch.trades.len() != batch.maker_balances.len()
+            || batch.trades.len() != batch.taker_balances.len()
+        {
             return false;
         }
 
@@ -327,10 +337,7 @@ impl ProverBackend for Bn254Groth16Backend {
             return false;
         }
 
-        let expected_inputs = vec![
-            expected_pre_root,
-            expected_post_root,
-        ];
+        let expected_inputs = vec![expected_pre_root, expected_post_root];
 
         if data.public_inputs.len() != expected_inputs.len() {
             return false;
@@ -351,8 +358,7 @@ impl ProverBackend for Bn254Groth16Backend {
 
         let vk = prepared_vk();
         let pvk = prepare_verifying_key(vk);
-        Groth16::<Bn254>::verify_proof(&pvk, &proof, &deserialized_inputs)
-            .unwrap_or(false)
+        Groth16::<Bn254>::verify_proof(&pvk, &proof, &deserialized_inputs).unwrap_or(false)
     }
 
     fn export_verifying_key(&self) -> serde_json::Value {
@@ -427,7 +433,12 @@ pub fn decode_proof_calldata(proof_bytes: &[u8]) -> Result<ProofCalldata, String
         public_inputs.push(field_to_be_bytes(&fr));
     }
 
-    Ok(ProofCalldata { a, b, c, public_inputs })
+    Ok(ProofCalldata {
+        a,
+        b,
+        c,
+        public_inputs,
+    })
 }
 
 // The verifying key in the same raw big-endian uint256 shape as
@@ -454,7 +465,13 @@ pub fn export_verifying_key_calldata() -> Result<VerifyingKeyCalldata, String> {
         .map(g1_to_be_bytes)
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(VerifyingKeyCalldata { alpha, beta, gamma, delta, ic })
+    Ok(VerifyingKeyCalldata {
+        alpha,
+        beta,
+        gamma,
+        delta,
+        ic,
+    })
 }
 
 #[cfg(test)]
@@ -533,7 +550,10 @@ mod tests {
 
         let backend = Bn254Groth16Backend;
         let proof = backend.prove_batch(&batch).unwrap();
-        assert!(backend.verify_proof(&proof, &batch), "a real multi-trade batch's proof must verify");
+        assert!(
+            backend.verify_proof(&proof, &batch),
+            "a real multi-trade batch's proof must verify"
+        );
 
         // Same proof, but checked against a batch missing one trade (a
         // different, smaller total_value/post_state_root) -- must fail,
@@ -619,7 +639,10 @@ mod persistence_tests {
         assert!(!path.exists());
 
         let first = load_or_generate_pk(&path);
-        assert!(path.exists(), "first call must persist the generated key to disk");
+        assert!(
+            path.exists(),
+            "first call must persist the generated key to disk"
+        );
 
         let second = load_or_generate_pk(&path);
         assert_eq!(

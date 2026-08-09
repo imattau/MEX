@@ -3,7 +3,7 @@ pub mod bn254;
 
 use ark_ff::PrimeField;
 use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable, LinearCombination,
+    ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
 };
 use engine::Match;
 use serde::{Deserialize, Serialize};
@@ -85,27 +85,55 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DEXBatchCircuit<F> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
         let pre_root_var =
             cs.new_input_variable(|| self.pre_state_root.ok_or(SynthesisError::AssignmentMissing))?;
-        let post_root_var =
-            cs.new_input_variable(|| self.post_state_root.ok_or(SynthesisError::AssignmentMissing))?;
+        let post_root_var = cs.new_input_variable(|| {
+            self.post_state_root
+                .ok_or(SynthesisError::AssignmentMissing)
+        })?;
 
         let mut running_root = pre_root_var;
 
         for i in 0..MAX_BATCH_TRADES {
             let maker_pre = cs.new_witness_variable(|| {
-                self.maker_balance_pre.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.maker_balance_pre
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let taker_pre = cs.new_witness_variable(|| {
-                self.taker_balance_pre.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.taker_balance_pre
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let amt = cs.new_witness_variable(|| {
-                self.amount.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.amount
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let prc = cs.new_witness_variable(|| {
-                self.price.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.price
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let val = cs.new_witness_variable(|| {
-                let a = self.amount.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)?;
-                let p = self.price.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)?;
+                let a = self
+                    .amount
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                let p = self
+                    .price
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
                 Ok(a * p)
             })?;
 
@@ -116,7 +144,11 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DEXBatchCircuit<F> {
             )?;
 
             let maker_post = cs.new_witness_variable(|| {
-                self.maker_balance_post.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.maker_balance_post
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let mut lc_maker = LinearCombination::zero();
             lc_maker = lc_maker + (F::one(), maker_pre) + (F::one(), val);
@@ -127,7 +159,11 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DEXBatchCircuit<F> {
             )?;
 
             let taker_post = cs.new_witness_variable(|| {
-                self.taker_balance_post.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                self.taker_balance_post
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .ok_or(SynthesisError::AssignmentMissing)
             })?;
             let mut lc_taker = LinearCombination::zero();
             lc_taker = lc_taker + (F::one(), taker_pre) - (F::one(), val);
@@ -141,7 +177,11 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for DEXBatchCircuit<F> {
                 post_root_var
             } else {
                 cs.new_witness_variable(|| {
-                    self.intermediate_roots.get(i).copied().flatten().ok_or(SynthesisError::AssignmentMissing)
+                    self.intermediate_roots
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .ok_or(SynthesisError::AssignmentMissing)
                 })?
             };
             // Accumulates val (the traded amount * price), not maker_post +
@@ -172,11 +212,7 @@ impl BatchSigner {
         sk.sign(&msg).to_vec()
     }
 
-    pub fn verify_node_sig(
-        batch: &TradeBatch,
-        node_pubkey: &[u8; 32],
-        signature: &[u8],
-    ) -> bool {
+    pub fn verify_node_sig(batch: &TradeBatch, node_pubkey: &[u8; 32], signature: &[u8]) -> bool {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let vk = match VerifyingKey::from_bytes(node_pubkey) {
             Ok(k) => k,
@@ -231,7 +267,10 @@ pub struct MultiWatchtower {
 
 impl MultiWatchtower {
     pub fn new(threshold: usize, keys: Vec<[u8; 32]>) -> Self {
-        Self { threshold, watchtower_keys: keys }
+        Self {
+            threshold,
+            watchtower_keys: keys,
+        }
     }
 
     pub fn approve_batch(
@@ -290,7 +329,11 @@ pub mod tests {
     // val (2*3=6) added to pre_state_root (0), i.e. 6, regardless of how
     // many padding slots follow it.
     fn batch_circuit_one_real_trade(tamper_maker_post: bool) -> DEXBatchCircuit<Fq> {
-        let real_maker_post = if tamper_maker_post { Fq::from(99u64) } else { Fq::from(11u64) };
+        let real_maker_post = if tamper_maker_post {
+            Fq::from(99u64)
+        } else {
+            Fq::from(11u64)
+        };
 
         let mut maker_pre = vec![Some(Fq::from(5u64))];
         let mut taker_pre = vec![Some(Fq::from(10u64))];
@@ -333,6 +376,53 @@ pub mod tests {
         let cs_ref = ConstraintSystemRef::new(cs);
         assert!(circuit.generate_constraints(cs_ref.clone()).is_ok());
         assert!(cs_ref.is_satisfied().unwrap_or(false));
+    }
+
+    // Stage P6-1b-2: structural equivalence with circuit/circom/
+    // dex_batch.circom -- the arkworks circuit's own constraint/
+    // variable counts must match what `circom --r1cs` reports for the
+    // ported circuit. This alone isn't sufficient proof of equivalence
+    // (two DIFFERENT constraint systems could coincidentally have the
+    // same counts), but a mismatch would be conclusive proof of
+    // INEQUIVALENCE, so it's a cheap, meaningful first check -- see
+    // circuit/circom/EQUIVALENCE.md for the full reasoning and the
+    // witness-level cross-check that complements it.
+    //
+    // Expected counts, and why:
+    //   num_constraints = 32        (circom: 8 non-linear + 24 linear)
+    //   num_instance_variables = 3  (circom: 2 public inputs, +1 for
+    //                                 the implicit constant-one wire
+    //                                 every R1CS system has)
+    //   num_witness_variables = 63  (circom: 55 declared private
+    //                                 inputs -- 6 arrays of 8 slots
+    //                                 (makerPre/takerPre/amount/price/
+    //                                 makerPost/takerPost) + 7
+    //                                 intermediateRoots -- plus 8
+    //                                 internal `val` signals circom
+    //                                 doesn't count as "inputs" but
+    //                                 arkworks' flat witness-variable
+    //                                 model does: 55 + 8 = 63)
+    #[test]
+    fn test_constraint_counts_match_the_circom_port() {
+        let circuit = batch_circuit_one_real_trade(false);
+        let cs = ark_relations::r1cs::ConstraintSystem::new();
+        let cs_ref = ConstraintSystemRef::new(cs);
+        circuit.generate_constraints(cs_ref.clone()).unwrap();
+        assert_eq!(
+            cs_ref.num_constraints(),
+            32,
+            "must match circom's reported 8 non-linear + 24 linear = 32 constraints"
+        );
+        assert_eq!(
+            cs_ref.num_instance_variables(),
+            3,
+            "must match circom's 2 public inputs (+1 for the implicit constant-one wire)"
+        );
+        assert_eq!(
+            cs_ref.num_witness_variables(),
+            63,
+            "must match circom's 55 declared private inputs + 8 internal `val` signals"
+        );
     }
 
     #[test]

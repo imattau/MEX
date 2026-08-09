@@ -43,11 +43,12 @@ fn main() {
         "ic": vk.ic.iter().map(g1).collect::<Vec<_>>(),
     });
 
-    std::fs::write(&output_path, serde_json::to_string_pretty(&json).unwrap())
-        .unwrap_or_else(|e| {
+    std::fs::write(&output_path, serde_json::to_string_pretty(&json).unwrap()).unwrap_or_else(
+        |e| {
             eprintln!("failed to write {output_path}: {e}");
             std::process::exit(1);
-        });
+        },
+    );
 
     println!("wrote real verifying key to {output_path}");
 }

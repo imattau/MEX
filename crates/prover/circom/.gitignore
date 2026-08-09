@@ -1,0 +1,7 @@
+dex_batch.r1cs
+dex_batch.sym
+dex_batch_js/
+witness_valid.wtns
+witness_tampered.wtns
+*.zkey
+*.ptau

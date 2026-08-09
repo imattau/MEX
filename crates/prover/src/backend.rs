@@ -7,8 +7,8 @@ pub trait ProverBackend: Send + Sync {
     fn export_verifying_key(&self) -> serde_json::Value;
 }
 
-use ark_ff::PrimeField;
 use crate::DEXBatchCircuit;
+use ark_ff::PrimeField;
 
 pub trait CircuitVerifier {
     fn verify_constraints<F: PrimeField>(circuit: DEXBatchCircuit<F>) -> bool;

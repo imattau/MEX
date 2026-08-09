@@ -64,7 +64,11 @@ fn build_batch() -> TradeBatch {
         assigned_node: [0u8; 32],
         settlement_deadline: 0,
     };
-    let trades: Vec<Match> = trade_terms.iter().enumerate().map(|(i, &(_, _, p, a))| make_match(p, a, i)).collect();
+    let trades: Vec<Match> = trade_terms
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, _, p, a))| make_match(p, a, i))
+        .collect();
     let maker_balances: Vec<u64> = trade_terms.iter().map(|&(mb, _, _, _)| mb).collect();
     let taker_balances: Vec<u64> = trade_terms.iter().map(|&(_, tb, _, _)| tb).collect();
     let total_value: u64 = trades.iter().map(|t| t.price * t.amount).sum();
@@ -81,9 +85,15 @@ fn build_batch() -> TradeBatch {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let rpc_url = args.get(1).expect("usage: verify_onchain_smoke <rpc_url> <private_key> <batch_verifier_address>");
+    let rpc_url = args
+        .get(1)
+        .expect("usage: verify_onchain_smoke <rpc_url> <private_key> <batch_verifier_address>");
     let private_key = args.get(2).expect("missing private_key");
-    let verifier_address: Address = args.get(3).expect("missing batch_verifier_address").parse().expect("invalid address");
+    let verifier_address: Address = args
+        .get(3)
+        .expect("missing batch_verifier_address")
+        .parse()
+        .expect("invalid address");
 
     let signer: PrivateKeySigner = private_key
         .trim_start_matches("0x")
@@ -104,13 +114,29 @@ async fn main() {
     println!("generated a real Groth16 proof and verified it off-chain: OK");
 
     let calldata = decode_proof_calldata(&proof_bytes).expect("decode_proof_calldata failed");
-    let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
-    let b = [
-        [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
-        [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+    let a = [
+        U256::from_be_bytes(calldata.a[0]),
+        U256::from_be_bytes(calldata.a[1]),
     ];
-    let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
-    let input: Vec<U256> = calldata.public_inputs.iter().map(|bytes| U256::from_be_bytes(*bytes)).collect();
+    let b = [
+        [
+            U256::from_be_bytes(calldata.b[0][0]),
+            U256::from_be_bytes(calldata.b[0][1]),
+        ],
+        [
+            U256::from_be_bytes(calldata.b[1][0]),
+            U256::from_be_bytes(calldata.b[1][1]),
+        ],
+    ];
+    let c = [
+        U256::from_be_bytes(calldata.c[0]),
+        U256::from_be_bytes(calldata.c[1]),
+    ];
+    let input: Vec<U256> = calldata
+        .public_inputs
+        .iter()
+        .map(|bytes| U256::from_be_bytes(*bytes))
+        .collect();
 
     // 1. The real proof against the real deployed verifying key -- must succeed.
     let receipt = verifier
@@ -121,12 +147,23 @@ async fn main() {
         .get_receipt()
         .await
         .expect("verifyProof receipt failed");
-    println!("REAL PROOF submitted on-chain, tx {:#x}, status: {:?}", receipt.transaction_hash, receipt.status());
-    assert!(receipt.status(), "real proof's on-chain transaction should have succeeded");
+    println!(
+        "REAL PROOF submitted on-chain, tx {:#x}, status: {:?}",
+        receipt.transaction_hash,
+        receipt.status()
+    );
+    assert!(
+        receipt.status(),
+        "real proof's on-chain transaction should have succeeded"
+    );
 
     // Read back the ProofVerified event to confirm the pairing check itself
     // returned true, not just that the call didn't revert.
-    let call_result = verifier.verifyProof(a, b, c, input.clone()).call().await.expect("verifyProof call (real proof) failed");
+    let call_result = verifier
+        .verifyProof(a, b, c, input.clone())
+        .call()
+        .await
+        .expect("verifyProof call (real proof) failed");
     println!("real proof pairing check result (should be true): {call_result}");
     assert!(call_result, "real proof must verify as true");
 
@@ -147,7 +184,10 @@ async fn main() {
         .await
         .expect("verifyProof call (tampered public input) failed");
     println!("tampered public input pairing check result (should be false): {tampered_result}");
-    assert!(!tampered_result, "a proof checked against the wrong public input must NOT verify as true");
+    assert!(
+        !tampered_result,
+        "a proof checked against the wrong public input must NOT verify as true"
+    );
 
     println!("\nZK PIPELINE SMOKE TEST PASSED: real trusted setup -> real proof -> real on-chain BatchVerifier -> correct accept/reject");
 }
