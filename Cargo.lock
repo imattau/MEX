@@ -6019,6 +6019,7 @@ name = "trader-client"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "api",
  "chain",
  "chain-ethereum",
  "common",

@@ -56,12 +56,26 @@
 //                            eu-west-1 / ap-southeast-1. Defaults to
 //                            us-east-1.
 //   MEX_MESH_PEERS           Optional if mesh enabled. Comma-separated
-//                            id@host:port entries, e.g.
-//                            "1@127.0.0.1:9002,2@127.0.0.1:9003". Peer
-//                            authentication (real pubkeys, not the zero
-//                            placeholder used here) is not yet wired up --
-//                            see this stage's scoping notes; this is
-//                            replication only, not yet trust-minimized.
+//                            entries, each either id@host:port (pubkey
+//                            defaults to the zero placeholder --
+//                            unauthenticated, matches SignedHeartbeat
+//                            verification off and Stage 4b/4c chain
+//                            gating never resolving this peer) or
+//                            id@host:port@pubkeyhex (this peer's real
+//                            32-byte ed25519 pubkey, hex-encoded -- the
+//                            SAME identity NodeRegistry tracks on-chain,
+//                            see protocol::MeshNode::peer_pubkey's docs).
+//                            e.g. "1@127.0.0.1:9002@aa..,2@127.0.0.1:9003".
+//   MEX_MESH_REQUIRE_STAKE   Optional bool ("1"/"true"), defaults false.
+//                            When set, a misconduct reporter's vote only
+//                            counts toward this node's MisconductQuorum
+//                            if it resolves (via the pubkey above) to an
+//                            active entry in a periodically-polled
+//                            NodeRegistry snapshot -- see
+//                            api::mesh_chain_status. Off reproduces the
+//                            old any-NodeId-counts behavior exactly.
+//   MEX_MESH_CHAIN_STATUS_POLL_SECS  Optional, only used if
+//                            MEX_MESH_REQUIRE_STAKE is set. Defaults 30.
 
 use api::server::{AppState, MeshHandle};
 use api::settlement::SettlementConfig;
@@ -180,8 +194,13 @@ async fn main() {
                     .split(',')
                     .filter(|s| !s.is_empty())
                     .map(|entry| {
-                        let (id_part, addr_part) = entry.split_once('@').unwrap_or_else(|| {
-                            eprintln!("MEX_MESH_PEERS entry '{entry}' must be of the form id@host:port");
+                        let mut parts = entry.splitn(3, '@');
+                        let id_part = parts.next().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                            eprintln!("MEX_MESH_PEERS entry '{entry}' must be of the form id@host:port[@pubkeyhex]");
+                            std::process::exit(1);
+                        });
+                        let addr_part = parts.next().unwrap_or_else(|| {
+                            eprintln!("MEX_MESH_PEERS entry '{entry}' must be of the form id@host:port[@pubkeyhex]");
                             std::process::exit(1);
                         });
                         let peer_id: u32 = id_part.parse().unwrap_or_else(|e| {
@@ -192,12 +211,34 @@ async fn main() {
                             eprintln!("MEX_MESH_PEERS entry '{entry}' has an invalid address: {e}");
                             std::process::exit(1);
                         });
-                        // Placeholder pubkey -- peer authentication for signed
-                        // heartbeats isn't wired up at this stage (replication
-                        // only), see this stage's scoping notes.
-                        (common::NodeId(peer_id), peer_addr, [0u8; 32])
+                        // Real pubkey if the entry carried a third @-separated
+                        // segment; otherwise the [0u8; 32] no-key placeholder
+                        // (unauthenticated -- see MEX_MESH_PEERS's own docs).
+                        let pubkey = match parts.next() {
+                            Some(hex_str) => {
+                                let bytes = hex::decode(hex_str.trim_start_matches("0x")).unwrap_or_else(|e| {
+                                    eprintln!("MEX_MESH_PEERS entry '{entry}' has invalid pubkey hex: {e}");
+                                    std::process::exit(1);
+                                });
+                                bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+                                    eprintln!("MEX_MESH_PEERS entry '{entry}' pubkey must be exactly 32 bytes, got {}", v.len());
+                                    std::process::exit(1);
+                                })
+                            }
+                            None => [0u8; 32],
+                        };
+                        (common::NodeId(peer_id), peer_addr, pubkey)
                     })
                     .collect();
+
+            let require_staked_reporters = std::env::var("MEX_MESH_REQUIRE_STAKE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            // Computed before `peers` is moved into MeshConfig below.
+            let chain_peer_pubkeys: Vec<[u8; 32]> = peers.iter()
+                .map(|(_, _, pk)| *pk)
+                .filter(|pk| *pk != [0u8; 32])
+                .collect();
 
             let mesh_node = protocol::MeshNode::new(protocol::MeshConfig {
                 node_id: common::NodeId(mesh_node_id),
@@ -210,7 +251,7 @@ async fn main() {
                 max_missed_heartbeats: 10,
                 schedule: None,
                 artificial_forward_delay_ms: None,
-                require_staked_reporters: false,
+                require_staked_reporters,
             })
             .await
             .unwrap_or_else(|e| {
@@ -220,9 +261,27 @@ async fn main() {
             let sender = mesh_node.sender();
             let transport = mesh_node.transport();
             let peer_ids = mesh_node.peer_ids();
+            let chain_status_tx = mesh_node.chain_status_sender();
+
+            if require_staked_reporters {
+                let chain_status_poll_secs: u64 = std::env::var("MEX_MESH_CHAIN_STATUS_POLL_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30);
+                tokio::spawn(api::run_mesh_chain_status_loop(api::MeshChainStatusConfig {
+                    rpc_url: rpc_url.clone(),
+                    node_private_key: node_private_key.clone(),
+                    factory_address: factory_address.clone(),
+                    registry_address: registry_address.clone(),
+                    peer_pubkeys: chain_peer_pubkeys,
+                    poll_interval: Duration::from_secs(chain_status_poll_secs),
+                    chain_status_tx: chain_status_tx.clone(),
+                }));
+            }
+
             tokio::spawn(mesh_node.run());
-            tracing::info!(mesh_node_id, %listen_addr, "gossip mesh enabled");
-            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids })
+            tracing::info!(mesh_node_id, %listen_addr, require_staked_reporters, "gossip mesh enabled");
+            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx })
         }
         Err(_) => None,
     };

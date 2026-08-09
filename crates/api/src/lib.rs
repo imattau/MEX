@@ -1,7 +1,9 @@
 pub mod types;
 pub mod server;
 pub mod settlement;
+pub mod mesh_chain_status;
 pub mod tests;
 
 pub use server::{app, AppState};
 pub use settlement::{run_settlement_loop, SettlementConfig};
+pub use mesh_chain_status::{run_mesh_chain_status_loop, MeshChainStatusConfig};

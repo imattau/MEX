@@ -107,6 +107,11 @@ pub struct MeshHandle {
     // protocol::WireMessage::SettlementProof's docs).
     pub transport: std::sync::Arc<protocol::UdpTransport>,
     pub peer_ids: Vec<common::NodeId>,
+    // Stage 4c: lets a background NodeRegistry-poll task push a fresh
+    // active/staked snapshot into the mesh's MisconductQuorum gating
+    // (require_staked_reporters) after run() has already taken ownership
+    // of the MeshNode -- see MeshNode::chain_status_sender's docs.
+    pub chain_status_tx: mpsc::Sender<std::collections::HashMap<[u8; 32], protocol::ChainNodeStatus>>,
 }
 
 fn setup_metrics() {

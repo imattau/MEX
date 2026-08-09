@@ -309,6 +309,12 @@ pub struct MeshNode {
     // eligibility gating never triggers.
     chain_status: HashMap<[u8; 32], ChainNodeStatus>,
     require_staked_reporters: bool,
+    // Lets a snapshot be pushed in AFTER run() has taken ownership of
+    // self (set_chain_status can't be called from outside anymore at
+    // that point) -- see chain_status_sender. run() drains this into
+    // self.chain_status the same way set_chain_status would.
+    chain_status_tx: mpsc::Sender<HashMap<[u8; 32], ChainNodeStatus>>,
+    chain_status_rx: Option<mpsc::Receiver<HashMap<[u8; 32], ChainNodeStatus>>>,
     // nonce -> when this node sent that Ping, so RTT is computed from
     // this node's own clock on both ends (send and receive of the
     // matching Pong), never from anything the peer claims.
@@ -437,6 +443,7 @@ impl MeshNode {
         let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
         let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
         let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
+        let (chain_status_tx, chain_status_rx) = mpsc::channel(8);
 
         Ok(Self {
             node_id: config.node_id,
@@ -459,6 +466,8 @@ impl MeshNode {
             misconduct_quorum: MisconductQuorum::new(2, 60.0),
             chain_status: HashMap::new(),
             require_staked_reporters: config.require_staked_reporters,
+            chain_status_tx,
+            chain_status_rx: Some(chain_status_rx),
             pending_pings: HashMap::new(),
             next_ping_nonce: 0,
             artificial_forward_delay_ms: config.artificial_forward_delay_ms.unwrap_or(0),
@@ -536,6 +545,17 @@ impl MeshNode {
     // entries.
     pub fn set_chain_status(&mut self, snapshot: HashMap<[u8; 32], ChainNodeStatus>) {
         self.chain_status = snapshot;
+    }
+
+    // The channel-based counterpart to set_chain_status, for a caller
+    // that doesn't own the MeshNode anymore (run() has already taken
+    // self by value) -- e.g. api/src/main.rs's periodic NodeRegistry
+    // poll, running as a separate task alongside tokio::spawn(mesh_node.
+    // run()). Take before run() the same as sender()/transport(); every
+    // send() here fully replaces the previous snapshot once run()'s main
+    // loop drains it, same semantics as set_chain_status.
+    pub fn chain_status_sender(&self) -> mpsc::Sender<HashMap<[u8; 32], ChainNodeStatus>> {
+        self.chain_status_tx.clone()
     }
 
     // Whether `reporter`'s vote should count toward MisconductQuorum --
@@ -667,6 +687,7 @@ impl MeshNode {
         let log_entry_tx = self.log_entry_tx.clone();
         let misconduct_tx = self.misconduct_tx.clone();
         let mesh_key = self.mesh_key;
+        let mut chain_status_rx = self.chain_status_rx.take().expect("run() already called");
 
         // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
         // misconduct_tx, no external caller needs raw Pong/HopWitness
@@ -859,6 +880,11 @@ impl MeshNode {
 
                 Some(event) = misconduct_internal_rx.recv() => {
                     self.apply_or_record_accusation(event.subject, event.reporter, &event.reason, event.timestamp);
+                }
+
+                Some(snapshot) = chain_status_rx.recv() => {
+                    tracing::debug!(entries = snapshot.len(), "chain_status snapshot updated");
+                    self.chain_status = snapshot;
                 }
 
                 Some((from_wire, order_id, hop_node, forwarded_at)) = hop_witness_rx.recv() => {
