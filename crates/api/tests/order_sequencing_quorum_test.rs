@@ -181,6 +181,7 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
         mesh: Some(mesh_handle),
         order_sequencer: Some(OrderSequencer::new()),
         pending_order_data: std::collections::HashMap::new(),
+        applied_order_ids: std::collections::HashSet::new(),
     }));
 
     tokio::spawn(api::run_order_sequencing_loop(

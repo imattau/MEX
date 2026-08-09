@@ -110,6 +110,14 @@ pub struct AppState {
     // run_order_sequencing_loop applies it. Only populated when
     // order_sequencer is Some.
     pub pending_order_data: HashMap<[u8; 32], (Order, OrderReceipt)>,
+    // Stage P3c-2: every order_id that has ever actually been applied
+    // via apply_accepted_order, on THIS node -- the idempotency guard
+    // gossip_replication.rs needs (a gossiped order can arrive multiple
+    // times via redundant paths, or arrive again after this node already
+    // applied it locally, and must not be re-queued/re-applied either
+    // time). Grows unboundedly for now -- fine for this prototype, not
+    // yet pruned/bounded.
+    pub applied_order_ids: std::collections::HashSet<[u8; 32]>,
 }
 
 pub struct MeshHandle {
@@ -256,7 +264,24 @@ async fn submit_order(
     // response for the whole flush window (see order_sequencing.rs's
     // docs for why). Real match results arrive over ws_broadcast once
     // order_sequencing::run_order_sequencing_loop applies this order.
-    if let Some(sequencer) = guard.order_sequencer.as_mut() {
+    if guard.order_sequencer.is_some() {
+        // Stage P3c-2: same idempotency guard gossip_replication.rs
+        // uses -- order_id is deterministic from trader+nonce, so a
+        // client accidentally double-submitting (or a race with this
+        // exact order arriving via gossip from another node moments
+        // earlier) must not queue or apply it twice.
+        if guard.pending_order_data.contains_key(&order_id) || guard.applied_order_ids.contains(&order_id) {
+            counter!("api.orders.duplicate_rejected").increment(1);
+            return Json(SubmitOrderResponse {
+                success: false,
+                order_id,
+                matches: Vec::new(),
+                error: Some("Order already submitted".to_string()),
+                receipt: None,
+                pending: false,
+            });
+        }
+        let sequencer = guard.order_sequencer.as_mut().unwrap();
         sequencer.add(order.id);
         guard.pending_order_data.insert(order.id, (order, receipt.clone()));
         counter!("api.orders.queued_for_sequencing").increment(1);
@@ -315,14 +340,32 @@ async fn submit_order(
 // evidence at all -- consistent with every other "no evidence" fallback
 // in this pipeline (see sequencer::OrderSequencer's docs).
 pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: OrderReceipt, match_timestamp_us: Option<u64>) -> Vec<Match> {
+    guard.applied_order_ids.insert(order.id);
     let log_entry = guard.order_log.append(receipt.clone()).clone();
 
     if let Some(mesh) = &guard.mesh {
+        // Stage P3c-2 found a real bug here: this USED to be
+        // receipt.received_at_us (the original HTTP submission time),
+        // harmless when apply_accepted_order always ran immediately
+        // after receiving an order. Once order-sequencing (Stage P2)
+        // introduced a real flush-window delay, that timestamp goes
+        // stale by the time this flood actually goes out --
+        // DeterministicFlood::on_receive rejects anything more than
+        // hop_count*250+100ms old as FloodError::LatePacket (a real,
+        // legitimate anti-replay check, not something to bypass), so a
+        // sequenced order's Flood was silently dropped by every peer
+        // once the window+quorum-wait delay exceeded ~100ms. The
+        // timestamp must reflect when THIS hop is actually originating
+        // the flood, not when the order was first received.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64() * 1000.0;
         let flood_msg = common::FloodMessage {
             order: order.clone(),
             hop_count: 0,
             path: vec![mesh.node_id],
-            timestamp: receipt.received_at_us as f64 / 1000.0,
+            timestamp: now_ms,
             source_region: mesh.region,
         };
         // Injected as if received from ourselves -- MeshNode::run's main

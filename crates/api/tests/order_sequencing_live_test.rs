@@ -162,6 +162,7 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
         mesh: Some(mesh_handle),
         order_sequencer: Some(OrderSequencer::new()),
         pending_order_data: std::collections::HashMap::new(),
+        applied_order_ids: std::collections::HashSet::new(),
     }));
 
     tokio::spawn(api::run_order_sequencing_loop(

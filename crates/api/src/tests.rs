@@ -30,6 +30,7 @@ mod tests {
             mesh: None,
             order_sequencer: None,
             pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
         }))
     }
 
@@ -158,6 +159,7 @@ mod tests {
             mesh: None,
             order_sequencer: None,
             pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -297,6 +299,7 @@ mod tests {
             mesh: None,
             order_sequencer: None,
             pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
         }));
         let state_for_inspection = Arc::clone(&state);
         let app = app(state);

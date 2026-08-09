@@ -218,6 +218,7 @@ async fn main() {
     // see propose_batch_tx's own capture there for why this can't live
     // inside MeshHandle itself.
     let mut confirmed_batch_rx: Option<tokio::sync::mpsc::Receiver<([u8; 32], [u8; 32])>> = None;
+    let mut flood_rx: Option<tokio::sync::mpsc::Receiver<(common::NodeId, common::FloodMessage)>> = None;
     let mesh = match std::env::var("MEX_MESH_NODE_ID") {
         Ok(id_str) => {
             let mesh_node_id: u32 = id_str.parse().unwrap_or_else(|e| {
@@ -334,6 +335,7 @@ async fn main() {
             // live in MeshHandle (which is Clone-friendly by design; a
             // Receiver isn't).
             confirmed_batch_rx = Some(mesh_node.confirmed_batch_receiver());
+            flood_rx = Some(mesh_node.flood_receiver());
 
             if require_staked_reporters {
                 let chain_status_poll_secs: u64 = std::env::var("MEX_MESH_CHAIN_STATUS_POLL_SECS")
@@ -390,6 +392,7 @@ async fn main() {
         mesh,
         order_sequencer,
         pending_order_data: std::collections::HashMap::new(),
+        applied_order_ids: std::collections::HashSet::new(),
     }));
 
     if let Some(window_ms) = order_sequencing_window_ms {
@@ -412,6 +415,15 @@ async fn main() {
             propose_batch_tx,
             confirmed_batch_rx.expect("mesh.is_some() was enforced above, so confirmed_batch_rx must have been captured"),
             Duration::from_millis(quorum_timeout_ms),
+        ));
+        // Stage P3c-2: feeds orders this node only learns about via
+        // gossip (not its own HTTP submissions) into the same
+        // order_sequencer -- see gossip_replication.rs's docs for why
+        // this is tied to order-sequencing being enabled, not a
+        // separate opt-in.
+        tokio::spawn(api::run_gossip_replication_loop(
+            Arc::clone(&state),
+            flood_rx.expect("mesh.is_some() was enforced above, so flood_rx must have been captured"),
         ));
         tracing::info!(window_ms, quorum_timeout_ms, "order sequencing enabled");
     }

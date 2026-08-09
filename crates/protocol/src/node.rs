@@ -390,6 +390,14 @@ pub struct MeshNode {
     log_entry_rx: Option<mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>>,
     misconduct_tx: mpsc::Sender<MisconductEvent>,
     misconduct_rx: Option<mpsc::Receiver<MisconductEvent>>,
+    // Stage P3c-2: every Flood arrival genuinely received from another
+    // peer (never a self-injected one -- see flood_receiver's docs)
+    // duplicated out here, for a caller that wants to independently
+    // replicate/apply orders it only learned about via gossip, not just
+    // record network-time evidence for them (which happens regardless,
+    // via origin_time, whether or not anyone's listening on this).
+    flood_observer_tx: mpsc::Sender<(NodeId, FloodMessage)>,
+    flood_observer_rx: Option<mpsc::Receiver<(NodeId, FloodMessage)>>,
     // Fires (subject) once quorum is actually reached -- see
     // confirmed_misconduct_receiver's docs.
     confirmation_tx: mpsc::Sender<NodeId>,
@@ -507,6 +515,7 @@ impl MeshNode {
         let (settlement_tx, settlement_rx) = mpsc::channel(64);
         let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
         let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
+        let (flood_observer_tx, flood_observer_rx) = mpsc::channel(1024);
         let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
         let (confirmed_batch_tx, confirmed_batch_rx) = mpsc::channel(256);
         let (propose_batch_tx, propose_batch_rx) = mpsc::channel(256);
@@ -574,6 +583,8 @@ impl MeshNode {
             log_entry_rx: Some(log_entry_rx),
             misconduct_tx,
             misconduct_rx: Some(misconduct_rx),
+            flood_observer_tx,
+            flood_observer_rx: Some(flood_observer_rx),
             confirmation_tx,
             confirmation_rx: Some(confirmation_rx),
         })
@@ -591,6 +602,20 @@ impl MeshNode {
     // receiver() methods.
     pub fn misconduct_receiver(&mut self) -> mpsc::Receiver<MisconductEvent> {
         self.misconduct_rx.take().expect("misconduct_receiver already taken")
+    }
+
+    // Stage P3c-2: every Flood this node receives genuinely from another
+    // peer -- NOT a self-injected one (a node submitting its own order
+    // via mesh.sender.try_send, see api::server::apply_accepted_order,
+    // gets excluded, since a caller already knows about its own
+    // self-submitted orders and doesn't need to be told again). Take
+    // before run(); intended for a caller that wants to independently
+    // apply/replicate orders it only learned about via gossip -- see
+    // api::gossip_replication. Recording network-time evidence
+    // (origin_time) for every arrival happens regardless of whether
+    // anyone takes this receiver at all.
+    pub fn flood_receiver(&mut self) -> mpsc::Receiver<(NodeId, FloodMessage)> {
+        self.flood_observer_rx.take().expect("flood_receiver already taken")
     }
 
     // Fires the subject NodeId once this node's own MisconductQuorum
@@ -1033,6 +1058,14 @@ impl MeshNode {
                     // estimate -- not an error, just not-yet-measured.
                     if let Some(one_way_ms) = self.latency_stats.mean_one_way_ms(from_node) {
                         self.origin_time.record(order_id, from_node, now - one_way_ms);
+                    }
+
+                    // Stage P3c-2: forwarded to flood_receiver's channel
+                    // only for a genuinely peer-received arrival, not a
+                    // self-injected one (from_node == self.node_id for
+                    // those -- see apply_accepted_order's injection).
+                    if from_node != self.node_id {
+                        let _ = self.flood_observer_tx.try_send((from_node, flood_msg.clone()));
                     }
 
                     // Sent IMMEDIATELY, before on_receive's forwarding
