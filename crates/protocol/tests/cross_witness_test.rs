@@ -127,7 +127,21 @@ async fn test_cross_witness_corroboration_on_a_diamond_topology() {
     injector.send(NodeId(1), WireMessage::Flood(msg1)).await.unwrap();
     injector.send(NodeId(4), WireMessage::Flood(msg4)).await.unwrap();
 
-    let event = tokio::time::timeout(Duration::from_secs(2), misconduct.recv())
+    // Widened from an initial 2s: Stage P3c-3's mesh routing fix (every
+    // configured peer now genuinely forwards to every other configured
+    // peer, not just to peers with a numerically larger NodeId -- see
+    // node.rs's routing table construction) means node2 now also relays
+    // its own redundant copy of the order back toward node1/node4 (who
+    // already have it directly from origin), on top of the honest
+    // forward to node6 -- extra, if bounded (received_cache dedup, path-
+    // based loop prevention), traffic through the same event loop. A
+    // small margin over the original 2s absorbs that without masking a
+    // real regression the way the multi-second widening tried during
+    // this stage's own debugging would have (that turned out to be
+    // covering for a real, now-fixed bug in witnessed_orders' docs, not
+    // genuine slowness -- confirmed by 20 stable runs at well under 2s
+    // once actually fixed).
+    let event = tokio::time::timeout(Duration::from_secs(3), misconduct.recv())
         .await
         .expect("timed out waiting for node2 to report node1's anomalous hop")
         .expect("misconduct channel closed unexpectedly");

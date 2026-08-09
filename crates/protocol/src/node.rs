@@ -398,6 +398,22 @@ pub struct MeshNode {
     // via origin_time, whether or not anyone's listening on this).
     flood_observer_tx: mpsc::Sender<(NodeId, FloodMessage)>,
     flood_observer_rx: Option<mpsc::Receiver<(NodeId, FloodMessage)>>,
+    // Stage P3c-3 found a real pre-existing latent race, made much more
+    // likely to manifest by that stage's mesh routing fix (see its
+    // docs): a node with genuine multi-path redundant arrivals for the
+    // SAME order (Stage 1's whole point) used to broadcast a FRESH
+    // HopWitness for every single arrival, including duplicates. A
+    // downstream node's witness/flood matching is keyed only by
+    // (order_id, hop_node) -- with two witnesses in flight for the same
+    // key, whichever one happens to pair with the downstream flood
+    // arrival first could be the LATE one, producing a wildly inflated
+    // observed transit time for an otherwise perfectly honest hop (a
+    // false anomaly, not a missed real one). Tracked here so a witness
+    // is only ever broadcast for the FIRST arrival of a given order_id
+    // -- exactly matching what a witness is actually supposed to attest
+    // to ("when I first received this"), and eliminating the ambiguity
+    // that made the race possible at all.
+    witnessed_orders: lru::LruCache<[u8; 32], ()>,
     // Fires (subject) once quorum is actually reached -- see
     // confirmed_misconduct_receiver's docs.
     confirmation_tx: mpsc::Sender<NodeId>,
@@ -484,11 +500,27 @@ impl MeshNode {
 
             routing.zone_peers.push(peer.clone());
 
+            // Stage P3c-3 found a real bug here: downstream_peers is the
+            // ONLY thing that actually drives forwarding (Flood
+            // relaying, HopWitness broadcast -- see this file's other
+            // uses of routing_table.downstream_peers) and used to be
+            // populated ONLY for peers with a numerically larger
+            // NodeId, meaning forwarding between any two peers was
+            // one-directional: the lower-ID node would forward to the
+            // higher-ID one, but never the reverse, since the
+            // higher-ID node saw the lower-ID one as merely "upstream"
+            // and never forwarded to it. That's fine for a strictly
+            // hierarchical/tree topology, but breaks genuine
+            // peer-to-peer gossip -- two mutually-configured peers
+            // need to relay to EACH OTHER, not just whichever direction
+            // ID ordering happens to favor. upstream_peers is kept
+            // (still computed the same way) purely for the informational
+            // log line below -- it has no other functional use anywhere
+            // in this crate (checked before making this change).
             if id.0 < config.node_id.0 {
                 routing.upstream_peers.push(peer.clone());
-            } else {
-                routing.downstream_peers.push(peer.clone());
             }
+            routing.downstream_peers.push(peer.clone());
         }
 
         tracing::info!(
@@ -585,6 +617,7 @@ impl MeshNode {
             misconduct_rx: Some(misconduct_rx),
             flood_observer_tx,
             flood_observer_rx: Some(flood_observer_rx),
+            witnessed_orders: lru::LruCache::new(std::num::NonZeroUsize::new(10_000).unwrap()),
             confirmation_tx,
             confirmation_rx: Some(confirmation_rx),
         })
@@ -1086,12 +1119,19 @@ impl MeshNode {
                     // too would not be -- that's a real, acknowledged
                     // limit of this prototype, not a claim this solves
                     // the general case.
-                    for peer_id in self.flood.routing_table.downstream_peers.iter().map(|p| p.id) {
-                        let _ = self.transport.send(peer_id, WireMessage::HopWitness {
-                            order_id,
-                            hop_node: self.node_id,
-                            forwarded_at: now,
-                        }).await;
+                    //
+                    // Only for the FIRST arrival of this order_id -- see
+                    // witnessed_orders' docs on the real race a second
+                    // (or third...) witness for the same order can cause
+                    // downstream.
+                    if self.witnessed_orders.put(order_id, ()).is_none() {
+                        for peer_id in self.flood.routing_table.downstream_peers.iter().map(|p| p.id) {
+                            let _ = self.transport.send(peer_id, WireMessage::HopWitness {
+                                order_id,
+                                hop_node: self.node_id,
+                                forwarded_at: now,
+                            }).await;
+                        }
                     }
 
                     // Correlates this arrival with the HopWitness the
