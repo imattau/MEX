@@ -645,7 +645,8 @@ mod tests {
             persistence: None,
         };
 
-        let summary = crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+        let summary =
+            crate::server::replay_persistence_log(&mut recovered_state, &log, None).unwrap();
         assert_eq!(
             summary.entries_replayed, 2,
             "both durably-recorded orders must be replayed"
@@ -874,7 +875,8 @@ mod tests {
             applied_order_ids: std::collections::HashSet::new(),
             persistence: None,
         };
-        let summary = crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+        let summary =
+            crate::server::replay_persistence_log(&mut recovered_state, &log, None).unwrap();
 
         // Stage P4-4c: reconciliation_candidates must contain exactly
         // the unsettled match -- the settled one has a BatchSubmitted
@@ -1085,7 +1087,7 @@ mod tests {
             applied_order_ids: std::collections::HashSet::new(),
             persistence: None,
         };
-        crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+        crate::server::replay_persistence_log(&mut recovered_state, &log, None).unwrap();
 
         assert!(
             recovered_state.applied_order_ids.contains(&flushed_id),
@@ -1111,5 +1113,237 @@ mod tests {
             .pending_order_data
             .contains_key(&still_buffered_id));
         assert!(!recovered_state.pending_order_data.contains_key(&flushed_id));
+    }
+
+    // Stage P4-5 live validation: the actual point of a snapshot -- after
+    // one is saved and the WAL fully truncated (proving the WAL tail
+    // ALONE has nothing left to replay), a fresh AppState booted purely
+    // from the snapshot must still end up in the exact same state as
+    // before the simulated crash: the confirmed-but-unsettled match
+    // still in confirmed_trade_hashes and the batcher's queue, no longer
+    // in pending_commits, and order_log/match_log fully intact (not
+    // reset to empty) despite the WAL itself being empty.
+    #[tokio::test]
+    async fn test_state_recovers_correctly_from_a_snapshot_after_the_wal_is_fully_truncated() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use rand::rngs::OsRng;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        fn build_and_sign(
+            sk: &SigningKey,
+            trader: [u8; 32],
+            side: common::OrderSide,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+        ) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+            let unsigned = common::Order {
+                id: order_id,
+                trader,
+                symbol: "ETH-USD".to_string(),
+                side,
+                price,
+                amount,
+                signature: Vec::new(),
+                nonce,
+                expiry: 0,
+                settlement_preference: common::SettlementPreference::Standard,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount, "signature": signature,
+                "nonce": nonce, "expiry": 0,
+            })
+        }
+
+        async fn post_order(app: &axum::Router, body: &serde_json::Value) -> SubmitOrderResponse {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/order")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        async fn confirm(
+            app: &axum::Router,
+            m: &engine::Match,
+        ) -> crate::types::ConfirmCommitResponse {
+            let trade_hash = [0x77u8; 32];
+            let body = serde_json::json!({
+                "maker_order_id": m.maker_order_id,
+                "taker_order_id": m.taker_order_id,
+                "trade_hash": trade_hash,
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/trade/committed")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let mut csprng = OsRng;
+        let sk_seller = SigningKey::generate(&mut csprng);
+        let pk_seller = sk_seller.verifying_key().to_bytes();
+        let sk_buyer = SigningKey::generate(&mut csprng);
+        let pk_buyer = sk_buyer.verifying_key().to_bytes();
+
+        let m = {
+            let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+            let (tx, _) = broadcast::channel(100);
+            let state = Arc::new(RwLock::new(AppState {
+                node_id: common::NodeId(0),
+                order_book: OrderBook::new("ETH-USD".to_string()),
+                validator: OrderValidator::new(100),
+                ws_broadcast: tx,
+                reputation: reputation::ReputationEngine::new(),
+                pending_commits: std::collections::HashMap::new(),
+                confirmed_trade_hashes: std::collections::HashMap::new(),
+                batcher: batcher::SettlementBatcher::new(),
+                receipt_signing_key: SigningKey::generate(&mut OsRng),
+                order_log: orderlog::HashChainLog::new(),
+                match_log: orderlog::HashChainLog::new(),
+                mesh: None,
+                order_sequencer: None,
+                pending_order_data: std::collections::HashMap::new(),
+                applied_order_ids: std::collections::HashSet::new(),
+                persistence: Some(log.clone()),
+            }));
+            let app = app(Arc::clone(&state));
+
+            let sell_req =
+                build_and_sign(&sk_seller, pk_seller, common::OrderSide::Sell, 3000, 5, 1);
+            post_order(&app, &sell_req).await;
+            let buy_resp = post_order(
+                &app,
+                &build_and_sign(&sk_buyer, pk_buyer, common::OrderSide::Buy, 3000, 5, 1),
+            )
+            .await;
+            assert_eq!(buy_resp.matches.len(), 1);
+            let m = buy_resp.matches[0].clone();
+
+            let confirm_resp = confirm(&app, &m).await;
+            assert!(confirm_resp.success, "{:?}", confirm_resp.error);
+
+            // Snapshot NOW, capturing everything above, then truncate the
+            // WAL entirely -- proving the snapshot alone (not the WAL
+            // tail, which will be empty) is what recovery relies on.
+            let seq = log.latest_seq().unwrap().unwrap();
+            let snapshot = {
+                let guard = state.read().unwrap();
+                crate::server::build_snapshot(&guard)
+            };
+            log.save_snapshot(&snapshot, seq).unwrap();
+            let removed = log.truncate_up_to(seq).unwrap();
+            assert!(
+                removed > 0,
+                "the snapshot must have covered at least one WAL entry"
+            );
+            assert!(
+                log.is_empty(),
+                "every WAL entry must be truncated once the snapshot covers all of them"
+            );
+
+            m
+            // `state` drops here, simulating a crash with nothing else
+            // surviving.
+        };
+
+        let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+        let mut recovered_state = AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: broadcast::channel(100).0,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: SigningKey::generate(&mut OsRng),
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            persistence: None,
+        };
+
+        let summary = crate::server::load_persistence(&mut recovered_state, &log).unwrap();
+        assert_eq!(
+            summary.entries_replayed, 0,
+            "the WAL was fully truncated -- the tail replay must find nothing left"
+        );
+
+        assert!(
+            !recovered_state
+                .pending_commits
+                .contains_key(&(m.maker_order_id, m.taker_order_id)),
+            "the confirmed match must not still be pending confirmation"
+        );
+        assert!(
+            recovered_state
+                .confirmed_trade_hashes
+                .contains_key(&(m.maker_order_id, m.taker_order_id)),
+            "the confirmed-but-unsettled match's confirmation must survive purely via the snapshot"
+        );
+        assert_eq!(
+            recovered_state.order_log.len(),
+            2,
+            "order_log must be fully intact from the snapshot, not reset to empty"
+        );
+        assert_eq!(
+            recovered_state.match_log.len(),
+            1,
+            "match_log must be fully intact from the snapshot, not reset to empty"
+        );
+        assert_eq!(recovered_state.order_book.bids.len(), 0);
+        assert_eq!(recovered_state.order_book.asks.len(), 0);
+
+        // Standard tier (the default here), so a direct queue peek
+        // rather than process_batches() -- which wouldn't flush a
+        // single Standard-tier trade without hitting its batch-size/
+        // timer gate.
+        let queued_ids: Vec<[u8; 32]> = recovered_state
+            .batcher
+            .queued_trades()
+            .iter()
+            .map(|t| t.maker_order_id)
+            .collect();
+        assert!(
+            queued_ids.contains(&m.maker_order_id),
+            "the recovered match must still be in the batcher's queue, ready to actually settle"
+        );
     }
 }

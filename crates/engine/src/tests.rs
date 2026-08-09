@@ -30,16 +30,24 @@ mod tests {
     fn test_configured_fee_calculator_changes_match_fee() {
         let mut default_book = OrderBook::new("ETH-USD".to_string());
         default_book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
-        let default_matches = default_book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
-        assert_eq!(default_matches[0].fee_basis_points, 5, "default calculator must match the old static Standard-tier rate");
+        let default_matches =
+            default_book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+        assert_eq!(
+            default_matches[0].fee_basis_points, 5,
+            "default calculator must match the old static Standard-tier rate"
+        );
 
         let mut configured_book = OrderBook::new("ETH-USD".to_string());
         // 2x the baseline gas price, no batching discount, no volatility --
         // gas_multiplier alone should exactly double the Standard rate.
         configured_book.set_fee_calculator(common::FeeCalculator::new(100, 0.0, 0.0));
         configured_book.add_order(create_test_order(3, OrderSide::Buy, 3000, 10));
-        let configured_matches = configured_book.add_order(create_test_order(4, OrderSide::Sell, 3000, 10));
-        assert_eq!(configured_matches[0].fee_basis_points, 10, "2x gas price must double the fee rate");
+        let configured_matches =
+            configured_book.add_order(create_test_order(4, OrderSide::Sell, 3000, 10));
+        assert_eq!(
+            configured_matches[0].fee_basis_points, 10,
+            "2x gas price must double the fee rate"
+        );
         assert_ne!(
             configured_matches[0].fee_basis_points, default_matches[0].fee_basis_points,
             "a configured FeeCalculator must actually change the charged fee, not be silently ignored"
@@ -148,8 +156,16 @@ mod tests {
         let matches = book.add_order(buy);
 
         assert!(matches.is_empty(), "Self-trade should produce no matches");
-        assert_eq!(book.asks.get(&3000).unwrap()[0].amount, 10, "Maker amount should be preserved");
-        assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 10, "Taker amount should be preserved");
+        assert_eq!(
+            book.asks.get(&3000).unwrap()[0].amount,
+            10,
+            "Maker amount should be preserved"
+        );
+        assert_eq!(
+            book.bids.get(&3000).unwrap()[0].amount,
+            10,
+            "Taker amount should be preserved"
+        );
     }
 
     #[test]
@@ -204,11 +220,23 @@ mod tests {
         };
         let matches = book.add_order(buy_a);
 
-        assert_eq!(matches.len(), 1, "Should only match against trader_b's order");
+        assert_eq!(
+            matches.len(),
+            1,
+            "Should only match against trader_b's order"
+        );
         assert_eq!(matches[0].maker_trader, trader_b);
         assert_eq!(matches[0].amount, 5);
-        assert_eq!(book.asks.get(&3000).unwrap()[0].amount, 5, "Trader A's sell should be preserved");
-        assert_eq!(book.bids.get(&3000).unwrap()[0].amount, 5, "Remaining buy amount should rest");
+        assert_eq!(
+            book.asks.get(&3000).unwrap()[0].amount,
+            5,
+            "Trader A's sell should be preserved"
+        );
+        assert_eq!(
+            book.bids.get(&3000).unwrap()[0].amount,
+            5,
+            "Remaining buy amount should rest"
+        );
     }
 
     #[test]
@@ -259,7 +287,10 @@ mod tests {
 
         assert_eq!(m1[0].assigned_node, node_a);
         assert_eq!(m2[0].assigned_node, node_b);
-        assert_eq!(m3[0].assigned_node, node_a, "cursor must wrap back to the first node");
+        assert_eq!(
+            m3[0].assigned_node, node_a,
+            "cursor must wrap back to the first node"
+        );
     }
 
     #[test]
@@ -371,7 +402,8 @@ mod tests {
         }
         // Confirms the round-robin genuinely rotated across all three
         // nodes, not just trivially agreeing on a constant.
-        let assigned: std::collections::HashSet<[u8; 32]> = matches_1.iter().map(|m| m.assigned_node).collect();
+        let assigned: std::collections::HashSet<[u8; 32]> =
+            matches_1.iter().map(|m| m.assigned_node).collect();
         assert_eq!(assigned, [node_a, node_b, node_c].into_iter().collect());
     }
 

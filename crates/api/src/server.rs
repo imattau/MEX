@@ -603,6 +603,12 @@ pub struct ReplaySummary {
 // for consistency with apply_accepted_order_locally's parameter, which
 // this calls through replay_accepted_order).
 //
+// Stage P4-5: `after_seq` lets a caller that already loaded a snapshot
+// (see load_persistence) replay only the WAL tail after it, instead of
+// this always meaning "from the very beginning of history" -- None
+// preserves the original full-history behavior exactly, still used
+// whenever no snapshot exists yet.
+//
 // Two passes over the same in-memory entry list: the first collects
 // every (maker_order_id, taker_order_id) key that a BatchSubmitted
 // checkpoint says was actually settled on-chain before whatever crash/
@@ -623,10 +629,11 @@ pub struct ReplaySummary {
 pub fn replay_persistence_log(
     guard: &mut AppState,
     log: &crate::persistence::PersistenceLog,
+    after_seq: Option<u64>,
 ) -> Result<ReplaySummary, String> {
     use crate::persistence::WalEntry;
 
-    let entries = log.replay()?;
+    let entries = log.replay(after_seq)?;
     let count = entries.len();
 
     let mut settled_keys: std::collections::HashSet<([u8; 32], [u8; 32])> =
@@ -694,6 +701,62 @@ pub fn replay_persistence_log(
         entries_replayed: count,
         reconciliation_candidates,
     })
+}
+
+// Stage P4-5: overwrites `guard`'s derived state with `snapshot`'s
+// wholesale copy -- the counterpart to building a Snapshot from current
+// state (see run_snapshot_loop). Called once, before any WAL replay, so
+// the WAL tail (see replay_persistence_log's after_seq) only needs to
+// cover whatever happened AFTER the snapshot was taken.
+fn apply_snapshot(guard: &mut AppState, snapshot: crate::persistence::Snapshot) {
+    guard.order_book.bids = snapshot.order_book_bids;
+    guard.order_book.asks = snapshot.order_book_asks;
+    guard
+        .order_book
+        .restore_active_nodes_cursor(snapshot.active_nodes_cursor);
+    guard.order_log = snapshot.order_log;
+    guard.match_log = snapshot.match_log;
+    guard.pending_commits = snapshot.pending_commits.into_iter().collect();
+    guard.confirmed_trade_hashes = snapshot.confirmed_trade_hashes.into_iter().collect();
+    guard.applied_order_ids = snapshot.applied_order_ids;
+    for m in snapshot.queued_trades {
+        guard.batcher.enqueue(m);
+    }
+}
+
+// Stage P4-5: builds a Snapshot from `guard`'s CURRENT derived state --
+// the counterpart to apply_snapshot, used by run_snapshot_loop.
+pub fn build_snapshot(guard: &AppState) -> crate::persistence::Snapshot {
+    crate::persistence::Snapshot {
+        order_book_bids: guard.order_book.bids.clone(),
+        order_book_asks: guard.order_book.asks.clone(),
+        active_nodes_cursor: guard.order_book.active_nodes_cursor(),
+        order_log: guard.order_log.clone(),
+        match_log: guard.match_log.clone(),
+        pending_commits: guard.pending_commits.clone().into_iter().collect(),
+        confirmed_trade_hashes: guard.confirmed_trade_hashes.clone().into_iter().collect(),
+        applied_order_ids: guard.applied_order_ids.clone(),
+        queued_trades: guard.batcher.queued_trades(),
+    }
+}
+
+// Stage P4-5: the full boot-time recovery entry point -- loads the
+// latest snapshot if one exists (near-instant, no recomputation needed)
+// and applies it, then replays only the WAL tail after it; falls back
+// to replaying the entire WAL from scratch (Stage P4-1/P4-2's original
+// behavior) if no snapshot has ever been saved. main.rs calls this
+// instead of replay_persistence_log directly.
+pub fn load_persistence(
+    guard: &mut AppState,
+    log: &crate::persistence::PersistenceLog,
+) -> Result<ReplaySummary, String> {
+    match log.load_snapshot()? {
+        Some((snapshot, covers_up_to_seq)) => {
+            apply_snapshot(guard, snapshot);
+            replay_persistence_log(guard, log, Some(covers_up_to_seq))
+        }
+        None => replay_persistence_log(guard, log, None),
+    }
 }
 
 #[instrument(skip(state))]

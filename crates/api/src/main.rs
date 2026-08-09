@@ -131,24 +131,51 @@
 //                            always hit this timeout and fall back,
 //                            reproducing Stage P2's exact behavior.
 //   MEX_PERSISTENCE_PATH      Optional. Filesystem path for a durable
-//                             write-ahead log (sled-backed) of every
-//                             accepted/applied order -- see persistence.rs
-//                             for the full design. Unset (default) means
-//                             order_book/order_log/match_log/
-//                             pending_commits/applied_order_ids live only
+//                             write-ahead log (sled-backed) of order
+//                             accept/apply/match, confirm/settle, and
+//                             sequencing-intake events -- see
+//                             persistence.rs for the full design. Unset
+//                             (default) means order_book/order_log/
+//                             match_log/pending_commits/
+//                             confirmed_trade_hashes/applied_order_ids/
+//                             the settlement batcher's queue live only
 //                             in memory, exactly as before this existed:
-//                             lost on restart. When set, this node
-//                             replays the log to rebuild that state on
-//                             every startup before serving any traffic.
-//                             Covers only the accept -> apply/match stage
-//                             (Stage P4-1) -- the confirm -> batch ->
-//                             settle stage (pending_commits exiting,
-//                             confirmed_trade_hashes, the batcher's
-//                             internal queues) is NOT yet durable; a
-//                             crash between a trader's commit confirmation
-//                             and that trade's on-chain settlement can
-//                             still lose track of it. Deliberately
-//                             flagged, not silently assumed solved.
+//                             lost on restart. When set, this node loads
+//                             the latest snapshot (if any, see Stage
+//                             P4-5/MEX_SNAPSHOT_INTERVAL_SECS) and
+//                             replays the WAL tail after it -- or the
+//                             entire WAL, if no snapshot exists yet --
+//                             to rebuild that state before serving any
+//                             traffic. A known residual gap (Stage
+//                             P4-4c's own docs): if boot-time settlement
+//                             reconciliation can't confirm a trade's
+//                             true on-chain status (RPC hiccup, escrow
+//                             not yet synced), every future resubmission
+//                             attempt for it reverts harmlessly rather
+//                             than ever resolving -- wasted gas/RPC
+//                             calls, never a fund-safety issue.
+//   MEX_SNAPSHOT_INTERVAL_SECS  Optional, only used if
+//                             MEX_PERSISTENCE_PATH is set. Defaults to
+//                             300 (5 minutes). How often a background
+//                             loop durably snapshots current derived
+//                             state (see persistence::Snapshot) and
+//                             truncates WAL entries it now covers -- so
+//                             a restart replays only the tail since the
+//                             last snapshot instead of this node's
+//                             entire history. Runs periodically, not
+//                             just on clean shutdown: the whole point is
+//                             bounding boot time after a CRASH, which
+//                             doesn't give a process a chance to
+//                             snapshot on its way out. order_log/
+//                             match_log are captured in full inside every
+//                             snapshot (not summarized -- see
+//                             persistence::Snapshot's own docs on why
+//                             that would silently break their
+//                             audit-completeness guarantee), so this
+//                             bounds boot time, not total disk/memory
+//                             growth from historical order volume --
+//                             that remains a known, deliberately
+//                             deferred limitation.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -495,17 +522,19 @@ async fn main() {
         persistence: None,
     };
 
-    // Stage P4-1: rebuild order_book/order_log/match_log/pending_commits/
-    // applied_order_ids from durable storage BEFORE this node starts
-    // accepting any live traffic -- see persistence.rs's docs and
-    // server::replay_persistence_log for why replaying the same inputs
-    // apply_accepted_order originally ran with is sufficient to
-    // reproduce exact pre-crash state. reconciliation_candidates (Stage
-    // P4-4c) is handed to run_settlement_loop below -- only it has a
-    // live chain connection to actually resolve them against.
+    // Stage P4-1/P4-5: rebuild order_book/order_log/match_log/
+    // pending_commits/applied_order_ids from durable storage BEFORE this
+    // node starts accepting any live traffic -- see persistence.rs's
+    // docs and server::load_persistence for why loading the latest
+    // snapshot (if any) plus replaying only the WAL tail after it is
+    // sufficient to reproduce exact pre-crash state, without needing to
+    // re-derive this node's entire history on every boot.
+    // reconciliation_candidates (Stage P4-4c) is handed to
+    // run_settlement_loop below -- only it has a live chain connection
+    // to actually resolve them against.
     let mut reconciliation_candidates: Vec<(engine::Match, [u8; 32])> = Vec::new();
     if let Some(log) = &persistence_log {
-        match api::replay_persistence_log(&mut app_state, log) {
+        match api::load_persistence(&mut app_state, log) {
             Ok(summary) => {
                 tracing::info!(
                     replayed_entries = summary.entries_replayed,
@@ -520,9 +549,21 @@ async fn main() {
             }
         }
     }
+    let persistence_enabled = persistence_log.is_some();
     app_state.persistence = persistence_log;
 
     let state = Arc::new(RwLock::new(app_state));
+
+    if persistence_enabled {
+        let snapshot_interval_secs: u64 = std::env::var("MEX_SNAPSHOT_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        tokio::spawn(api::run_snapshot_loop(
+            Arc::clone(&state),
+            Duration::from_secs(snapshot_interval_secs),
+        ));
+    }
 
     if let Some(window_ms) = order_sequencing_window_ms {
         // mesh.is_some() was already enforced above, so the MeshHandle

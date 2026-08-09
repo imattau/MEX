@@ -121,6 +121,23 @@ impl SettlementBatcher {
         self.standard_queue.retain(&mut keep);
     }
 
+    // Stage P4-5: every currently-queued, not-yet-proven trade across all
+    // three tiers, for a snapshot to durably capture -- combined with
+    // `enqueue`, which already re-sorts by tier on the way back in, a
+    // snapshot doesn't need to track which tier each trade came from
+    // separately. Order across tiers is instant, then express, then
+    // standard; within a tier, insertion order is preserved (VecDeque),
+    // so re-enqueueing these in this exact order after a restore
+    // reproduces each tier's own queue order exactly.
+    pub fn queued_trades(&self) -> Vec<Match> {
+        self.instant_queue
+            .iter()
+            .chain(self.express_queue.iter())
+            .chain(self.standard_queue.iter())
+            .cloned()
+            .collect()
+    }
+
     pub fn process_batches(&mut self) -> Vec<SettlementBatch> {
         let mut batches = Vec::new();
 

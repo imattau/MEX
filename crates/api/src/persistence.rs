@@ -35,8 +35,9 @@
 
 use common::Order;
 use engine::Match;
-use orderlog::OrderReceipt;
+use orderlog::{HashChainLog, OrderReceipt};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,45 @@ pub enum WalEntry {
         order: Order,
         receipt: OrderReceipt,
     },
+}
+
+// Stage P4-5: a wholesale copy of every piece of state
+// replay_persistence_log otherwise has to re-derive by replaying the
+// ENTIRE WAL history on every single boot -- order_log/match_log
+// included, in full, verbatim (not summarized: their whole reason to
+// exist is being a COMPLETE auditable record, see orderlog's own docs,
+// so a snapshot that dropped old entries from them would silently break
+// that guarantee for anyone restarting this node). Since every field
+// here is already just data these structures already hold (nothing
+// derived or recomputed), saving/loading a snapshot needs no expensive
+// replay logic of its own -- unlike the WAL, which HAS to re-run
+// engine::OrderBook::add_order_at et al. to reconstruct anything.
+//
+// HashMap<([u8;32],[u8;32]), V> fields are represented as Vec<(key,
+// value)> rather than a real HashMap: this is serialized with
+// serde_json elsewhere in this module, and JSON object keys must be
+// strings -- a tuple key has no defined string representation. A Vec of
+// pairs sidesteps that entirely and is just as cheap to convert back to
+// a HashMap on load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub order_book_bids: BTreeMap<u64, Vec<Order>>,
+    pub order_book_asks: BTreeMap<u64, Vec<Order>>,
+    // See engine::OrderBook::active_nodes_cursor's own docs on why this
+    // specifically (not just resetting to 0) must be preserved across a
+    // restart -- it's load-bearing for Stage P3c-4's cross-replica
+    // assign_node determinism guarantee.
+    pub active_nodes_cursor: usize,
+    pub order_log: HashChainLog<OrderReceipt>,
+    pub match_log: HashChainLog<Match>,
+    pub pending_commits: Vec<(([u8; 32], [u8; 32]), Match)>,
+    pub confirmed_trade_hashes: Vec<(([u8; 32], [u8; 32]), [u8; 32])>,
+    pub applied_order_ids: HashSet<[u8; 32]>,
+    // Every trade still sitting in the settlement batcher's queue,
+    // across all tiers -- see batcher::SettlementBatcher::queued_trades'
+    // own docs on why tier information doesn't need to be carried
+    // separately.
+    pub queued_trades: Vec<Match>,
 }
 
 // sled::Db and sled::Tree are cheap, Arc-backed handles -- Clone gives
@@ -145,15 +185,31 @@ impl PersistenceLog {
         })
     }
 
-    // Every durably-recorded entry, in the exact order they were
+    // Every durably-recorded entry with seq > `after_seq` (None means
+    // every entry, from the very start), in the order they were
     // originally appended (big-endian u64 keys from generate_id sort
-    // correctly as bytes, and sled::Tree::iter walks keys in order).
-    pub fn replay(&self) -> Result<Vec<WalEntry>, String> {
+    // correctly as bytes, so a plain range scan is enough -- no need to
+    // decode every entry just to filter by seq). Stage P4-5's snapshot
+    // load path uses Some(snapshot's covered seq) to replay only the
+    // tail after a snapshot instead of the entire history; every other
+    // caller still wants the full history, via None.
+    pub fn replay(&self, after_seq: Option<u64>) -> Result<Vec<WalEntry>, String> {
         let mut out = Vec::new();
-        for kv in self.entries.iter() {
-            let (_, v) = kv.map_err(|e| e.to_string())?;
-            let entry: WalEntry = serde_json::from_slice(&v).map_err(|e| e.to_string())?;
-            out.push(entry);
+        match after_seq {
+            Some(seq) => {
+                for kv in self.entries.range((seq + 1).to_be_bytes().to_vec()..) {
+                    let (_, v) = kv.map_err(|e| e.to_string())?;
+                    let entry: WalEntry = serde_json::from_slice(&v).map_err(|e| e.to_string())?;
+                    out.push(entry);
+                }
+            }
+            None => {
+                for kv in self.entries.iter() {
+                    let (_, v) = kv.map_err(|e| e.to_string())?;
+                    let entry: WalEntry = serde_json::from_slice(&v).map_err(|e| e.to_string())?;
+                    out.push(entry);
+                }
+            }
         }
         Ok(out)
     }
@@ -164,6 +220,71 @@ impl PersistenceLog {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    // The seq of the most recently appended entry, or None if the WAL
+    // is empty -- what a fresh snapshot should record as "covers up to."
+    pub fn latest_seq(&self) -> Result<Option<u64>, String> {
+        match self.entries.last().map_err(|e| e.to_string())? {
+            Some((k, _)) => {
+                let bytes: [u8; 8] = k
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| "corrupt WAL key: wrong length".to_string())?;
+                Ok(Some(u64::from_be_bytes(bytes)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    // Stage P4-5: durably records `snapshot` as the latest one, tagged
+    // with the WAL seq it covers up to. A single always-overwritten slot
+    // -- only the most recent snapshot is ever useful for booting (an
+    // older one would just mean replaying a longer tail, never
+    // incorrect, just slower), so there's no reason to keep a history of
+    // them.
+    pub fn save_snapshot(&self, snapshot: &Snapshot, covers_up_to_seq: u64) -> Result<(), String> {
+        let tree = self.db.open_tree("snapshot").map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&(snapshot, covers_up_to_seq)).map_err(|e| e.to_string())?;
+        tree.insert(b"latest", bytes).map_err(|e| e.to_string())?;
+        tree.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // None if no snapshot has ever been saved (a fresh WAL, or one from
+    // before Stage P4-5 existed) -- callers fall back to replaying the
+    // entire WAL from scratch in that case, exactly as before this
+    // stage existed.
+    pub fn load_snapshot(&self) -> Result<Option<(Snapshot, u64)>, String> {
+        let tree = self.db.open_tree("snapshot").map_err(|e| e.to_string())?;
+        match tree.get(b"latest").map_err(|e| e.to_string())? {
+            Some(bytes) => {
+                let (snapshot, covers_up_to_seq) =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                Ok(Some((snapshot, covers_up_to_seq)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    // Stage P4-5: deletes every WAL entry with seq <= `up_to_seq` -- the
+    // ones a snapshot covering up to that seq has already made
+    // redundant for replay purposes. Deliberately safe to call at any
+    // time, or not at all, or to crash partway through: boot-time
+    // correctness only ever depends on comparing an entry's seq against
+    // a snapshot's recorded covers_up_to_seq (see replay/load_snapshot),
+    // never on whether stale entries were actually physically removed
+    // yet -- so this is pure, best-effort disk-space cleanup, not a step
+    // that needs crash-atomicity with the snapshot write it follows.
+    pub fn truncate_up_to(&self, up_to_seq: u64) -> Result<usize, String> {
+        let mut removed = 0;
+        for kv in self.entries.range(..=up_to_seq.to_be_bytes().to_vec()) {
+            let (k, _) = kv.map_err(|e| e.to_string())?;
+            self.entries.remove(k).map_err(|e| e.to_string())?;
+            removed += 1;
+        }
+        self.entries.flush().map_err(|e| e.to_string())?;
+        Ok(removed)
     }
 }
 
@@ -218,7 +339,7 @@ mod tests {
                 .unwrap();
         }
 
-        let replayed = log.replay().unwrap();
+        let replayed = log.replay(None).unwrap();
         assert_eq!(replayed.len(), 5);
         for (i, entry) in replayed.iter().enumerate() {
             let seed = (i + 1) as u8;
@@ -249,7 +370,7 @@ mod tests {
         }
         // Reopen fresh, as a real restart would.
         let log = PersistenceLog::open(dir.path()).unwrap();
-        let replayed = log.replay().unwrap();
+        let replayed = log.replay(None).unwrap();
         assert_eq!(replayed.len(), 1);
         let WalEntry::OrderAccepted { order, .. } = &replayed[0] else {
             panic!("expected OrderAccepted");
@@ -288,7 +409,7 @@ mod tests {
         log.append_batch_submitted(vec![([1u8; 32], [2u8; 32])])
             .unwrap();
 
-        let replayed = log.replay().unwrap();
+        let replayed = log.replay(None).unwrap();
         assert_eq!(replayed.len(), 3);
         assert!(matches!(replayed[0], WalEntry::OrderAccepted { .. }));
         assert!(matches!(replayed[1], WalEntry::CommitConfirmed { .. }));
@@ -304,7 +425,7 @@ mod tests {
         let receipt = make_receipt(&order);
         log.append_order_queued(&order, &receipt).unwrap();
 
-        let replayed = log.replay().unwrap();
+        let replayed = log.replay(None).unwrap();
         assert_eq!(replayed.len(), 1);
         let WalEntry::OrderQueued {
             order: replayed_order,
@@ -314,5 +435,109 @@ mod tests {
             panic!("expected OrderQueued");
         };
         assert_eq!(replayed_order.id, [3u8; 32]);
+    }
+
+    #[test]
+    fn test_replay_with_after_seq_returns_only_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        for seed in 1..=5u8 {
+            let order = make_order(seed);
+            let receipt = make_receipt(&order);
+            log.append_order_accepted(&order, &receipt, None).unwrap();
+        }
+        // First 3 entries' seqs -- replaying strictly after the 3rd
+        // must return only entries 4 and 5.
+        let all = log.replay(None).unwrap();
+        assert_eq!(all.len(), 5);
+
+        let cutoff = log.latest_seq().unwrap().unwrap() - 2; // seq of the 3rd entry
+        let tail = log.replay(Some(cutoff)).unwrap();
+        assert_eq!(
+            tail.len(),
+            2,
+            "only entries after the cutoff seq must be returned"
+        );
+        for entry in &tail {
+            let WalEntry::OrderAccepted { order, .. } = entry else {
+                panic!("expected OrderAccepted");
+            };
+            assert!(
+                order.id == [4u8; 32] || order.id == [5u8; 32],
+                "unexpected order in tail: {:?}",
+                order.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_latest_seq_is_none_for_an_empty_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+        assert_eq!(log.latest_seq().unwrap(), None);
+    }
+
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            order_book_bids: std::collections::BTreeMap::new(),
+            order_book_asks: std::collections::BTreeMap::new(),
+            active_nodes_cursor: 3,
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            pending_commits: Vec::new(),
+            confirmed_trade_hashes: Vec::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            queued_trades: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_load_snapshot_returns_none_when_none_was_ever_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+        assert!(log.load_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_save_and_load_snapshot_roundtrips_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let log = PersistenceLog::open(dir.path()).unwrap();
+            let mut snapshot = empty_snapshot();
+            snapshot.order_book_bids.insert(3000, vec![]);
+            log.save_snapshot(&snapshot, 42).unwrap();
+        }
+
+        let log = PersistenceLog::open(dir.path()).unwrap();
+        let (snapshot, covers_up_to_seq) = log.load_snapshot().unwrap().unwrap();
+        assert_eq!(covers_up_to_seq, 42);
+        assert_eq!(snapshot.active_nodes_cursor, 3);
+        assert!(snapshot.order_book_bids.contains_key(&3000));
+    }
+
+    #[test]
+    fn test_truncate_up_to_removes_only_covered_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        for seed in 1..=5u8 {
+            let order = make_order(seed);
+            let receipt = make_receipt(&order);
+            log.append_order_accepted(&order, &receipt, None).unwrap();
+        }
+        let cutoff = log.latest_seq().unwrap().unwrap() - 2; // covers entries 1-3
+
+        let removed = log.truncate_up_to(cutoff).unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(log.len(), 2, "only entries 4 and 5 should remain");
+
+        let remaining = log.replay(None).unwrap();
+        for entry in &remaining {
+            let WalEntry::OrderAccepted { order, .. } = entry else {
+                panic!("expected OrderAccepted");
+            };
+            assert!(order.id == [4u8; 32] || order.id == [5u8; 32]);
+        }
     }
 }

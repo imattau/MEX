@@ -41,6 +41,23 @@ impl OrderBook {
         self.next_node_index = 0;
     }
 
+    // Stage P4-5: the round-robin cursor's current position, and a way
+    // to restore it -- needed for snapshot save/load. Deliberately
+    // separate from set_active_nodes (which always resets the cursor to
+    // 0, the correct behavior for its own normal reconfiguration use):
+    // restoring a snapshot must put the cursor back exactly where it
+    // was, not reset it, or a restarted replica would silently diverge
+    // from peers on every future assign_node call -- see
+    // OrderBook::assign_node's own cross-replica determinism guarantee
+    // (Stage P3c-4), which this cursor is load-bearing for.
+    pub fn active_nodes_cursor(&self) -> usize {
+        self.next_node_index
+    }
+
+    pub fn restore_active_nodes_cursor(&mut self, cursor: usize) {
+        self.next_node_index = cursor;
+    }
+
     // Round-robins over the configured active-node set. Returns the zero
     // pubkey (an explicit "unassigned" sentinel, never a real node's
     // pubkey) if no active nodes are configured -- NodeRegistry.getNode of
@@ -136,10 +153,17 @@ impl OrderBook {
                         maker_order.amount -= match_amount;
 
                         let (tier, fee_bps, seller, fee_payer, deadline) =
-                            Self::resolve_settlement_params(&order, maker_order, now_secs, &self.fee_calculator);
+                            Self::resolve_settlement_params(
+                                &order,
+                                maker_order,
+                                now_secs,
+                                &self.fee_calculator,
+                            );
 
                         let fee = self.fee_calculator.compute_fee_amount_dynamic(
-                            match_amount, ask_price, tier,
+                            match_amount,
+                            ask_price,
+                            tier,
                         );
                         self.node_rewards += fee as u64;
 
@@ -157,7 +181,10 @@ impl OrderBook {
                             fee_payer,
                             settlement_deadline: deadline,
                             symbol: self.symbol.clone(),
-                            assigned_node: Self::assign_node(&self.active_nodes, &mut self.next_node_index),
+                            assigned_node: Self::assign_node(
+                                &self.active_nodes,
+                                &mut self.next_node_index,
+                            ),
                         });
 
                         tracing::info!(
@@ -224,10 +251,17 @@ impl OrderBook {
                             maker_order.amount -= match_amount;
 
                             let (tier, fee_bps, seller, fee_payer, deadline) =
-                                Self::resolve_settlement_params(&order, maker_order, now_secs, &self.fee_calculator);
+                                Self::resolve_settlement_params(
+                                    &order,
+                                    maker_order,
+                                    now_secs,
+                                    &self.fee_calculator,
+                                );
 
                             let fee = self.fee_calculator.compute_fee_amount_dynamic(
-                                match_amount, bid_price, tier,
+                                match_amount,
+                                bid_price,
+                                tier,
                             );
                             self.node_rewards += fee as u64;
 
@@ -245,7 +279,10 @@ impl OrderBook {
                                 fee_payer,
                                 settlement_deadline: deadline,
                                 symbol: self.symbol.clone(),
-                                assigned_node: Self::assign_node(&self.active_nodes, &mut self.next_node_index),
+                                assigned_node: Self::assign_node(
+                                    &self.active_nodes,
+                                    &mut self.next_node_index,
+                                ),
                             });
 
                             if maker_order.amount == 0 {
@@ -295,12 +332,8 @@ impl OrderBook {
         };
 
         let (tier, fee_payer) = match &sell_order.settlement_requester {
-            SettlementRequester::Buyer => {
-                (buy_order.settlement_preference, buy_order.trader)
-            }
-            SettlementRequester::Seller => {
-                (sell_order.settlement_preference, sell_order.trader)
-            }
+            SettlementRequester::Buyer => (buy_order.settlement_preference, buy_order.trader),
+            SettlementRequester::Seller => (sell_order.settlement_preference, sell_order.trader),
         };
 
         let fee_bps = fee_calculator.calculate_fee_basis_points(tier);
