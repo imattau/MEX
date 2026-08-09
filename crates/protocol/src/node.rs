@@ -210,6 +210,56 @@ impl HopLatencyMonitor {
     }
 }
 
+// Stage 3: gates the actual CONSEQUENCE of a misconduct report (a
+// reputation penalty via reputation::integration::on_misconduct_reported)
+// behind agreement from multiple DISTINCT reporters, not a single node's
+// word -- Stage 2's cross-witness check already strengthens what ONE
+// node's own report means, but nothing stopped a single node (honest but
+// wrong, or outright malicious) from unilaterally tanking another node's
+// reputation the moment report_misconduct existed. Broadcasting a report
+// is still immediate and ungated (see report_misconduct) -- only whether
+// THIS node treats the accusation as confirmed enough to act on is
+// gated here.
+//
+// Real, acknowledged limit: this has no Sybil resistance. Reporter
+// identity here is just a NodeId with no cost to create or stake behind
+// it, so an adversary controlling multiple identities can manufacture
+// "independent" corroborating reports as cheaply as one. A production
+// version needs reporters to be identities that cost something (stake,
+// registered node identity tied to NodeRegistry) before their vote
+// counts -- out of scope for this prototype, which only validates that
+// quorum-gating the consequence is mechanically sound.
+//
+// Also a real limit worth being honest about: reputation here is
+// per-node local state, not a shared ledger -- different nodes can reach
+// quorum on the same subject at different times (or never), depending
+// on which reports each happens to receive. That's inherent to not
+// having any consensus layer, not a bug in this specific mechanism.
+struct MisconductQuorum {
+    // subject -> (reporter -> last_accusation_time)
+    accusations: HashMap<NodeId, HashMap<NodeId, f64>>,
+    threshold: usize,
+    window_secs: f64,
+}
+
+impl MisconductQuorum {
+    fn new(threshold: usize, window_secs: f64) -> Self {
+        Self { accusations: HashMap::new(), threshold, window_secs }
+    }
+
+    // Records `reporter`'s accusation of `subject` at `now`, expiring any
+    // of that subject's accusations older than window_secs first (so a
+    // handful of stale reports from long ago can't quietly accumulate
+    // into a quorum). Returns (quorum_now_met, distinct_reporter_count).
+    fn record(&mut self, subject: NodeId, reporter: NodeId, now: f64) -> (bool, usize) {
+        let reporters = self.accusations.entry(subject).or_default();
+        reporters.retain(|_, last_seen| now - *last_seen < self.window_secs);
+        reporters.insert(reporter, now);
+        let count = reporters.len();
+        (count >= self.threshold, count)
+    }
+}
+
 pub struct MeshNode {
     pub node_id: NodeId,
     pub region: Region,
@@ -235,6 +285,7 @@ pub struct MeshNode {
     censorship: CensorshipMonitor,
     latency_stats: crate::latency::PeerLatencyStats,
     hop_latency: HopLatencyMonitor,
+    misconduct_quorum: MisconductQuorum,
     // nonce -> when this node sent that Ping, so RTT is computed from
     // this node's own clock on both ends (send and receive of the
     // matching Pong), never from anything the peer claims.
@@ -255,6 +306,10 @@ pub struct MeshNode {
     log_entry_rx: Option<mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)>>,
     misconduct_tx: mpsc::Sender<MisconductEvent>,
     misconduct_rx: Option<mpsc::Receiver<MisconductEvent>>,
+    // Fires (subject) once quorum is actually reached -- see
+    // confirmed_misconduct_receiver's docs.
+    confirmation_tx: mpsc::Sender<NodeId>,
+    confirmation_rx: Option<mpsc::Receiver<NodeId>>,
 }
 
 // A WireMessage::MisconductReport this node received, plus who it
@@ -350,6 +405,7 @@ impl MeshNode {
         let (settlement_tx, settlement_rx) = mpsc::channel(64);
         let (log_entry_tx, log_entry_rx) = mpsc::channel(1024);
         let (misconduct_tx, misconduct_rx) = mpsc::channel(256);
+        let (confirmation_tx, confirmation_rx) = mpsc::channel(256);
 
         Ok(Self {
             node_id: config.node_id,
@@ -364,6 +420,12 @@ impl MeshNode {
             censorship: CensorshipMonitor::new(),
             latency_stats: crate::latency::PeerLatencyStats::new(),
             hop_latency: HopLatencyMonitor::new(),
+            // Threshold=2: this node's own accusation (if it's the one
+            // that detected something, see report_misconduct) plus at
+            // least one independent corroborating report from elsewhere.
+            // Arbitrary for this prototype -- a real deployment would
+            // want this configurable and almost certainly higher.
+            misconduct_quorum: MisconductQuorum::new(2, 60.0),
             pending_pings: HashMap::new(),
             next_ping_nonce: 0,
             artificial_forward_delay_ms: config.artificial_forward_delay_ms.unwrap_or(0),
@@ -378,6 +440,8 @@ impl MeshNode {
             log_entry_rx: Some(log_entry_rx),
             misconduct_tx,
             misconduct_rx: Some(misconduct_rx),
+            confirmation_tx,
+            confirmation_rx: Some(confirmation_rx),
         })
     }
 
@@ -395,12 +459,26 @@ impl MeshNode {
         self.misconduct_rx.take().expect("misconduct_receiver already taken")
     }
 
+    // Fires the subject NodeId once this node's own MisconductQuorum
+    // actually reaches threshold for them -- unlike misconduct_receiver
+    // (every individual accusation, confirmed or not), this only fires
+    // on confirmation. Same take-before-run() rule.
+    pub fn confirmed_misconduct_receiver(&mut self) -> mpsc::Receiver<NodeId> {
+        self.confirmation_rx.take().expect("confirmed_misconduct_receiver already taken")
+    }
+
     // Broadcasts a misconduct report about `subject` to every configured
     // peer -- used both by this node's own CensorshipMonitor (see run())
     // and available to external callers (e.g. a watchtower that detected
     // an invalid settlement proof) via this same method, so both paths
     // produce identical wire messages.
-    pub async fn report_misconduct(&self, subject: NodeId, reason: String) {
+    // &mut self, not &self: broadcasting is still immediate and ungated
+    // (any single detection is worth telling the mesh about), but this
+    // node's own accusation also counts as its first vote toward ITS OWN
+    // quorum for `subject` -- see MisconductQuorum's docs for why the
+    // actual reputation consequence needs more than one voice before
+    // this node treats it as confirmed.
+    pub async fn report_misconduct(&mut self, subject: NodeId, reason: String) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -413,6 +491,24 @@ impl MeshNode {
                 timestamp,
             };
             let _ = self.transport.send(peer_id, msg).await;
+        }
+        self.apply_or_record_accusation(subject, self.node_id, &reason, timestamp);
+    }
+
+    // Shared by report_misconduct's own accusation and every incoming
+    // MisconductReport this node receives (see run()'s
+    // misconduct_internal_rx branch) -- records the vote, and only
+    // applies the real reputation consequence
+    // (reputation::integration::on_misconduct_reported) once
+    // MisconductQuorum says enough distinct reporters agree.
+    fn apply_or_record_accusation(&mut self, subject: NodeId, reporter: NodeId, reason: &str, now: f64) {
+        let (quorum_met, count) = self.misconduct_quorum.record(subject, reporter, now);
+        if quorum_met {
+            tracing::warn!(?subject, reporter_count = count, "misconduct quorum reached, applying reputation consequence");
+            reputation::integration::on_misconduct_reported(&mut self.reputation, subject, reporter, reason);
+            let _ = self.confirmation_tx.try_send(subject);
+        } else {
+            tracing::debug!(?subject, reporter_count = count, threshold = self.misconduct_quorum.threshold, "misconduct accusation recorded, quorum not yet reached");
         }
     }
 
@@ -488,6 +584,11 @@ impl MeshNode {
         // MisconductReport the same way CensorshipMonitor's does).
         let (pong_tx, mut pong_rx) = mpsc::channel::<(NodeId, u64, f64)>(256);
         let (hop_witness_tx, mut hop_witness_rx) = mpsc::channel::<(NodeId, [u8; 32], NodeId, f64)>(1024);
+        // Every incoming MisconductReport is dual-sent: misconduct_tx
+        // (external, unchanged -- e.g. watchtower_node printing it) and
+        // this one, which only the main loop below drains, to run it
+        // through MisconductQuorum and apply_or_record_accusation.
+        let (misconduct_internal_tx, mut misconduct_internal_rx) = mpsc::channel::<MisconductEvent>(256);
 
         let recv_transport = self.transport.clone();
         tokio::spawn(async move {
@@ -534,7 +635,9 @@ impl MeshNode {
                             let _ = log_entry_tx.send((from, entry)).await;
                         }
                         WireMessage::MisconductReport { reporter, subject, reason, timestamp } => {
-                            let _ = misconduct_tx.send(MisconductEvent { from, reporter, subject, reason, timestamp }).await;
+                            let event = MisconductEvent { from, reporter, subject, reason, timestamp };
+                            let _ = misconduct_tx.send(event.clone()).await;
+                            let _ = misconduct_internal_tx.send(event).await;
                         }
                         WireMessage::Ping { nonce, .. } => {
                             // Answered directly here, not routed through
@@ -662,6 +765,10 @@ impl MeshNode {
                         let rtt_ms = arrived_at - sent_at;
                         self.latency_stats.record_rtt(from_peer, rtt_ms);
                     }
+                }
+
+                Some(event) = misconduct_internal_rx.recv() => {
+                    self.apply_or_record_accusation(event.subject, event.reporter, &event.reason, event.timestamp);
                 }
 
                 Some((from_wire, order_id, hop_node, forwarded_at)) = hop_witness_rx.recv() => {
