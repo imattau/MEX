@@ -163,7 +163,7 @@ pub async fn run_order_sequencing_loop(
             Some(agreed_hash) if agreed_hash == my_hash => {
                 metrics::counter!("api.sequencing.batch_confirmed_by_quorum").increment(1);
                 tracing::info!(?batch_key, orders = resolved.len(), "order batch confirmed by cross-node quorum, applying");
-                apply_resolved_batch(&mut guard, resolved);
+                apply_resolved_batch(&mut guard, resolved, &evidence);
             }
             Some(_other_hash) => {
                 // Real divergence -- see this file's docs on why we
@@ -180,13 +180,21 @@ pub async fn run_order_sequencing_loop(
             None => {
                 metrics::counter!("api.sequencing.batch_applied_after_timeout").increment(1);
                 tracing::warn!(?batch_key, orders = resolved.len(), ?quorum_timeout, "order batch quorum not reached in time -- applying this node's own resolution unconfirmed");
-                apply_resolved_batch(&mut guard, resolved);
+                apply_resolved_batch(&mut guard, resolved, &evidence);
             }
         }
     }
 }
 
-fn apply_resolved_batch(guard: &mut AppState, resolved: Vec<[u8; 32]>) {
+// Stage P3c-1: `evidence` is the SAME (witnessing_hop, estimated_origin_
+// time_ms) snapshot the caller already fetched to resolve this batch's
+// order -- reused here as the source of the SHARED match timestamp (see
+// server::apply_accepted_order's docs on why that's what makes
+// independent replicas able to converge). An order with no evidence
+// entry (the rare fallback case -- see this file's docs earlier) gets
+// None, falling back to this node's own wall clock for just that order,
+// same as the non-sequenced path always has.
+fn apply_resolved_batch(guard: &mut AppState, resolved: Vec<[u8; 32]>, evidence: &HashMap<[u8; 32], (NodeId, f64)>) {
     for order_id in resolved {
         let Some((order, receipt)) = guard.pending_order_data.remove(&order_id) else {
             // Genuinely shouldn't happen -- every order_id here came
@@ -197,8 +205,9 @@ fn apply_resolved_batch(guard: &mut AppState, resolved: Vec<[u8; 32]>) {
             tracing::warn!(?order_id, "order sequencing loop: resolved order_id had no pending data");
             continue;
         };
+        let match_timestamp_us = evidence.get(&order_id).map(|(_, estimate_ms)| (estimate_ms * 1000.0) as u64);
         let start = Instant::now();
-        let matches = apply_accepted_order(guard, order, receipt);
+        let matches = apply_accepted_order(guard, order, receipt, match_timestamp_us);
         metrics::counter!("api.orders.matched").increment(matches.len() as u64);
         metrics::histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
         if matches.is_empty() {

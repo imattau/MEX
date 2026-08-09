@@ -271,7 +271,7 @@ async fn submit_order(
         });
     }
 
-    let matches = apply_accepted_order(&mut guard, order, receipt.clone());
+    let matches = apply_accepted_order(&mut guard, order, receipt.clone(), None);
     counter!("api.orders.matched").increment(matches.len() as u64);
     histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
 
@@ -300,7 +300,21 @@ async fn submit_order(
 // log-entry broadcast below is spawned, not awaited, for exactly that
 // reason -- see its own comment) so it's safe to call from either a sync
 // HTTP handler body or an async loop that reacquires the lock per call.
-pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: OrderReceipt) -> Vec<Match> {
+//
+// Stage P3c-1: `match_timestamp_us`, when Some, is passed straight
+// through to engine::OrderBook::add_order_at instead of letting
+// add_order stamp its own wall clock -- see add_order_at's own docs for
+// why that's the actual prerequisite for independent replicas ever
+// producing identical Match output. The non-sequenced immediate path
+// (submit_order's fallback when order-sequencing is disabled) passes
+// None: there's only ever one applying node in that mode, so there's no
+// replica to converge with and no shared timestamp to source. The
+// sequencing flush loop passes Some(the order's network-time-evidence-
+// derived estimate) when available, falling back to None (this node's
+// own wall clock) only for an order that reached this point with no
+// evidence at all -- consistent with every other "no evidence" fallback
+// in this pipeline (see sequencer::OrderSequencer's docs).
+pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: OrderReceipt, match_timestamp_us: Option<u64>) -> Vec<Match> {
     let log_entry = guard.order_log.append(receipt.clone()).clone();
 
     if let Some(mesh) = &guard.mesh {
@@ -337,7 +351,10 @@ pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: 
         });
     }
 
-    let matches = guard.order_book.add_order(order);
+    let matches = match match_timestamp_us {
+        Some(t) => guard.order_book.add_order_at(order, t),
+        None => guard.order_book.add_order(order),
+    };
 
     for m in &matches {
         guard.match_log.append(m.clone());

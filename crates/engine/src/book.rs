@@ -62,7 +62,43 @@ impl OrderBook {
         node
     }
 
-    pub fn add_order(&mut self, mut order: Order) -> Vec<Match> {
+    // Reads this process's own wall clock for the match timestamp --
+    // fine for a single, standalone matcher, but see add_order_at's docs
+    // for why that's NOT safe once multiple independent replicas need to
+    // apply the identical order sequence and produce identical output.
+    pub fn add_order(&mut self, order: Order) -> Vec<Match> {
+        let timestamp_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        self.add_order_at(order, timestamp_us)
+    }
+
+    // Stage P3c-1: same matching logic as add_order, but the caller
+    // supplies the timestamp instead of this reading its own wall clock.
+    // The matching DECISIONS themselves (bids/asks are BTreeMap<u64,
+    // Vec<Order>> -- deterministic price ordering, FIFO within a price
+    // level) are already safe to replicate given identical input order,
+    // which the mesh's quorum-confirmed batch resolution (see
+    // protocol::batch_quorum) already guarantees. But timestamp_us and
+    // the settlement_deadline derived from it were being stamped from
+    // SystemTime::now() INSIDE add_order -- meaning two replicas
+    // applying the exact same agreed order sequence at slightly
+    // different real moments would still produce DIFFERENT Match
+    // content (different hash, different settlement deadline) purely
+    // from wall-clock skew at apply time. That defeats replication
+    // before it starts: there'd be no way to confirm two replicas
+    // actually converged, and settlement_deadline is consequential
+    // (slashing timing), not just a hash cosmetic.
+    //
+    // The natural shared timestamp source is network-time evidence
+    // (protocol::ordering::OriginTimeEstimator) -- the same mechanism
+    // Stage O1 already proved lets independent nodes converge on timing
+    // without coordinating -- but this method takes a bare u64 rather
+    // than depending on protocol directly: engine has no reason to know
+    // where the timestamp came from, only that it must be the SAME
+    // value on every replica for the same order.
+    pub fn add_order_at(&mut self, mut order: Order, timestamp_us: u64) -> Vec<Match> {
         if order.amount == 0 {
             return Vec::new();
         }
@@ -74,10 +110,6 @@ impl OrderBook {
         }
 
         let mut matches = Vec::new();
-        let timestamp_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
         let now_secs = timestamp_us / 1_000_000;
 
         match order.side {

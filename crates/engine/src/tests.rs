@@ -300,4 +300,61 @@ mod tests {
         assert_eq!(matches[0].assigned_node, node_a);
         assert_eq!(matches[1].assigned_node, node_b);
     }
+
+    // Stage P3c-1: the actual property multiple independent replicas
+    // depend on -- two SEPARATE, freshly-constructed OrderBook instances
+    // (standing in for two independent nodes with no shared state),
+    // given the identical order sequence AND identical injected
+    // timestamps via add_order_at, must produce byte-identical Match
+    // output. This is what makes "agree on order, then each replica
+    // deterministically replays matching locally" a sound design instead
+    // of just a hopeful assumption -- see this module's docs on the real
+    // SystemTime::now() bug this replaces.
+    #[test]
+    fn test_add_order_at_produces_identical_matches_across_separate_replicas() {
+        let t1 = 1_700_000_000_000_000u64;
+        let t2 = 1_700_000_000_100_000u64; // a different, later "same order's" timestamp
+
+        let mut replica_a = OrderBook::new("ETH-USD".to_string());
+        replica_a.add_order_at(create_test_order(1, OrderSide::Buy, 3000, 10), t1);
+        let matches_a = replica_a.add_order_at(create_test_order(2, OrderSide::Sell, 3000, 10), t2);
+
+        let mut replica_b = OrderBook::new("ETH-USD".to_string());
+        replica_b.add_order_at(create_test_order(1, OrderSide::Buy, 3000, 10), t1);
+        let matches_b = replica_b.add_order_at(create_test_order(2, OrderSide::Sell, 3000, 10), t2);
+
+        assert_eq!(matches_a.len(), 1);
+        assert_eq!(matches_a.len(), matches_b.len());
+        assert_eq!(matches_a[0].timestamp_us, matches_b[0].timestamp_us, "two replicas given the SAME injected timestamp must produce the SAME Match.timestamp_us");
+        assert_eq!(matches_a[0].settlement_deadline, matches_b[0].settlement_deadline, "settlement_deadline is derived from the injected timestamp -- must match across replicas too, not just be incidentally equal");
+        assert_eq!(matches_a[0].maker_order_id, matches_b[0].maker_order_id);
+        assert_eq!(matches_a[0].taker_order_id, matches_b[0].taker_order_id);
+        assert_eq!(matches_a[0].price, matches_b[0].price);
+        assert_eq!(matches_a[0].amount, matches_b[0].amount);
+    }
+
+    // Backward-compatibility regression check: plain add_order (still
+    // used by every existing caller that doesn't need cross-replica
+    // determinism -- tests, the simulator, agent-sim, etc.) must keep
+    // stamping a real wall-clock timestamp exactly as it always did, not
+    // silently start returning 0 or some other placeholder now that the
+    // actual timestamp logic has moved into add_order_at.
+    #[test]
+    fn test_plain_add_order_still_stamps_a_real_wall_clock_timestamp() {
+        let before_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let mut book = OrderBook::new("ETH-USD".to_string());
+        book.add_order(create_test_order(1, OrderSide::Buy, 3000, 10));
+        let matches = book.add_order(create_test_order(2, OrderSide::Sell, 3000, 10));
+        let after_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        assert!(
+            matches[0].timestamp_us >= before_us && matches[0].timestamp_us <= after_us,
+            "add_order's timestamp must fall within the real wall-clock window this test ran in"
+        );
+    }
 }
