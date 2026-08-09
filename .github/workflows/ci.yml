@@ -32,13 +32,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # crates/rdma's build.rs probes for libibverbs at build time and
-      # falls back to a mock automatically if it's absent (see the
-      # crate's own build.rs) -- this step is a speed/coverage
-      # optimization, not a hard requirement.
-      - name: Install libibverbs (optional, for crates/rdma real backend)
-        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
-
+      # Deliberately NOT installing libibverbs-dev here: crates/rdma's
+      # build.rs probes for it and, if present, compiles in the real
+      # soft-RDMA backend AND its test (test_soft_rdma_self_read, gated
+      # on cfg(soft_rdma_available)) -- which needs actual loopback RDMA
+      # (soft-RoCE/rxe kernel module) to pass, not just the userspace
+      # library. A generic GitHub Actions runner has the library
+      # installable but not that kernel support, so installing it here
+      # made this job fail for real (confirmed: it did, see run
+      # 31315852768). Leaving it uninstalled keeps build.rs on its
+      # documented mock fallback, which this job CAN actually verify.
       - name: cargo fmt --check
         run: cargo fmt --check
 
