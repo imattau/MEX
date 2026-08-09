@@ -76,6 +76,23 @@
 //                            old any-NodeId-counts behavior exactly.
 //   MEX_MESH_CHAIN_STATUS_POLL_SECS  Optional, only used if
 //                            MEX_MESH_REQUIRE_STAKE is set. Defaults 30.
+//   MEX_ORDER_SEQUENCING_WINDOW_MS  Optional, requires MEX_MESH_NODE_ID
+//                            to also be set (order-sequencing needs real
+//                            network-time evidence, which requires a
+//                            mesh). When set, submit_order no longer
+//                            applies orders immediately -- it queues them
+//                            and acks right away (SubmitOrderResponse.
+//                            pending = true, matches always empty), and a
+//                            background loop flushes every window_ms,
+//                            resolving true order from real propagation
+//                            evidence (see protocol::OrderSequencer) and
+//                            applying orders in THAT order instead of
+//                            raw HTTP arrival order. Real match results
+//                            arrive asynchronously over the existing
+//                            websocket (ws_broadcast). Unset (default) =
+//                            every order applied and matched
+//                            synchronously, exactly as before this
+//                            existed -- no behavior change.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -287,6 +304,7 @@ async fn main() {
             let transport = mesh_node.transport();
             let peer_ids = mesh_node.peer_ids();
             let chain_status_tx = mesh_node.chain_status_sender();
+            let earliest_witness_query_tx = mesh_node.earliest_witness_query_sender();
 
             if require_staked_reporters {
                 let chain_status_poll_secs: u64 = std::env::var("MEX_MESH_CHAIN_STATUS_POLL_SECS")
@@ -306,10 +324,26 @@ async fn main() {
 
             tokio::spawn(mesh_node.run());
             tracing::info!(mesh_node_id, %listen_addr, require_staked_reporters, "gossip mesh enabled");
-            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx })
+            Some(MeshHandle { node_id: common::NodeId(mesh_node_id), region, sender, transport, peer_ids, chain_status_tx, earliest_witness_query_tx })
         }
         Err(_) => None,
     };
+
+    // Stage P2: order-sequencing requires a mesh (there's no network-time
+    // evidence to sequence by without one) -- required, not silently
+    // ignored, if set without one, since that would look like sequencing
+    // is active when every order is actually still applied immediately.
+    let order_sequencing_window_ms: Option<u64> = std::env::var("MEX_ORDER_SEQUENCING_WINDOW_MS")
+        .ok()
+        .map(|s| s.parse().unwrap_or_else(|e| {
+            eprintln!("MEX_ORDER_SEQUENCING_WINDOW_MS is not a valid u64: {e}");
+            std::process::exit(1);
+        }));
+    if order_sequencing_window_ms.is_some() && mesh.is_none() {
+        eprintln!("MEX_ORDER_SEQUENCING_WINDOW_MS is set but no mesh is configured (MEX_MESH_NODE_ID unset) -- order-sequencing needs real network-time evidence, which requires a mesh. Set MEX_MESH_NODE_ID or unset MEX_ORDER_SEQUENCING_WINDOW_MS.");
+        std::process::exit(1);
+    }
+    let order_sequencer = order_sequencing_window_ms.map(|_| protocol::OrderSequencer::new());
 
     let (ws_broadcast, _) = tokio::sync::broadcast::channel(1024);
     let state = Arc::new(RwLock::new(AppState {
@@ -325,7 +359,25 @@ async fn main() {
         order_log: orderlog::HashChainLog::new(),
         match_log: orderlog::HashChainLog::new(),
         mesh,
+        order_sequencer,
+        pending_order_data: std::collections::HashMap::new(),
     }));
+
+    if let Some(window_ms) = order_sequencing_window_ms {
+        // mesh.is_some() was already enforced above, so the MeshHandle
+        // built inside the match arm above is available here via
+        // state.mesh -- but that's already moved into `state`. Re-derive
+        // the witness sender from state instead of holding a second
+        // separate clone through the branch above: simpler to read
+        // straight off the constructed AppState.
+        let witness_query_tx = state.read().unwrap().mesh.as_ref().unwrap().earliest_witness_query_tx.clone();
+        tokio::spawn(api::run_order_sequencing_loop(
+            Arc::clone(&state),
+            Duration::from_millis(window_ms),
+            witness_query_tx,
+        ));
+        tracing::info!(window_ms, "order sequencing enabled");
+    }
 
     let settlement_config = SettlementConfig {
         rpc_url: rpc_url.clone(),

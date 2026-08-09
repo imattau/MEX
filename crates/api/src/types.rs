@@ -30,6 +30,16 @@ pub struct SubmitOrderResponse {
     // (rejected orders never entered the book, so there's nothing
     // ordering-sensitive to attest to).
     pub receipt: Option<OrderReceipt>,
+    // Stage P2: true when order-sequencing (network-time-ordered
+    // batching, see api::order_sequencing) is enabled and this order was
+    // accepted but not yet applied -- `matches` is always empty in that
+    // case, not because nothing matched, but because matching hasn't
+    // happened yet. Real results arrive asynchronously over the
+    // existing ws_broadcast websocket once this order's flush window
+    // closes. Always false on the non-sequenced path (default,
+    // unchanged): that path still applies and returns matches
+    // synchronously, exactly as before this stage existed.
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

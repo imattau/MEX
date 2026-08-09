@@ -28,6 +28,8 @@ mod tests {
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
             mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
         }))
     }
 
@@ -154,6 +156,8 @@ mod tests {
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
             mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
         }));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -291,6 +295,8 @@ mod tests {
             order_log: orderlog::HashChainLog::new(),
             match_log: orderlog::HashChainLog::new(),
             mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
         }));
         let state_for_inspection = Arc::clone(&state);
         let app = app(state);

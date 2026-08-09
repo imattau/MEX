@@ -93,6 +93,23 @@ pub struct AppState {
     // independently (see the conversation this was scoped in for why
     // that's a deliberately separate, harder problem).
     pub mesh: Option<MeshHandle>,
+    // Stage P2: None (default, no behavior change) means submit_order
+    // applies every order immediately and synchronously, exactly as
+    // before this stage existed. Some means submit_order instead queues
+    // (order_id, receipt-signed order) here and acks immediately;
+    // order_sequencing::run_order_sequencing_loop periodically drains
+    // this, resolves true order from real network-time evidence, and
+    // applies each order via apply_accepted_order in THAT order. Only
+    // meaningful (and only ever constructed) alongside a configured
+    // mesh -- there's no network-time evidence to sequence by without
+    // one.
+    pub order_sequencer: Option<protocol::OrderSequencer>,
+    // Holds each queued order's already-signed receipt (see
+    // orderlog's docs on why signing must happen at submission time,
+    // before matching, not deferred to flush time) until
+    // run_order_sequencing_loop applies it. Only populated when
+    // order_sequencer is Some.
+    pub pending_order_data: HashMap<[u8; 32], (Order, OrderReceipt)>,
 }
 
 pub struct MeshHandle {
@@ -112,6 +129,11 @@ pub struct MeshHandle {
     // (require_staked_reporters) after run() has already taken ownership
     // of the MeshNode -- see MeshNode::chain_status_sender's docs.
     pub chain_status_tx: mpsc::Sender<std::collections::HashMap<[u8; 32], protocol::ChainNodeStatus>>,
+    // Stage P2: lets the order-sequencing flush loop (order_sequencing.rs)
+    // ask the running mesh node for a (witnessing_hop, estimate_ms)
+    // snapshot per pending order_id -- see
+    // protocol::MeshNode::earliest_witness_query_sender's docs.
+    pub earliest_witness_query_tx: mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(common::NodeId, f64)>>)>,
 }
 
 fn setup_metrics() {
@@ -199,12 +221,16 @@ async fn submit_order(
             matches: Vec::new(),
             error: Some("Invalid order signature".to_string()),
             receipt: None,
+            pending: false,
         });
     }
 
     // Signed BEFORE add_order runs -- see orderlog's docs for why this
     // ordering is the entire point: signing after matching would let the
     // timestamp be chosen to fit whatever match order already happened.
+    // Signing happens HERE regardless of whether order-sequencing is
+    // enabled below -- the anti-grinding property this comment describes
+    // must hold either way, so this can't be deferred to flush time.
     let receipt = orderlog::sign_receipt(
         &guard.receipt_signing_key,
         order.id,
@@ -218,6 +244,57 @@ async fn submit_order(
         order.settlement_preference,
         order.settlement_requester,
     );
+
+    // Stage P2: order-sequencing enabled -- queue instead of applying
+    // immediately, and ack right away rather than blocking this HTTP
+    // response for the whole flush window (see order_sequencing.rs's
+    // docs for why). Real match results arrive over ws_broadcast once
+    // order_sequencing::run_order_sequencing_loop applies this order.
+    if let Some(sequencer) = guard.order_sequencer.as_mut() {
+        sequencer.add(order.id);
+        guard.pending_order_data.insert(order.id, (order, receipt.clone()));
+        counter!("api.orders.queued_for_sequencing").increment(1);
+        debug!(order_id = ?order_id, "order queued for network-time sequencing");
+        return Json(SubmitOrderResponse {
+            success: true,
+            order_id,
+            matches: Vec::new(),
+            error: None,
+            receipt: Some(receipt),
+            pending: true,
+        });
+    }
+
+    let matches = apply_accepted_order(&mut guard, order, receipt.clone());
+    counter!("api.orders.matched").increment(matches.len() as u64);
+    histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
+
+    if matches.is_empty() {
+        debug!(order_id = ?order_id, symbol = %payload.symbol, "Order added to book with no matches");
+    } else {
+        info!(matches = matches.len(), "Order matched successfully");
+    }
+
+    Json(SubmitOrderResponse {
+        success: true,
+        order_id,
+        matches,
+        error: None,
+        receipt: Some(receipt),
+        pending: false,
+    })
+}
+
+// Shared between submit_order's immediate (non-sequenced) path and
+// order_sequencing::run_order_sequencing_loop's per-order application in
+// resolved order -- everything submit_order used to do inline after
+// signing a receipt: commit it to order_log, flood it to the mesh, run
+// matching, and record the results. `guard` must already be a write
+// lock the caller holds; this never awaits while holding it (the mesh
+// log-entry broadcast below is spawned, not awaited, for exactly that
+// reason -- see its own comment) so it's safe to call from either a sync
+// HTTP handler body or an async loop that reacquires the lock per call.
+pub(crate) fn apply_accepted_order(guard: &mut AppState, order: Order, receipt: OrderReceipt) -> Vec<Match> {
     let log_entry = guard.order_log.append(receipt.clone()).clone();
 
     if let Some(mesh) = &guard.mesh {
@@ -241,9 +318,9 @@ async fn submit_order(
         // really is this sequencer's next entry, not just gossip that an
         // order existed at some point -- see
         // protocol::WireMessage::LogEntryBroadcast's docs. Spawned
-        // rather than awaited here: this function holds a std::sync
-        // RwLock write guard (`guard`) for the rest of its body, and
-        // that must never be held across an .await.
+        // rather than awaited here: the caller may be holding a
+        // std::sync RwLock write guard, and that must never be held
+        // across an .await.
         let transport = mesh.transport.clone();
         let peer_ids = mesh.peer_ids.clone();
         tokio::spawn(async move {
@@ -255,8 +332,6 @@ async fn submit_order(
     }
 
     let matches = guard.order_book.add_order(order);
-    counter!("api.orders.matched").increment(matches.len() as u64);
-    histogram!("api.orders.match_latency_us").record(start.elapsed().as_micros() as f64);
 
     for m in &matches {
         guard.match_log.append(m.clone());
@@ -280,19 +355,7 @@ async fn submit_order(
     gauge!("orderbook.bids.depth").set(guard.order_book.bids.len() as f64);
     gauge!("orderbook.asks.depth").set(guard.order_book.asks.len() as f64);
 
-    if matches.is_empty() {
-        debug!(order_id = ?order_id, symbol = %payload.symbol, "Order added to book with no matches");
-    } else {
-        info!(matches = matches.len(), "Order matched successfully");
-    }
-
-    Json(SubmitOrderResponse {
-        success: true,
-        order_id,
-        matches,
-        error: None,
-        receipt: Some(receipt),
-    })
+    matches
 }
 
 #[instrument(skip(state))]
