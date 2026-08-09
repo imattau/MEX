@@ -18,6 +18,7 @@ use batcher::SettlementBatcher;
 use common::Order;
 use ed25519_dalek::SigningKey;
 use engine::{Match, OrderBook};
+use governor::{DefaultKeyedRateLimiter, Quota};
 use metrics::{counter, gauge, histogram};
 use orderlog::{HashChainLog, LogEntry, OrderReceipt};
 use std::collections::HashMap;
@@ -55,6 +56,82 @@ async fn check_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
+}
+
+// Per-client-IP rate limiting on the write endpoints (submit_order,
+// confirm_committed) -- the ones that trigger real cost (signature
+// verification, WAL fsync, mesh flood). Read endpoints and the
+// WebSocket upgrades are deliberately NOT covered -- see
+// build_write_routes's own docs on why, and where this is actually
+// applied. A plain middleware::from_fn, the same pattern check_auth
+// already uses, rather than a tower Layer crate: tower_governor (the
+// obvious off-the-shelf choice) hard-requires its own "axum" cargo
+// feature to satisfy a compile-time trait bound on its Service impl,
+// and that feature is tied to axum 0.8 -- a different major version
+// than this app's axum 0.7, which can't be reconciled without a
+// pervasive newtype wrapper around every handler's response body. Using
+// the underlying `governor` rate-limiting crate directly, as one more
+// ordinary async fn middleware, avoids that entirely.
+static RATE_LIMITER: OnceLock<DefaultKeyedRateLimiter<std::net::IpAddr>> = OnceLock::new();
+
+fn rate_limiter() -> &'static DefaultKeyedRateLimiter<std::net::IpAddr> {
+    RATE_LIMITER.get_or_init(|| {
+        let per_sec = std::env::var("MEX_RATE_LIMIT_PER_SEC")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n: &u32| n > 0)
+            .unwrap_or(10);
+        let burst = std::env::var("MEX_RATE_LIMIT_BURST")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n: &u32| n > 0)
+            .unwrap_or(20);
+        // unwrap: per_sec/burst are both guaranteed > 0 by the filters
+        // above, so NonZeroU32::new can't fail here.
+        let quota = Quota::per_second(std::num::NonZeroU32::new(per_sec).unwrap())
+            .allow_burst(std::num::NonZeroU32::new(burst).unwrap());
+        DefaultKeyedRateLimiter::keyed(quota)
+    })
+}
+
+// Reads axum::extract::ConnectInfo<SocketAddr> from the request --
+// populated only if this app is served via
+// into_make_service_with_connect_info::<SocketAddr>() (see main.rs).
+// Deliberately does NOT trust X-Forwarded-For/X-Real-IP/Forwarded
+// headers: those are only meaningful behind a specific trusted reverse
+// proxy, and blindly trusting caller-supplied headers here would let
+// any client just set its own IP and evade the limit entirely. A real
+// deployment behind a trusted proxy that strips/overwrites those
+// headers before they reach this process would need different logic --
+// not implemented here, since this codebase has no such proxy-trust
+// configuration yet. A request with no ConnectInfo at all (shouldn't
+// happen once main.rs is wired correctly, see its own comment) fails
+// CLOSED -- rejected, not silently let through unthrottled.
+async fn rate_limit_by_client_ip(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let ip = addr.ip();
+    match rate_limiter().check_key(&ip) {
+        Ok(_) => Ok(next.run(request).await),
+        Err(_) => {
+            warn!(%ip, "rate limit exceeded on a write endpoint");
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        }
+    }
+}
+
+// The two endpoints rate limiting actually applies to, as their own
+// sub-router with the rate-limit middleware as a route_layer --
+// route_layer only covers routes already added to THIS router, so
+// merging it into the main one (see app()) leaves every other route
+// (reads, WebSocket upgrades, /metrics) completely unaffected by it.
+fn build_write_routes() -> Router<Arc<RwLock<AppState>>> {
+    Router::new()
+        .route("/api/v1/order", post(submit_order))
+        .route("/api/v1/trade/committed", post(confirm_committed))
+        .route_layer(middleware::from_fn(rate_limit_by_client_ip))
 }
 
 pub struct AppState {
@@ -189,9 +266,8 @@ pub fn app(state: Arc<RwLock<AppState>>) -> Router {
     setup_metrics();
 
     Router::new()
-        .route("/api/v1/order", post(submit_order))
+        .merge(build_write_routes())
         .route("/api/v1/orderbook", get(get_orderbook))
-        .route("/api/v1/trade/committed", post(confirm_committed))
         .route("/api/v1/order_log/root", get(order_log_root))
         .route("/api/v1/order_log/entries", get(order_log_entries))
         .route("/api/v1/match_log/root", get(match_log_root))

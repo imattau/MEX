@@ -217,7 +217,12 @@ async fn test_witness_corroboration_gets_batch_applied_well_before_quorum_timeou
     let http_addr = listener.local_addr().unwrap();
     let axum_app = app(state);
     tokio::spawn(async move {
-        axum::serve(listener, axum_app).await.unwrap();
+        axum::serve(
+            listener,
+            axum_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Let real Ping/Pong establish latency baselines (server<->external,

@@ -184,6 +184,31 @@
 //                             on-disk archive growth, which is
 //                             unavoidable if order_log/match_log are to
 //                             remain a genuinely complete audit trail.
+//   MEX_RATE_LIMIT_PER_SEC   Optional, defaults to 10. Sustained
+//                             requests-per-second allowed per client IP
+//                             on the write endpoints only (POST
+//                             /api/v1/order, POST
+//                             /api/v1/trade/committed) -- see
+//                             server::rate_limit_by_client_ip. Read
+//                             endpoints, /metrics, and the WebSocket
+//                             upgrade routes are never rate limited by
+//                             this. Keyed by real client IP
+//                             (ConnectInfo, requires this binary's own
+//                             into_make_service_with_connect_info call,
+//                             already wired up) -- NOT by
+//                             X-Forwarded-For/X-Real-IP/Forwarded
+//                             headers, so a deployment behind a reverse
+//                             proxy would rate-limit the proxy's IP,
+//                             not the real end client, unless/until a
+//                             trusted-proxy-aware extractor is added.
+//                             Per-trader (rather than per-IP) limiting
+//                             isn't implemented either -- this codebase
+//                             doesn't yet have per-trader auth to key
+//                             on (see MEX_API_KEY's own docs: a single
+//                             shared key today).
+//   MEX_RATE_LIMIT_BURST     Optional, defaults to 20. Burst capacity
+//                             above the sustained per-second rate,
+//                             same scope as MEX_RATE_LIMIT_PER_SEC.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -648,5 +673,14 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
     tracing::info!(%addr, %symbol, fee_base_gas_price, fee_batch_utilization, fee_volatility_index, %receipt_pubkey_hex, "MEX API server starting");
-    axum::serve(listener, router).await.unwrap();
+    // with_connect_info is what makes the real client IP available to
+    // the per-IP rate limiter on the write endpoints (see server.rs's
+    // ClientIpKeyExtractor) -- without it, ConnectInfo<SocketAddr> is
+    // never inserted into a request's extensions at all.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

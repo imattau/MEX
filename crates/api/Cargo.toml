@@ -29,6 +29,7 @@ tracing-subscriber = "0.3.23"
 ed25519-dalek = "2"
 rand = "0.8"
 sled = "0.34"
+governor = "0.10.4"
 
 [dev-dependencies]
 futures-util = "0.3.33"

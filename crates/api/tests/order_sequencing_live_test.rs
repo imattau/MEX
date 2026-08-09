@@ -187,7 +187,12 @@ async fn test_sequenced_submission_acks_immediately_and_match_arrives_async_over
     let http_addr = listener.local_addr().unwrap();
     let axum_app = app(state);
     tokio::spawn(async move {
-        axum::serve(listener, axum_app).await.unwrap();
+        axum::serve(
+            listener,
+            axum_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Let real Ping/Pong establish the server mesh node's baseline to

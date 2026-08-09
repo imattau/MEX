@@ -13,6 +13,27 @@ mod tests {
     use tower::ServiceExt;
     use validation::OrderValidator;
 
+    // The rate limiter behind /api/v1/order and /api/v1/trade/committed
+    // (server::rate_limiter) is a single process-global static, shared
+    // by every test in this binary. A fake ConnectInfo is required on
+    // every .oneshot() request to those routes (see server::
+    // rate_limit_by_client_ip's own docs on why it's needed at all) --
+    // using the SAME fake IP everywhere would make unrelated tests
+    // silently share one rate-limit bucket and intermittently 429 each
+    // other depending on run order/parallelism. A fresh IP per call
+    // sidesteps that entirely, deterministically, regardless of how
+    // many tests exist or how they're scheduled.
+    static NEXT_TEST_CLIENT_IP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+    fn fake_connect_info() -> axum::extract::ConnectInfo<std::net::SocketAddr> {
+        let n = NEXT_TEST_CLIENT_IP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let octets = n.to_be_bytes();
+        axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [octets[0], octets[1], octets[2], octets[3]],
+            8080,
+        )))
+    }
+
     fn test_state() -> Arc<RwLock<AppState>> {
         let (tx, _) = broadcast::channel(100);
         Arc::new(RwLock::new(AppState {
@@ -45,6 +66,7 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/orderbook")
                     .header("X-API-Key", "dev-default-key")
+                    .extension(fake_connect_info())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -87,6 +109,7 @@ mod tests {
                     .uri("/api/v1/order")
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .header("X-API-Key", "dev-default-key")
+                    .extension(fake_connect_info())
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -175,7 +198,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let app = app(state);
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
 
         let mut csprng = OsRng;
@@ -390,6 +418,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -435,6 +464,7 @@ mod tests {
                     .uri("/api/v1/trade/committed")
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .header("X-API-Key", "dev-default-key")
+                    .extension(fake_connect_info())
                     .body(Body::from(serde_json::to_vec(&confirm_body).unwrap()))
                     .unwrap(),
             )
@@ -479,6 +509,7 @@ mod tests {
                     .uri("/api/v1/trade/committed")
                     .header(http::header::CONTENT_TYPE, "application/json")
                     .header("X-API-Key", "dev-default-key")
+                    .extension(fake_connect_info())
                     .body(Body::from(serde_json::to_vec(&confirm_body).unwrap()))
                     .unwrap(),
             )
@@ -557,6 +588,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -740,6 +772,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -769,6 +802,7 @@ mod tests {
                         .uri("/api/v1/trade/committed")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
                 )
@@ -995,6 +1029,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -1173,6 +1208,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -1202,6 +1238,7 @@ mod tests {
                         .uri("/api/v1/trade/committed")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
                 )
@@ -1425,6 +1462,7 @@ mod tests {
                         .uri("/api/v1/order")
                         .header(http::header::CONTENT_TYPE, "application/json")
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::from(serde_json::to_vec(body).unwrap()))
                         .unwrap(),
                 )
@@ -1508,6 +1546,7 @@ mod tests {
                     Request::builder()
                         .uri(uri)
                         .header("X-API-Key", "dev-default-key")
+                        .extension(fake_connect_info())
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -1560,5 +1599,94 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(match_entries_resp.len(), 3);
         assert!(orderlog::verify_chain(&match_entries_resp));
+    }
+
+    // Rate-limit live validation: a burst of write requests from ONE
+    // client IP past the configured limit must start getting 429s, a
+    // DIFFERENT client IP must be completely unaffected (its own
+    // separate bucket), and a read endpoint must never be throttled at
+    // all regardless of how exhausted the same IP's write budget is --
+    // see server::rate_limit_by_client_ip's own docs on why reads and
+    // WebSocket upgrades are deliberately outside this layer.
+    #[tokio::test]
+    async fn test_write_endpoints_are_rate_limited_per_client_ip() {
+        let state = test_state();
+        let app = app(state);
+
+        fn invalid_order_request(
+            connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+        ) -> Request<Body> {
+            let req = SubmitOrderRequest {
+                trader: [0u8; 32],
+                symbol: "ETH-USD".to_string(),
+                side: OrderSide::Buy,
+                price: 3000,
+                amount: 5,
+                signature: vec![0u8; 64],
+                nonce: 1,
+                expiry: 0,
+                settlement_preference: Default::default(),
+                settlement_requester: Default::default(),
+            };
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/api/v1/order")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header("X-API-Key", "dev-default-key")
+                .extension(connect_info)
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap()
+        }
+
+        // Default burst is 20 (MEX_RATE_LIMIT_BURST unset in this test
+        // process) -- 30 rapid requests from the SAME IP must produce
+        // at least one 429 once that budget is exhausted.
+        let busy_ip = fake_connect_info();
+        let mut saw_too_many_requests = false;
+        for _ in 0..30 {
+            let response = app
+                .clone()
+                .oneshot(invalid_order_request(busy_ip))
+                .await
+                .unwrap();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_too_many_requests = true;
+                break;
+            }
+        }
+        assert!(
+            saw_too_many_requests,
+            "30 rapid requests from one IP must eventually hit the rate limit"
+        );
+
+        // A different IP must have its own, unaffected budget.
+        let other_ip = fake_connect_info();
+        let response = app
+            .clone()
+            .oneshot(invalid_order_request(other_ip))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a different client IP must not share the exhausted IP's rate-limit bucket"
+        );
+
+        // The same, now-throttled IP must still be able to read --
+        // GET endpoints are outside the rate-limited sub-router
+        // entirely.
+        let read_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbook")
+                    .header("X-API-Key", "dev-default-key")
+                    .extension(busy_ip)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_response.status(), StatusCode::OK, "read endpoints must never be rate limited, even for an IP whose write budget is exhausted");
     }
 }
