@@ -104,6 +104,7 @@ async fn test_flood_forwarding_over_udp() {
         mesh_encryption_key: None,
         schedule: None,
         artificial_forward_delay_ms: None,
+        require_staked_reporters: false,
     })
     .await
     .unwrap();

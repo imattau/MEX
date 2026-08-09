@@ -134,6 +134,21 @@ impl UdpTransport {
         self.peer_keys.insert(node_id, pubkey);
     }
 
+    // The pubkey pinned for `node_id` at register_peer time -- the same
+    // value SignedHeartbeat verification checks against. Exposed so
+    // callers (see MeshNode::peer_pubkey) can resolve a mesh NodeId to
+    // the chain-native identity NodeRegistry actually tracks, without
+    // duplicating this map. [0u8; 32] (the "no key configured" sentinel
+    // used throughout this crate, e.g. tests that pass `[0u8; 32]` to
+    // register_peer) is returned as None, not Some([0; 32]), since it
+    // was never a real key to begin with.
+    pub fn peer_pubkey(&self, node_id: NodeId) -> Option<[u8; 32]> {
+        match self.peer_keys.get(&node_id) {
+            Some(key) if *key != [0u8; 32] => Some(*key),
+            _ => None,
+        }
+    }
+
     pub fn sign_heartbeat(&self, node_id: NodeId, timestamp: f64) -> Vec<u8> {
         if let Some(ref seed) = self.node_private_key {
             use ed25519_dalek::Signer;

@@ -81,6 +81,7 @@ async fn spawn_node(
         max_missed_heartbeats: 100,
         schedule: None,
         artificial_forward_delay_ms,
+        require_staked_reporters: false,
     })
     .await
     .unwrap()

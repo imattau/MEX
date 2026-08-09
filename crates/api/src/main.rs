@@ -210,6 +210,7 @@ async fn main() {
                 max_missed_heartbeats: 10,
                 schedule: None,
                 artificial_forward_delay_ms: None,
+                require_staked_reporters: false,
             })
             .await
             .unwrap_or_else(|e| {

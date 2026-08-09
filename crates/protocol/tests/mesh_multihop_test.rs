@@ -87,6 +87,7 @@ async fn test_multi_hop_forwarding_across_three_real_relay_nodes() {
             mesh_encryption_key: None,
             schedule: None,
             artificial_forward_delay_ms: None,
+            require_staked_reporters: false,
         })
         .await
         .unwrap();
@@ -154,6 +155,7 @@ async fn test_down_relay_silently_breaks_downstream_propagation() {
             mesh_encryption_key: None,
             schedule: None,
             artificial_forward_delay_ms: None,
+            require_staked_reporters: false,
         })
         .await
         .unwrap();

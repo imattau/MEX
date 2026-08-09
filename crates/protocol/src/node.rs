@@ -221,20 +221,36 @@ impl HopLatencyMonitor {
 // THIS node treats the accusation as confirmed enough to act on is
 // gated here.
 //
-// Real, acknowledged limit: this has no Sybil resistance. Reporter
-// identity here is just a NodeId with no cost to create or stake behind
-// it, so an adversary controlling multiple identities can manufacture
-// "independent" corroborating reports as cheaply as one. A production
-// version needs reporters to be identities that cost something (stake,
-// registered node identity tied to NodeRegistry) before their vote
-// counts -- out of scope for this prototype, which only validates that
-// quorum-gating the consequence is mechanically sound.
+// Real, acknowledged limit: on its own, this has no Sybil resistance.
+// Reporter identity here is just a NodeId with no cost to create or
+// stake behind it, so an adversary controlling multiple identities can
+// manufacture "independent" corroborating reports as cheaply as one.
+// Stage 4b (see ChainNodeStatus, is_chain_eligible) closes part of this
+// -- a reporter can be required to resolve to an active, staked
+// NodeRegistry identity before its vote is even recorded here -- but
+// it's still a pass/fail gate, not a stake-WEIGHTED vote: an adversary
+// staking the on-chain minimum under several identities still gets one
+// full vote per identity. That weighting is a further step, not done.
 //
 // Also a real limit worth being honest about: reputation here is
 // per-node local state, not a shared ledger -- different nodes can reach
 // quorum on the same subject at different times (or never), depending
 // on which reports each happens to receive. That's inherent to not
 // having any consensus layer, not a bug in this specific mechanism.
+// Stage 4b: the data MisconductQuorum eligibility gating is checked
+// against, pulled from NodeRegistry (see MeshNode::set_chain_status) --
+// closes the Sybil gap flagged above: once `require_staked_reporters` is
+// on, a reporter's vote only counts if its pubkey resolves to an entry
+// here with `active: true`. Just a pass/fail gate, not a weighted vote by
+// `stake` amount -- an adversary staking the on-chain minimum under
+// several identities still gets one full vote per identity, just no
+// longer a FREE one. Weighting by stake is a further step, not done here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChainNodeStatus {
+    pub active: bool,
+    pub stake: u64,
+}
+
 struct MisconductQuorum {
     // subject -> (reporter -> last_accusation_time)
     accusations: HashMap<NodeId, HashMap<NodeId, f64>>,
@@ -286,6 +302,13 @@ pub struct MeshNode {
     latency_stats: crate::latency::PeerLatencyStats,
     hop_latency: HopLatencyMonitor,
     misconduct_quorum: MisconductQuorum,
+    // pubkey -> latest known on-chain status, pushed in by whoever owns
+    // the chain connection (see set_chain_status's docs) -- empty until
+    // something calls set_chain_status, which is fine: an empty map
+    // combined with require_staked_reporters: false (the default) means
+    // eligibility gating never triggers.
+    chain_status: HashMap<[u8; 32], ChainNodeStatus>,
+    require_staked_reporters: bool,
     // nonce -> when this node sent that Ping, so RTT is computed from
     // this node's own clock on both ends (send and receive of the
     // matching Pong), never from anything the peer claims.
@@ -344,6 +367,14 @@ pub struct MeshConfig {
     // this node still pings/pongs and forwards honestly, just slowly.
     // None/0 in any real deployment; nothing here enables it by default.
     pub artificial_forward_delay_ms: Option<u64>,
+    // Stage 4b: when true, a reporter's vote toward MisconductQuorum
+    // only counts if its NodeId resolves (via peer_pubkey) to a pubkey
+    // this node's chain_status snapshot (see set_chain_status) marks
+    // active. Defaults false in every existing call site -- off
+    // reproduces Stage 3's exact distinct-NodeId-counts behavior, so
+    // nothing depending on that changes unless a real chain connection
+    // is wired up and this is explicitly turned on (see api/src/main.rs).
+    pub require_staked_reporters: bool,
 }
 
 impl MeshNode {
@@ -426,6 +457,8 @@ impl MeshNode {
             // Arbitrary for this prototype -- a real deployment would
             // want this configurable and almost certainly higher.
             misconduct_quorum: MisconductQuorum::new(2, 60.0),
+            chain_status: HashMap::new(),
+            require_staked_reporters: config.require_staked_reporters,
             pending_pings: HashMap::new(),
             next_ping_nonce: 0,
             artificial_forward_delay_ms: config.artificial_forward_delay_ms.unwrap_or(0),
@@ -467,6 +500,59 @@ impl MeshNode {
         self.confirmation_rx.take().expect("confirmed_misconduct_receiver already taken")
     }
 
+    // Resolves a mesh NodeId to the chain-native pubkey pinned for it at
+    // peer-registration time (see UdpTransport::peer_pubkey) -- the same
+    // identity NodeRegistry tracks on-chain. Stage 4a: this binding
+    // already existed for SignedHeartbeat verification, just wasn't
+    // queryable from outside UdpTransport. None means either this NodeId
+    // isn't a registered peer, or it was registered with the [0u8; 32]
+    // no-key sentinel (unauthenticated, as most of this crate's tests
+    // still do).
+    pub fn peer_pubkey(&self, node_id: NodeId) -> Option<[u8; 32]> {
+        self.transport.peer_pubkey(node_id)
+    }
+
+    // Like peer_pubkey, but also resolves THIS node's own NodeId to its
+    // own pubkey (transport.public_key()) -- peer_pubkey alone can't,
+    // since a node was never registered as its own peer. Needed because
+    // report_misconduct's self-accusation (see below) must be checkable
+    // for chain eligibility the same way an externally-received one is.
+    fn reporter_pubkey(&self, reporter: NodeId) -> Option<[u8; 32]> {
+        if reporter == self.node_id {
+            let pk = self.transport.public_key();
+            if pk != [0u8; 32] { Some(pk) } else { None }
+        } else {
+            self.transport.peer_pubkey(reporter)
+        }
+    }
+
+    // Stage 4b: pushes a fresh on-chain status snapshot (see
+    // ChainNodeStatus's docs), keyed by pubkey -- e.g. from a periodic
+    // NodeRegistry poll via chain::ChainAdapter, done by whoever owns
+    // that connection (this crate never talks to a chain directly).
+    // Replaces the whole map each call rather than merging, so a pubkey
+    // that's since left the registry (or gone inactive) actually stops
+    // being eligible instead of the snapshot only ever growing stale
+    // entries.
+    pub fn set_chain_status(&mut self, snapshot: HashMap<[u8; 32], ChainNodeStatus>) {
+        self.chain_status = snapshot;
+    }
+
+    // Whether `reporter`'s vote should count toward MisconductQuorum --
+    // always true unless require_staked_reporters is on, in which case
+    // it also needs to resolve to a pubkey this node's chain_status
+    // marks active. See ChainNodeStatus's docs for why this is a gate,
+    // not a stake-weighted vote.
+    fn is_chain_eligible(&self, reporter: NodeId) -> bool {
+        if !self.require_staked_reporters {
+            return true;
+        }
+        match self.reporter_pubkey(reporter) {
+            Some(pk) => self.chain_status.get(&pk).is_some_and(|s| s.active),
+            None => false,
+        }
+    }
+
     // Broadcasts a misconduct report about `subject` to every configured
     // peer -- used both by this node's own CensorshipMonitor (see run())
     // and available to external callers (e.g. a watchtower that detected
@@ -502,6 +588,10 @@ impl MeshNode {
     // (reputation::integration::on_misconduct_reported) once
     // MisconductQuorum says enough distinct reporters agree.
     fn apply_or_record_accusation(&mut self, subject: NodeId, reporter: NodeId, reason: &str, now: f64) {
+        if !self.is_chain_eligible(reporter) {
+            tracing::debug!(?subject, ?reporter, "accusation ignored: reporter is not an active staked identity per the last chain_status snapshot");
+            return;
+        }
         let (quorum_met, count) = self.misconduct_quorum.record(subject, reporter, now);
         if quorum_met {
             tracing::warn!(?subject, reporter_count = count, "misconduct quorum reached, applying reputation consequence");
