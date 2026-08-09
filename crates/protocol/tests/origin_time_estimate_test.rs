@@ -54,7 +54,11 @@ fn now_ms() -> f64 {
         * 1000.0
 }
 
-async fn spawn_detector(id: u32, listen_addr: std::net::SocketAddr, origin_addr: std::net::SocketAddr) -> MeshNode {
+async fn spawn_detector(
+    id: u32,
+    listen_addr: std::net::SocketAddr,
+    origin_addr: std::net::SocketAddr,
+) -> MeshNode {
     MeshNode::new(MeshConfig {
         node_id: NodeId(id),
         region: Region::UsEast1,
@@ -123,40 +127,87 @@ async fn test_independently_positioned_nodes_agree_on_order_and_converge_on_orig
     const TRUE_GAP_MS: f64 = 150.0;
 
     let t_a = now_ms();
-    let msg_a1 = FloodMessage { order: order_a.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t_a, source_region: Region::UsEast1 };
+    let msg_a1 = FloodMessage {
+        order: order_a.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t_a,
+        source_region: Region::UsEast1,
+    };
     let msg_a2 = msg_a1.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_a1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_a2)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_a1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_a2))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(TRUE_GAP_MS as u64)).await;
 
     let t_b = now_ms();
-    let msg_b1 = FloodMessage { order: order_b.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t_b, source_region: Region::UsEast1 };
+    let msg_b1 = FloodMessage {
+        order: order_b.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t_b,
+        source_region: Region::UsEast1,
+    };
     let msg_b2 = msg_b1.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_b1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_b2)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_b1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_b2))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    async fn query(sender: &tokio::sync::mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<f64>>)>, order_id: [u8; 32]) -> Option<f64> {
+    async fn query(
+        sender: &tokio::sync::mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<f64>>)>,
+        order_id: [u8; 32],
+    ) -> Option<f64> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         sender.send((order_id, tx)).await.unwrap();
         rx.await.unwrap()
     }
 
-    let d1_a = query(&d1_query, order_a.id).await.expect("D1 should have an estimate for order A");
-    let d1_b = query(&d1_query, order_b.id).await.expect("D1 should have an estimate for order B");
-    let d2_a = query(&d2_query, order_a.id).await.expect("D2 should have an estimate for order A");
-    let d2_b = query(&d2_query, order_b.id).await.expect("D2 should have an estimate for order B");
+    let d1_a = query(&d1_query, order_a.id)
+        .await
+        .expect("D1 should have an estimate for order A");
+    let d1_b = query(&d1_query, order_b.id)
+        .await
+        .expect("D1 should have an estimate for order B");
+    let d2_a = query(&d2_query, order_a.id)
+        .await
+        .expect("D2 should have an estimate for order A");
+    let d2_b = query(&d2_query, order_b.id)
+        .await
+        .expect("D2 should have an estimate for order B");
 
     println!("D1: A={d1_a:.2} B={d1_b:.2} (gap={:.2})", d1_b - d1_a);
     println!("D2: A={d2_a:.2} B={d2_b:.2} (gap={:.2})", d2_b - d2_a);
-    println!("cross-node agreement on A: |D1-D2|={:.2}ms", (d1_a - d2_a).abs());
-    println!("cross-node agreement on B: |D1-D2|={:.2}ms", (d1_b - d2_b).abs());
+    println!(
+        "cross-node agreement on A: |D1-D2|={:.2}ms",
+        (d1_a - d2_a).abs()
+    );
+    println!(
+        "cross-node agreement on B: |D1-D2|={:.2}ms",
+        (d1_b - d2_b).abs()
+    );
 
     // (a) each node individually ranks A before B, matching true emission order.
-    assert!(d1_a < d1_b, "D1 must independently rank order A before order B -- got A={d1_a}, B={d1_b}");
-    assert!(d2_a < d2_b, "D2 must independently rank order A before order B -- got A={d2_a}, B={d2_b}");
+    assert!(
+        d1_a < d1_b,
+        "D1 must independently rank order A before order B -- got A={d1_a}, B={d1_b}"
+    );
+    assert!(
+        d2_a < d2_b,
+        "D2 must independently rank order A before order B -- got A={d2_a}, B={d2_b}"
+    );
 
     // (b) the two independently-derived estimates for the SAME order
     // converge -- neither node told the other anything beyond ordinary
@@ -172,6 +223,12 @@ async fn test_independently_positioned_nodes_agree_on_order_and_converge_on_orig
     // coincidentally-correct ranking.
     let d1_gap = d1_b - d1_a;
     let d2_gap = d2_b - d2_a;
-    assert!((d1_gap - TRUE_GAP_MS).abs() < 50.0, "D1's corrected gap should be close to the true {TRUE_GAP_MS}ms gap -- got {d1_gap}ms");
-    assert!((d2_gap - TRUE_GAP_MS).abs() < 50.0, "D2's corrected gap should be close to the true {TRUE_GAP_MS}ms gap -- got {d2_gap}ms");
+    assert!(
+        (d1_gap - TRUE_GAP_MS).abs() < 50.0,
+        "D1's corrected gap should be close to the true {TRUE_GAP_MS}ms gap -- got {d1_gap}ms"
+    );
+    assert!(
+        (d2_gap - TRUE_GAP_MS).abs() < 50.0,
+        "D2's corrected gap should be close to the true {TRUE_GAP_MS}ms gap -- got {d2_gap}ms"
+    );
 }

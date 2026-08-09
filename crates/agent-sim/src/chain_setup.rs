@@ -179,6 +179,8 @@ async fn fund_address<P: Provider>(
 }
 
 fn parse_eth(amount: &str) -> u128 {
-    let whole: u128 = amount.parse().expect("hardcoded ETH amount constant must parse");
+    let whole: u128 = amount
+        .parse()
+        .expect("hardcoded ETH amount constant must parse");
     whole * 1_000_000_000_000_000_000u128
 }

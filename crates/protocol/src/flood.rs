@@ -26,7 +26,12 @@ pub struct DeterministicFlood {
 }
 
 impl DeterministicFlood {
-    pub fn new(node_id: NodeId, region: Region, routing_table: RoutingTable, schedule: FloodSchedule) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        region: Region,
+        routing_table: RoutingTable,
+        schedule: FloodSchedule,
+    ) -> Self {
         Self {
             node_id,
             region,
@@ -66,7 +71,8 @@ impl DeterministicFlood {
             return Err(FloodError::LatePacket);
         }
 
-        self.received_cache.put(msg.order.id, vec![(from, current_time)]);
+        self.received_cache
+            .put(msg.order.id, vec![(from, current_time)]);
         self.order_book_orders.push(msg.order.clone());
 
         if msg.hop_count >= self.schedule.max_hops {

@@ -1,12 +1,12 @@
-use common::{Order, OrderSide, NodeId, Region, SettlementPreference, SettlementRequester};
+use common::{NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
-use rdma::{TraderMemoryRegionManager, PullScheduler};
-use validation::OrderValidator;
-use topology::{NetworkTopology, TopologyNode};
-use security::{encrypt_packet, decrypt_packet};
 use heartbeat::DeterministicHeartbeat;
-use prover::{TradeBatch, BACKEND, ProverBackend};
-use watchtower::{WatchtowerClient, MockOnChainState};
+use prover::{ProverBackend, TradeBatch, BACKEND};
+use rdma::{PullScheduler, TraderMemoryRegionManager};
+use security::{decrypt_packet, encrypt_packet};
+use topology::{NetworkTopology, TopologyNode};
+use validation::OrderValidator;
+use watchtower::{MockOnChainState, WatchtowerClient};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
@@ -27,9 +27,24 @@ fn test_e2e_trade_lifecycle() {
         (3, "AP".to_string(), (1.3521, 103.8198)),
     ];
     let nodes = vec![
-        TopologyNode { id: NodeId(0), region: Region::UsEast1, position: (37.7, -122.4), zone_id: 1 },
-        TopologyNode { id: NodeId(1), region: Region::EuWest1, position: (53.3, -6.2), zone_id: 2 },
-        TopologyNode { id: NodeId(2), region: Region::ApSoutheast1, position: (1.3, 103.8), zone_id: 3 },
+        TopologyNode {
+            id: NodeId(0),
+            region: Region::UsEast1,
+            position: (37.7, -122.4),
+            zone_id: 1,
+        },
+        TopologyNode {
+            id: NodeId(1),
+            region: Region::EuWest1,
+            position: (53.3, -6.2),
+            zone_id: 2,
+        },
+        TopologyNode {
+            id: NodeId(2),
+            region: Region::ApSoutheast1,
+            position: (1.3, 103.8),
+            zone_id: 3,
+        },
     ];
     let topology = NetworkTopology::generate(nodes, &zone_defs);
     assert_eq!(topology.zones.len(), 3);
@@ -41,9 +56,9 @@ fn test_e2e_trade_lifecycle() {
     peer_zones.insert(NodeId(2), 3);
     let _heartbeat_tracker = DeterministicHeartbeat::new(
         &peers,
-        0, // base_time
+        0,   // base_time
         100, // 100ms interval
-        3, // max_missed
+        3,   // max_missed
         &topology.zone_connectivity,
         1, // local_zone_id
         &peer_zones,
@@ -102,8 +117,16 @@ fn test_e2e_trade_lifecycle() {
     let msg_b = OrderValidator::serialize_order_message(&order_b);
     order_b_signed.signature = signing_key_b.sign(&msg_b).to_vec();
 
-    mr_manager.get_region_mut(&trader_a_bytes).unwrap().write_orders(&[order_a_signed]).unwrap();
-    mr_manager.get_region_mut(&trader_b_bytes).unwrap().write_orders(&[order_b_signed]).unwrap();
+    mr_manager
+        .get_region_mut(&trader_a_bytes)
+        .unwrap()
+        .write_orders(&[order_a_signed])
+        .unwrap();
+    mr_manager
+        .get_region_mut(&trader_b_bytes)
+        .unwrap()
+        .write_orders(&[order_b_signed])
+        .unwrap();
 
     // 5. Ingestion, Validation, and Matching
     let (mut pulled_orders, _) = pull_scheduler.perform_pull(&mr_manager);

@@ -1,6 +1,6 @@
 use frost_ed25519::{
     self as frost,
-    keys::{KeyPackage, PublicKeyPackage, IdentifierList},
+    keys::{IdentifierList, KeyPackage, PublicKeyPackage},
 };
 use std::collections::BTreeMap;
 
@@ -39,18 +39,14 @@ impl TssSigner {
         secret_shares_map
             .into_values()
             .map(|ss| {
-                let kp: KeyPackage = KeyPackage::try_from(ss)
-                    .expect("SecretShare to KeyPackage conversion failed");
+                let kp: KeyPackage =
+                    KeyPackage::try_from(ss).expect("SecretShare to KeyPackage conversion failed");
                 serde_json::to_vec(&kp).expect("KeyPackage serialization failed")
             })
             .collect()
     }
 
-    pub fn sign_message(
-        &self,
-        shares: &[Vec<u8>],
-        message: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    pub fn sign_message(&self, shares: &[Vec<u8>], message: &[u8]) -> Result<Vec<u8>, String> {
         if shares.len() < self.threshold {
             return Err(format!(
                 "Insufficient shares: got {}, threshold is {}",
@@ -109,9 +105,7 @@ impl TssSigner {
         signature: &[u8],
     ) -> Result<bool, String> {
         let vk = frost::VerifyingKey::deserialize(
-            public_key
-                .try_into()
-                .map_err(|_| "Invalid pubkey length")?,
+            public_key.try_into().map_err(|_| "Invalid pubkey length")?,
         )
         .map_err(|e| format!("Invalid verifying key: {}", e))?;
 
@@ -164,12 +158,8 @@ mod tests {
     fn test_tss_different_messages_produce_different_signatures() {
         let (tss, shares) = setup(2, 3);
 
-        let sig1 = tss
-            .sign_message(&shares[..2], b"Message A")
-            .unwrap();
-        let sig2 = tss
-            .sign_message(&shares[..2], b"Message B")
-            .unwrap();
+        let sig1 = tss.sign_message(&shares[..2], b"Message A").unwrap();
+        let sig2 = tss.sign_message(&shares[..2], b"Message B").unwrap();
 
         assert_ne!(sig1, sig2);
     }
@@ -190,9 +180,7 @@ mod tests {
         let (tss, shares) = setup(2, 5);
         assert_eq!(shares.len(), 5);
 
-        let sig = tss
-            .sign_message(&shares[2..4], b"test")
-            .unwrap();
+        let sig = tss.sign_message(&shares[2..4], b"test").unwrap();
         assert!(!sig.is_empty());
     }
 }

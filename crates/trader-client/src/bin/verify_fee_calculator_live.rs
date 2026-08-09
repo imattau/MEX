@@ -20,8 +20,24 @@ use rand::rngs::OsRng;
 
 fn serialize_order_message(order: &serde_json::Value) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(order["id"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect::<Vec<u8>>().as_slice());
-    msg.extend_from_slice(order["trader"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect::<Vec<u8>>().as_slice());
+    msg.extend_from_slice(
+        order["id"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect::<Vec<u8>>()
+            .as_slice(),
+    );
+    msg.extend_from_slice(
+        order["trader"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect::<Vec<u8>>()
+            .as_slice(),
+    );
     msg.extend_from_slice(order["symbol"].as_str().unwrap().as_bytes());
     msg.extend_from_slice(&order["price"].as_u64().unwrap().to_be_bytes());
     msg.extend_from_slice(&order["amount"].as_u64().unwrap().to_be_bytes());
@@ -33,8 +49,16 @@ fn serialize_order_message(order: &serde_json::Value) -> Vec<u8> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let api_base = args.get(1).expect("usage: verify_fee_calculator_live <api_base_url> <expected_fee_bps>").trim_end_matches('/').to_string();
-    let expected_fee_bps: u32 = args.get(2).expect("missing expected_fee_bps").parse().unwrap();
+    let api_base = args
+        .get(1)
+        .expect("usage: verify_fee_calculator_live <api_base_url> <expected_fee_bps>")
+        .trim_end_matches('/')
+        .to_string();
+    let expected_fee_bps: u32 = args
+        .get(2)
+        .expect("missing expected_fee_bps")
+        .parse()
+        .unwrap();
 
     let mut csprng = OsRng;
     let seller_offchain = SigningKey::generate(&mut csprng);
@@ -45,7 +69,13 @@ async fn main() {
     let http = reqwest::Client::new();
     let api_key = std::env::var("MEX_API_KEY").unwrap_or_else(|_| "dev-default-key".to_string());
 
-    let build_and_sign = |sk: &SigningKey, trader: [u8; 32], side: &str, price: u64, amount: u64, nonce: u64| -> serde_json::Value {
+    let build_and_sign = |sk: &SigningKey,
+                          trader: [u8; 32],
+                          side: &str,
+                          price: u64,
+                          amount: u64,
+                          nonce: u64|
+     -> serde_json::Value {
         let mut order_id = [0u8; 32];
         order_id[0..16].copy_from_slice(&trader[0..16]);
         order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
@@ -63,19 +93,49 @@ async fn main() {
     };
 
     let sell_req = build_and_sign(&seller_offchain, seller_pubkey, "Sell", 3000, 1, 1);
-    let sell_resp: serde_json::Value = http.post(format!("{api_base}/api/v1/order"))
-        .header("X-API-Key", &api_key).json(&sell_req).send().await.unwrap().json().await.unwrap();
-    assert_eq!(sell_resp["success"], true, "sell order rejected: {sell_resp:?}");
+    let sell_resp: serde_json::Value = http
+        .post(format!("{api_base}/api/v1/order"))
+        .header("X-API-Key", &api_key)
+        .json(&sell_req)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        sell_resp["success"], true,
+        "sell order rejected: {sell_resp:?}"
+    );
 
     let buy_req = build_and_sign(&buyer_offchain, buyer_pubkey, "Buy", 3000, 1, 1);
-    let buy_resp: serde_json::Value = http.post(format!("{api_base}/api/v1/order"))
-        .header("X-API-Key", &api_key).json(&buy_req).send().await.unwrap().json().await.unwrap();
-    assert_eq!(buy_resp["success"], true, "buy order rejected: {buy_resp:?}");
+    let buy_resp: serde_json::Value = http
+        .post(format!("{api_base}/api/v1/order"))
+        .header("X-API-Key", &api_key)
+        .json(&buy_req)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        buy_resp["success"], true,
+        "buy order rejected: {buy_resp:?}"
+    );
     let matches = buy_resp["matches"].as_array().unwrap();
-    assert_eq!(matches.len(), 1, "expected exactly one real match from the live matching engine");
-    let fee_basis_points: u32 = serde_json::from_value(matches[0]["fee_basis_points"].clone()).unwrap();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one real match from the live matching engine"
+    );
+    let fee_basis_points: u32 =
+        serde_json::from_value(matches[0]["fee_basis_points"].clone()).unwrap();
 
     println!("live match fee_basis_points = {fee_basis_points} (expected {expected_fee_bps})");
-    assert_eq!(fee_basis_points, expected_fee_bps, "server's live FeeCalculator configuration did not produce the expected fee");
+    assert_eq!(
+        fee_basis_points, expected_fee_bps,
+        "server's live FeeCalculator configuration did not produce the expected fee"
+    );
     println!("\nFEE CALCULATOR LIVE WIRING TEST PASSED");
 }

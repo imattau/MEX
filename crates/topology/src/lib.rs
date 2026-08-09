@@ -109,7 +109,7 @@ impl NetworkTopology {
         let mut routing_tables = HashMap::new();
         for node in &nodes {
             let local_zone_id = node.zone_id;
-            
+
             // Find closest local node in the same zone (local peer)
             let mut local_candidates: Vec<_> = nodes
                 .iter()
@@ -120,10 +120,7 @@ impl NetworkTopology {
                     .partial_cmp(&haversine_distance(node.position, b.position))
                     .unwrap()
             });
-            let local_peer = local_candidates
-                .first()
-                .map(|n| n.id)
-                .unwrap_or(node.id); // fallback to self if alone
+            let local_peer = local_candidates.first().map(|n| n.id).unwrap_or(node.id); // fallback to self if alone
 
             // Find closest remote nodes in external zones
             let mut external_zones: Vec<_> = zone_definitions
@@ -141,14 +138,11 @@ impl NetworkTopology {
                 .first()
                 .and_then(|zone| {
                     let id = zone.0;
-                    nodes
-                        .iter()
-                        .filter(|n| n.zone_id == id)
-                        .min_by(|a, b| {
-                            haversine_distance(node.position, a.position)
-                                .partial_cmp(&haversine_distance(node.position, b.position))
-                                .unwrap()
-                        })
+                    nodes.iter().filter(|n| n.zone_id == id).min_by(|a, b| {
+                        haversine_distance(node.position, a.position)
+                            .partial_cmp(&haversine_distance(node.position, b.position))
+                            .unwrap()
+                    })
                 })
                 .map(|n| n.id)
                 .unwrap_or(node.id);
@@ -158,14 +152,11 @@ impl NetworkTopology {
                 .get(1)
                 .and_then(|zone| {
                     let id = zone.0;
-                    nodes
-                        .iter()
-                        .filter(|n| n.zone_id == id)
-                        .min_by(|a, b| {
-                            haversine_distance(node.position, a.position)
-                                .partial_cmp(&haversine_distance(node.position, b.position))
-                                .unwrap()
-                        })
+                    nodes.iter().filter(|n| n.zone_id == id).min_by(|a, b| {
+                        haversine_distance(node.position, a.position)
+                            .partial_cmp(&haversine_distance(node.position, b.position))
+                            .unwrap()
+                    })
                 })
                 .map(|n| n.id)
                 .unwrap_or(node.id);
@@ -220,10 +211,30 @@ mod tests {
         ];
 
         let nodes = vec![
-            TopologyNode { id: NodeId(0), region: Region::UsEast1, position: (37.7, -122.4), zone_id: 0 },
-            TopologyNode { id: NodeId(1), region: Region::UsEast1, position: (37.8, -122.3), zone_id: 0 },
-            TopologyNode { id: NodeId(2), region: Region::EuWest1, position: (53.3, -6.2), zone_id: 0 },
-            TopologyNode { id: NodeId(3), region: Region::ApSoutheast1, position: (1.3, 103.8), zone_id: 0 },
+            TopologyNode {
+                id: NodeId(0),
+                region: Region::UsEast1,
+                position: (37.7, -122.4),
+                zone_id: 0,
+            },
+            TopologyNode {
+                id: NodeId(1),
+                region: Region::UsEast1,
+                position: (37.8, -122.3),
+                zone_id: 0,
+            },
+            TopologyNode {
+                id: NodeId(2),
+                region: Region::EuWest1,
+                position: (53.3, -6.2),
+                zone_id: 0,
+            },
+            TopologyNode {
+                id: NodeId(3),
+                region: Region::ApSoutheast1,
+                position: (1.3, 103.8),
+                zone_id: 0,
+            },
         ];
 
         let topo = NetworkTopology::generate(nodes, &zone_defs);

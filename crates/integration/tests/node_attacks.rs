@@ -12,12 +12,14 @@
 
 #[cfg(test)]
 mod node_attacks {
-    use common::{Order, OrderSide, NodeId, Region, FloodMessage, SettlementPreference, SettlementRequester};
+    use common::{
+        FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+    };
     use protocol::flood::DeterministicFlood;
     use protocol::types::{FloodSchedule, Peer, RoutingTable};
-    use prover::{TradeBatch, BACKEND, ProverBackend};
-    use watchtower::{WatchtowerClient, MockOnChainState};
+    use prover::{ProverBackend, TradeBatch, BACKEND};
     use topology::{NetworkTopology, TopologyNode};
+    use watchtower::{MockOnChainState, WatchtowerClient};
 
     use ed25519_dalek::Signer;
     use rand::rngs::OsRng;
@@ -39,17 +41,26 @@ mod node_attacks {
 
         // Victim submits an ETH buy order at 3000
         let victim_order = Order {
-            id: [1u8; 32], trader: pk_victim, symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3000, amount: 10,
-            signature: vec![], nonce: 1, expiry: 0,
+            id: [1u8; 32],
+            trader: pk_victim,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 10,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
 
         // This order enters the mesh as a FloodMessage
         let _flood_msg = FloodMessage {
-            order: victim_order.clone(), hop_count: 0, path: vec![NodeId(1)],
-            timestamp: 0.0, source_region: Region::UsEast1,
+            order: victim_order.clone(),
+            hop_count: 0,
+            path: vec![NodeId(1)],
+            timestamp: 0.0,
+            source_region: Region::UsEast1,
         };
 
         // ─── The attack ───
@@ -59,9 +70,15 @@ mod node_attacks {
         // to get ahead in the queue!
 
         let _attacker_order = Order {
-            id: [9u8; 32], trader: pk_attacker, symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3001, amount: 10,  // Slightly better price
-            signature: vec![], nonce: 99, expiry: 0,
+            id: [9u8; 32],
+            trader: pk_attacker,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3001,
+            amount: 10, // Slightly better price
+            signature: vec![],
+            nonce: 99,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -89,33 +106,47 @@ mod node_attacks {
         let pk = sk.verifying_key().to_bytes();
 
         let mut order = Order {
-            id: [1u8; 32], trader: pk, symbol: "ETH-USD".to_string(),
-            side: OrderSide::Sell, price: 100, amount: 1000000,
-            signature: vec![], nonce: 1, expiry: 0,
+            id: [1u8; 32],
+            trader: pk,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Sell,
+            price: 100,
+            amount: 1000000,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
-        order.signature = sk.sign(&OrderValidator::serialize_order_message(&order)).to_vec();
+        order.signature = sk
+            .sign(&OrderValidator::serialize_order_message(&order))
+            .to_vec();
 
         let rt = RoutingTable {
             upstream_peers: vec![Peer {
-                id: NodeId(1), latency_ms: 10.0,
-                last_heartbeat: 0.0, health_score: 1.0,
+                id: NodeId(1),
+                latency_ms: 10.0,
+                last_heartbeat: 0.0,
+                health_score: 1.0,
             }],
             downstream_peers: vec![Peer {
-                id: NodeId(2), latency_ms: 10.0,
-                last_heartbeat: 0.0, health_score: 1.0,
+                id: NodeId(2),
+                latency_ms: 10.0,
+                last_heartbeat: 0.0,
+                health_score: 1.0,
             }],
             zone_peers: vec![],
         };
 
-        let mut flood = DeterministicFlood::new(
-            NodeId(0), Region::UsEast1, rt, FloodSchedule::default(),
-        );
+        let mut flood =
+            DeterministicFlood::new(NodeId(0), Region::UsEast1, rt, FloodSchedule::default());
 
         let msg = FloodMessage {
-            order, hop_count: 0, path: vec![NodeId(1)],
-            timestamp: 0.0, source_region: Region::UsEast1,
+            order,
+            hop_count: 0,
+            path: vec![NodeId(1)],
+            timestamp: 0.0,
+            source_region: Region::UsEast1,
         };
 
         let result = flood.on_receive(msg, NodeId(1), 0.0).unwrap();
@@ -123,7 +154,10 @@ mod node_attacks {
         // Node gets forwarding targets but... just discards them
         eprintln!("\n┌─ ATTACK 2: CENSORSHIP ───────────────────────────────────┐");
         eprintln!("│  Order received from upstream                          │");
-        eprintln!("│  Flood generates {} forward targets                     │", result.len());
+        eprintln!(
+            "│  Flood generates {} forward targets                     │",
+            result.len()
+        );
         eprintln!("│  MALICIOUS NODE: discards result, never forwards        │");
         eprintln!("│  Downstream peers never see the order                  │");
         eprintln!("│                                                         │");
@@ -144,43 +178,72 @@ mod node_attacks {
         let pk = sk.verifying_key().to_bytes();
 
         let mut order = Order {
-            id: [42u8; 32], trader: pk, symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3000, amount: 5,
-            signature: vec![], nonce: 1, expiry: 0,
+            id: [42u8; 32],
+            trader: pk,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 5,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
-        order.signature = sk.sign(&OrderValidator::serialize_order_message(&order)).to_vec();
+        order.signature = sk
+            .sign(&OrderValidator::serialize_order_message(&order))
+            .to_vec();
 
         let rt = RoutingTable {
             upstream_peers: vec![],
             downstream_peers: vec![Peer {
-                id: NodeId(2), latency_ms: 1.0,
-                last_heartbeat: 0.0, health_score: 1.0,
+                id: NodeId(2),
+                latency_ms: 1.0,
+                last_heartbeat: 0.0,
+                health_score: 1.0,
             }],
             zone_peers: vec![],
         };
-        let mut flood = DeterministicFlood::new(
-            NodeId(0), Region::UsEast1, rt, FloodSchedule::default(),
-        );
+        let mut flood =
+            DeterministicFlood::new(NodeId(0), Region::UsEast1, rt, FloodSchedule::default());
 
         let valid_msg = FloodMessage {
-            order: order.clone(), hop_count: 0, path: vec![NodeId(1)],
-            timestamp: 0.0, source_region: Region::UsEast1,
+            order: order.clone(),
+            hop_count: 0,
+            path: vec![NodeId(1)],
+            timestamp: 0.0,
+            source_region: Region::UsEast1,
         };
         let valid_result = flood.on_receive(valid_msg, NodeId(1), 0.0).is_ok();
 
         let mut tampered = order.clone();
         tampered.id = [99u8; 32];
         let tampered_msg = FloodMessage {
-            order: tampered, hop_count: 0, path: vec![NodeId(1)],
-            timestamp: 0.0, source_region: Region::UsEast1,
+            order: tampered,
+            hop_count: 0,
+            path: vec![NodeId(1)],
+            timestamp: 0.0,
+            source_region: Region::UsEast1,
         };
         let tampered_result = flood.on_receive(tampered_msg, NodeId(1), 0.0);
 
         eprintln!("\n┌─ ATTACK 3: RELAY SIGNATURE VALIDATION (FIXED) ───────────┐");
-        eprintln!("│  Valid signed order:   {}", if valid_result { "✓ Forwarded" } else { "✗ Rejected" });
-        eprintln!("│  Tampered order:       {}", if tampered_result.is_ok() { "✗ Forwarded (VULNERABLE!)" } else { "✓ REJECTED — sig checked at relay!" });
+        eprintln!(
+            "│  Valid signed order:   {}",
+            if valid_result {
+                "✓ Forwarded"
+            } else {
+                "✗ Rejected"
+            }
+        );
+        eprintln!(
+            "│  Tampered order:       {}",
+            if tampered_result.is_ok() {
+                "✗ Forwarded (VULNERABLE!)"
+            } else {
+                "✓ REJECTED — sig checked at relay!"
+            }
+        );
         eprintln!("│                                                         │");
         eprintln!("│  FIXED: flood.on_receive now validates Ed25519 signature │");
         eprintln!("│  before caching and forwarding. Tampered/unauthenticated │");
@@ -196,10 +259,12 @@ mod node_attacks {
     fn attack_fabricate_settlement_batches() {
         // A malicious node operator fabricates trades that never happened
         let fake_trade = engine::Match {
-            maker_order_id: [0xBAu8; 32], taker_order_id: [0xDCu8; 32],
-            maker_trader: [0xFFu8; 32],   // Fabricated trader
-            taker_trader: [0xEEu8; 32],   // Fabricated trader
-            price: 1_000_000, amount: 100,  // 100M USD of fabricated value
+            maker_order_id: [0xBAu8; 32],
+            taker_order_id: [0xDCu8; 32],
+            maker_trader: [0xFFu8; 32], // Fabricated trader
+            taker_trader: [0xEEu8; 32], // Fabricated trader
+            price: 1_000_000,
+            amount: 100, // 100M USD of fabricated value
             timestamp_us: 0,
             settlement_tier: SettlementPreference::Standard,
             fee_basis_points: 5,
@@ -230,8 +295,18 @@ mod node_attacks {
 
         eprintln!("\n┌─ ATTACK 4: FABRICATED SETTLEMENT ────────────────────────┐");
         eprintln!("│  Node fabricates:  100 trades × 1,000,000 USD          │");
-        eprintln!("│  ZK proof:          {} bytes (valid!)                  │", proof.len());
-        eprintln!("│  Watchtower:        {}", if valid { "✓ APPROVED" } else { "✗ Rejected" });
+        eprintln!(
+            "│  ZK proof:          {} bytes (valid!)                  │",
+            proof.len()
+        );
+        eprintln!(
+            "│  Watchtower:        {}",
+            if valid {
+                "✓ APPROVED"
+            } else {
+                "✗ Rejected"
+            }
+        );
         eprintln!("│                                                         │");
         eprintln!("│  Exploitable: YES — no cross-node state validation      │");
         eprintln!("│  Mitigation: None — ZK proves math, not market reality   │");
@@ -250,11 +325,17 @@ mod node_attacks {
         let fake_nodes: Vec<NodeId> = (0..fake_node_count).map(|i| NodeId(i)).collect();
 
         eprintln!("\n┌─ ATTACK 5: SYBIL MESH DOMINATION ────────────────────────┐");
-        eprintln!("│  Fake nodes created:  {}                                 │", fake_nodes.len());
+        eprintln!(
+            "│  Fake nodes created:  {}                                 │",
+            fake_nodes.len()
+        );
         eprintln!("│  Cost:                ZERO (no stake, no registration)   │");
         eprintln!("│  Cost to honest node: ZERO (same)                        │");
         eprintln!("│                                                         │");
-        eprintln!("│  Attacker spawns {} nodes — can control routing,        │", fake_node_count);
+        eprintln!(
+            "│  Attacker spawns {} nodes — can control routing,        │",
+            fake_node_count
+        );
         eprintln!("│  censorship, and order flow.                             │");
         eprintln!("│                                                         │");
         eprintln!("│  Exploitable: YES — no economic staking, no PKI,         │");
@@ -285,14 +366,31 @@ mod node_attacks {
         let node5_alive_after_spoof = !dead_after_spoof.contains(&NodeId(5));
 
         eprintln!("\n┌─ ATTACK 6: HEARTBEAT SPOOFING ───────────────────────────┐");
-        eprintln!("│  Node 5 dead at t=500:    {}", if node5_dead { "✓ detected" } else { "✗ missed" });
-        eprintln!("│  After spoofed heartbeat: {}", if node5_alive_after_spoof { "✓ appears alive!" } else { "✗ rejected" });
+        eprintln!(
+            "│  Node 5 dead at t=500:    {}",
+            if node5_dead {
+                "✓ detected"
+            } else {
+                "✗ missed"
+            }
+        );
+        eprintln!(
+            "│  After spoofed heartbeat: {}",
+            if node5_alive_after_spoof {
+                "✓ appears alive!"
+            } else {
+                "✗ rejected"
+            }
+        );
         eprintln!("│                                                         │");
         eprintln!("│  Exploitable: YES — heartbeats unsigned, no challenge   │");
         eprintln!("│  Missing:  Signed heartbeats, challenge-response         │");
         eprintln!("│            liveness proofs (PoL)                        │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
-        assert!(node5_alive_after_spoof, "Heartbeat spoofing keeps dead nodes alive!");
+        assert!(
+            node5_alive_after_spoof,
+            "Heartbeat spoofing keeps dead nodes alive!"
+        );
     }
 
     // ── ATTACK 7: Lie About Geographic Position ──
@@ -300,21 +398,33 @@ mod node_attacks {
     fn attack_lie_about_position() {
         // An attacker in NYC claims to be in LA, London, and Singapore simultaneously
         let zone_defs = vec![
-            (1, "US-West".to_string(), (34.05, -118.24)),    // LA
-            (2, "EU".to_string(), (51.50, -0.12)),           // London
-            (3, "AP".to_string(), (1.35, 103.81)),           // Singapore
+            (1, "US-West".to_string(), (34.05, -118.24)), // LA
+            (2, "EU".to_string(), (51.50, -0.12)),        // London
+            (3, "AP".to_string(), (1.35, 103.81)),        // Singapore
         ];
 
         // Attacker creates a node claiming to be in LA
-        let _honest_pos = (37.7, -122.4);  // Actually in SF
-        let claimed_pos = (34.05, -118.24);  // Claims LA
+        let _honest_pos = (37.7, -122.4); // Actually in SF
+        let claimed_pos = (34.05, -118.24); // Claims LA
         let nodes = vec![
-            TopologyNode { id: NodeId(99), region: Region::UsEast1,
-                position: claimed_pos, zone_id: 1 },
-            TopologyNode { id: NodeId(1), region: Region::EuWest1,
-                position: (51.5, -0.12), zone_id: 2 },
-            TopologyNode { id: NodeId(2), region: Region::ApSoutheast1,
-                position: (1.35, 103.81), zone_id: 3 },
+            TopologyNode {
+                id: NodeId(99),
+                region: Region::UsEast1,
+                position: claimed_pos,
+                zone_id: 1,
+            },
+            TopologyNode {
+                id: NodeId(1),
+                region: Region::EuWest1,
+                position: (51.5, -0.12),
+                zone_id: 2,
+            },
+            TopologyNode {
+                id: NodeId(2),
+                region: Region::ApSoutheast1,
+                position: (1.35, 103.81),
+                zone_id: 3,
+            },
         ];
 
         let topology = NetworkTopology::generate(nodes, &zone_defs);
@@ -323,7 +433,10 @@ mod node_attacks {
         eprintln!("\n┌─ ATTACK 7: GEO-POSITION LYING ───────────────────────────┐");
         eprintln!("│  Node actual location:   San Francisco                 │");
         eprintln!("│  Node claimed location:  Los Angeles                   │");
-        eprintln!("│  Zones assigned:         {} (based on claim)            │", topology.zones.len());
+        eprintln!(
+            "│  Zones assigned:         {} (based on claim)            │",
+            topology.zones.len()
+        );
         eprintln!("│                                                         │");
         eprintln!("│  Attacker can claim to be in EVERY zone, becoming the   │");
         eprintln!("│  'closest' peer to all honest nodes.                    │");
@@ -348,9 +461,12 @@ mod node_attacks {
         let trade_value = 1_000_000_000_000u64; // 1_000_000 * 1_000_000
         let fraud_batch = TradeBatch {
             trades: vec![engine::Match {
-                maker_order_id: [0xDEu8; 32], taker_order_id: [0xADu8; 32],
-                maker_trader: [0u8; 32], taker_trader: [0u8; 32],
-                price: 1_000_000, amount: 1_000_000,
+                maker_order_id: [0xDEu8; 32],
+                taker_order_id: [0xADu8; 32],
+                maker_trader: [0u8; 32],
+                taker_trader: [0u8; 32],
+                price: 1_000_000,
+                amount: 1_000_000,
                 timestamp_us: 0,
                 settlement_tier: SettlementPreference::Standard,
                 fee_basis_points: 5,
@@ -360,7 +476,7 @@ mod node_attacks {
                 assigned_node: [0u8; 32],
                 settlement_deadline: 0,
             }],
-            maker_balances: vec![0],  // Zero balance!
+            maker_balances: vec![0], // Zero balance!
             taker_balances: vec![trade_value],
             pre_state_root: [0u8; 32],
             post_state_root: {
@@ -382,8 +498,18 @@ mod node_attacks {
 
         eprintln!("\n┌─ ATTACK 8: WATCHTOWER CONSPIRACY ───────────────────────┐");
         eprintln!("│  Fraud batch:       Zero-balance trade for MAX value   │");
-        eprintln!("│  Watchtower:        {}", if approved { "✓ APPROVED (sole arbiter)" } else { "✗ Rejected" });
-        eprintln!("│  Slashed signers:   {} (no real penalty)", chain.slashed_signers.len());
+        eprintln!(
+            "│  Watchtower:        {}",
+            if approved {
+                "✓ APPROVED (sole arbiter)"
+            } else {
+                "✗ Rejected"
+            }
+        );
+        eprintln!(
+            "│  Slashed signers:   {} (no real penalty)",
+            chain.slashed_signers.len()
+        );
         eprintln!("│                                                         │");
         eprintln!("│  Exploitable: YES — single watchtower, zero economic    │");
         eprintln!("│               stake, no multi-sig, no challenge period  │");
@@ -405,22 +531,32 @@ mod node_attacks {
         // And inject_order sets timestamp = 0.0, so injected orders pass
         // (0.0 < 0.0 - 10.0 → false → ok for early check)
 
-        let rt = RoutingTable { upstream_peers: vec![], downstream_peers: vec![], zone_peers: vec![] };
-        let mut flood = DeterministicFlood::new(
-            NodeId(0), Region::UsEast1, rt, FloodSchedule::default(),
-        );
+        let rt = RoutingTable {
+            upstream_peers: vec![],
+            downstream_peers: vec![],
+            zone_peers: vec![],
+        };
+        let mut flood =
+            DeterministicFlood::new(NodeId(0), Region::UsEast1, rt, FloodSchedule::default());
 
         // A realistic message with a real timestamp
         let real_msg = FloodMessage {
             order: Order {
-                id: [1u8; 32], trader: [1u8; 32], symbol: "ETH-USD".to_string(),
-                side: OrderSide::Buy, price: 3000, amount: 1,
-                signature: vec![], nonce: 1, expiry: 0,
+                id: [1u8; 32],
+                trader: [1u8; 32],
+                symbol: "ETH-USD".to_string(),
+                side: OrderSide::Buy,
+                price: 3000,
+                amount: 1,
+                signature: vec![],
+                nonce: 1,
+                expiry: 0,
                 settlement_preference: SettlementPreference::Standard,
                 settlement_requester: SettlementRequester::Seller,
             },
-            hop_count: 0, path: vec![],
-            timestamp: 1700000000.0,  // Real timestamp
+            hop_count: 0,
+            path: vec![],
+            timestamp: 1700000000.0, // Real timestamp
             source_region: Region::UsEast1,
         };
 

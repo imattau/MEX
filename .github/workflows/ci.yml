@@ -19,7 +19,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and target dir
         uses: actions/cache@v4
@@ -38,6 +38,9 @@ jobs:
       # optimization, not a hard requirement.
       - name: Install libibverbs (optional, for crates/rdma real backend)
         run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
 
       - name: cargo build --workspace --all-targets
         run: cargo build --workspace --all-targets

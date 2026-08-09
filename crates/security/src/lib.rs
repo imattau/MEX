@@ -1,6 +1,6 @@
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit};
-use rand::{RngCore, thread_rng};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use rand::{thread_rng, RngCore};
 
 pub fn encrypt_packet(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let mut nonce_bytes = [0u8; 12];
@@ -8,7 +8,9 @@ pub fn encrypt_packet(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, Strin
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-    let mut ciphertext = cipher.encrypt(nonce, plaintext).map_err(|e| e.to_string())?;
+    let mut ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| e.to_string())?;
 
     let mut packet = nonce_bytes.to_vec();
     packet.append(&mut ciphertext);
@@ -24,7 +26,9 @@ pub fn decrypt_packet(key: &[u8; 32], packet: &[u8]) -> Result<Vec<u8>, String> 
     let nonce = Nonce::from_slice(nonce_bytes);
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| e.to_string())?;
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| e.to_string())?;
     Ok(plaintext)
 }
 
@@ -50,7 +54,7 @@ mod tests {
         let plaintext = b"Sensitive trade details";
 
         let mut ciphertext = encrypt_packet(&key, plaintext).unwrap();
-        
+
         // Tamper with the ciphertext (flip one byte after the nonce)
         ciphertext[15] ^= 0xFF;
 

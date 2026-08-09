@@ -4,9 +4,11 @@
 
 #[cfg(test)]
 mod edge_cases {
-    use common::{Order, OrderSide, Region, FloodMessage, NodeId, SettlementPreference, SettlementRequester};
+    use common::{
+        FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+    };
     use engine::OrderBook;
-    use prover::{TradeBatch, BACKEND, ProverBackend};
+    use prover::{ProverBackend, TradeBatch, BACKEND};
     use validation::OrderValidator;
 
     use ed25519_dalek::{Signer, SigningKey};
@@ -25,10 +27,15 @@ mod edge_cases {
         // This matches against themselves — no counterparty, zero net position
 
         let mut sell_order = Order {
-            id: [1u8; 32], trader: pk,
+            id: [1u8; 32],
+            trader: pk,
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Sell, price: 3000, amount: 100,
-            signature: vec![], nonce: 1, expiry: 0,
+            side: OrderSide::Sell,
+            price: 3000,
+            amount: 100,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -37,10 +44,15 @@ mod edge_cases {
             .to_vec();
 
         let mut buy_order = Order {
-            id: [2u8; 32], trader: pk,  // SAME trader!
+            id: [2u8; 32],
+            trader: pk, // SAME trader!
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3000, amount: 100,
-            signature: vec![], nonce: 2, expiry: 0,
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 100,
+            signature: vec![],
+            nonce: 2,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -57,8 +69,18 @@ mod edge_cases {
 
         eprintln!("\n┌─ EDGE CASE: SELF-TRADING (FIXED) ───────────────────────┐");
         eprintln!("│  Trader places SELL 100 @ 3000, then BUY 100 @ 3000    │");
-        eprintln!("│  Matches: {}                                              │", matches.len());
-        eprintln!("│  Self-matched: {}                                         │", if self_matched { "✗ STILL VULNERABLE" } else { "✓ BLOCKED — maker≠taker enforced" });
+        eprintln!(
+            "│  Matches: {}                                              │",
+            matches.len()
+        );
+        eprintln!(
+            "│  Self-matched: {}                                         │",
+            if self_matched {
+                "✗ STILL VULNERABLE"
+            } else {
+                "✓ BLOCKED — maker≠taker enforced"
+            }
+        );
         eprintln!("│                                                         │");
         eprintln!("│  FIXED: engine.add_order skips matches where maker and   │");
         eprintln!("│  taker are the same trader identity.                     │");
@@ -88,10 +110,15 @@ mod edge_cases {
 
         // Order at price 0
         let zero_price = Order {
-            id: [1u8; 32], trader: [1u8; 32],
+            id: [1u8; 32],
+            trader: [1u8; 32],
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Sell, price: 0, amount: 1000000,
-            signature: vec![], nonce: 1, expiry: 0,
+            side: OrderSide::Sell,
+            price: 0,
+            amount: 1000000,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -99,18 +126,29 @@ mod edge_cases {
 
         // Order at u64::MAX price
         let max_price = Order {
-            id: [2u8; 32], trader: [2u8; 32],
+            id: [2u8; 32],
+            trader: [2u8; 32],
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: u64::MAX, amount: 1,
-            signature: vec![], nonce: 2, expiry: 0,
+            side: OrderSide::Buy,
+            price: u64::MAX,
+            amount: 1,
+            signature: vec![],
+            nonce: 2,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
         let matches_max = book.add_order(max_price);
 
         eprintln!("\n┌─ EDGE CASE: ABSURD PRICE BOOK POLLUTION ────────────────┐");
-        eprintln!("│  Order at price 0:       {} matches                    │", matches_zero.len());
-        eprintln!("│  Order at price u64::MAX: {} matches                    │", matches_max.len());
+        eprintln!(
+            "│  Order at price 0:       {} matches                    │",
+            matches_zero.len()
+        );
+        eprintln!(
+            "│  Order at price u64::MAX: {} matches                    │",
+            matches_max.len()
+        );
         eprintln!("│                                                         │");
         eprintln!("│  Both orders enter the book as resting orders.          │");
         eprintln!("│  Price 0 sell: sits on ask side forever (no buy at 0).  │");
@@ -128,13 +166,20 @@ mod edge_cases {
             maker_balances: vec![],
             taker_balances: vec![],
             pre_state_root: [0x10u8; 32],
-            post_state_root: [0x10u8; 32],  // Same pre/post = no change
+            post_state_root: [0x10u8; 32], // Same pre/post = no change
         };
 
         let proof = BACKEND.prove_batch(&batch);
 
         eprintln!("\n┌─ EDGE CASE: EMPTY BATCH ZK PROVING ────────────────────┐");
-        eprintln!("│  Empty batch (zero trades):  {}", if proof.is_err() { "✗ Rejected (correct)" } else { "✓ Accepted! (would prove nothing)" });
+        eprintln!(
+            "│  Empty batch (zero trades):  {}",
+            if proof.is_err() {
+                "✗ Rejected (correct)"
+            } else {
+                "✓ Accepted! (would prove nothing)"
+            }
+        );
         eprintln!("│  Same pre/post state roots:  no-change batch attempted │");
         eprintln!("│                                                         │");
         eprintln!("│  Impact: Wasted ZK proving for no-op batches             │");
@@ -149,28 +194,41 @@ mod edge_cases {
         use protocol::flood::DeterministicFlood;
         use protocol::types::{FloodSchedule, RoutingTable};
 
-        let rt = RoutingTable { upstream_peers: vec![], downstream_peers: vec![], zone_peers: vec![] };
-        let mut flood = DeterministicFlood::new(
-            NodeId(0), Region::UsEast1, rt, FloodSchedule::default(),
-        );
+        let rt = RoutingTable {
+            upstream_peers: vec![],
+            downstream_peers: vec![],
+            zone_peers: vec![],
+        };
+        let mut flood =
+            DeterministicFlood::new(NodeId(0), Region::UsEast1, rt, FloodSchedule::default());
 
         let mut csprng = OsRng;
         let sk = SigningKey::generate(&mut csprng);
         let pk = sk.verifying_key().to_bytes();
         let mut order = Order {
-            id: [5u8; 32], trader: pk, symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3000, amount: 1,
-            signature: vec![], nonce: 1, expiry: 0,
+            id: [5u8; 32],
+            trader: pk,
+            symbol: "ETH-USD".to_string(),
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 1,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
-        order.signature = sk.sign(&OrderValidator::serialize_order_message(&order)).to_vec();
+        order.signature = sk
+            .sign(&OrderValidator::serialize_order_message(&order))
+            .to_vec();
 
         // Claim to be from a different region than actual
         let msg = FloodMessage {
-            order, hop_count: 0, path: vec![NodeId(1)],
+            order,
+            hop_count: 0,
+            path: vec![NodeId(1)],
             timestamp: 0.0,
-            source_region: Region::EuWest1,  // Claim EU but actually in US
+            source_region: Region::EuWest1, // Claim EU but actually in US
         };
 
         let result = flood.on_receive(msg, NodeId(1), 1.0);
@@ -179,7 +237,14 @@ mod edge_cases {
         eprintln!("\n┌─ EDGE CASE: SPOOFED SOURCE REGION ──────────────────────┐");
         eprintln!("│  Node in:      US-East                                   │");
         eprintln!("│  Claimed from: Europe-West (EuWest1)                     │");
-        eprintln!("│  Flood accepts: {}                                       │", if accepted { "✓ — region trust-based" } else { "✗ Rejected" });
+        eprintln!(
+            "│  Flood accepts: {}                                       │",
+            if accepted {
+                "✓ — region trust-based"
+            } else {
+                "✗ Rejected"
+            }
+        );
         eprintln!("│                                                         │");
         eprintln!("│  source_region is self-reported in the FloodMessage      │");
         eprintln!("│  No cryptographic binding to actual node location        │");
@@ -194,10 +259,15 @@ mod edge_cases {
 
         // Place an order
         let buy = Order {
-            id: [1u8; 32], trader: [1u8; 32],
+            id: [1u8; 32],
+            trader: [1u8; 32],
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 2990, amount: 5,
-            signature: vec![], nonce: 1, expiry: 0,
+            side: OrderSide::Buy,
+            price: 2990,
+            amount: 5,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -212,10 +282,31 @@ mod edge_cases {
         let cancelled_again = book.cancel_order([1u8; 32]);
 
         eprintln!("\n┌─ EDGE CASE: DOUBLE CANCELLATION ────────────────────────┐");
-        eprintln!("│  First cancel:  {}                                      │", if cancelled { "✓ Found and removed" } else { "✗ Not found" });
-        eprintln!("│  Second cancel: {}                                      │", if cancelled_again { "✓ Still found (ID reuse!)" } else { "✗ Not found (correct)" });
+        eprintln!(
+            "│  First cancel:  {}                                      │",
+            if cancelled {
+                "✓ Found and removed"
+            } else {
+                "✗ Not found"
+            }
+        );
+        eprintln!(
+            "│  Second cancel: {}                                      │",
+            if cancelled_again {
+                "✓ Still found (ID reuse!)"
+            } else {
+                "✗ Not found (correct)"
+            }
+        );
         eprintln!("│                                                         │");
-        eprintln!("│  Exploitable: {}                                         │", if cancelled_again { "YES — stale order IDs persist" } else { "No — properly cleaned up" });
+        eprintln!(
+            "│  Exploitable: {}                                         │",
+            if cancelled_again {
+                "YES — stale order IDs persist"
+            } else {
+                "No — properly cleaned up"
+            }
+        );
         eprintln!("└─────────────────────────────────────────────────────────┘");
         assert!(!cancelled_again, "Double cancel should not find the order");
     }
@@ -227,10 +318,15 @@ mod edge_cases {
 
         // Seller at 3000 for 10
         let sell = Order {
-            id: [1u8; 32], trader: [1u8; 32],
+            id: [1u8; 32],
+            trader: [1u8; 32],
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Sell, price: 3000, amount: 10,
-            signature: vec![], nonce: 1, expiry: 0,
+            side: OrderSide::Sell,
+            price: 3000,
+            amount: 10,
+            signature: vec![],
+            nonce: 1,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -238,10 +334,15 @@ mod edge_cases {
 
         // Buyer takes exactly 10
         let buy = Order {
-            id: [2u8; 32], trader: [2u8; 32],
+            id: [2u8; 32],
+            trader: [2u8; 32],
             symbol: "ETH-USD".to_string(),
-            side: OrderSide::Buy, price: 3000, amount: 10,
-            signature: vec![], nonce: 2, expiry: 0,
+            side: OrderSide::Buy,
+            price: 3000,
+            amount: 10,
+            signature: vec![],
+            nonce: 2,
+            expiry: 0,
             settlement_preference: SettlementPreference::Standard,
             settlement_requester: SettlementRequester::Seller,
         };
@@ -252,10 +353,26 @@ mod edge_cases {
 
         eprintln!("\n┌─ EDGE CASE: PARTIAL FILL TO ZERO ──────────────────────┐");
         eprintln!("│  Sell 10 @ 3000, Buy 10 @ 3000 → fully matched         │");
-        eprintln!("│  Matches generated: {}                                   │", matches.len());
-        eprintln!("│  Ask side entries:  {} (should be 0 — fully consumed)   │", book_ask_count);
-        eprintln!("│  Bid side entries:  {} (should be 0 — fully consumed)   │", book_bid_count);
-        eprintln!("│  Cleanup:            {}                                 │", if book_ask_count == 0 && book_bid_count == 0 { "✓ Empty levels removed" } else { "✗ Orphaned levels remain" });
+        eprintln!(
+            "│  Matches generated: {}                                   │",
+            matches.len()
+        );
+        eprintln!(
+            "│  Ask side entries:  {} (should be 0 — fully consumed)   │",
+            book_ask_count
+        );
+        eprintln!(
+            "│  Bid side entries:  {} (should be 0 — fully consumed)   │",
+            book_bid_count
+        );
+        eprintln!(
+            "│  Cleanup:            {}                                 │",
+            if book_ask_count == 0 && book_bid_count == 0 {
+                "✓ Empty levels removed"
+            } else {
+                "✗ Orphaned levels remain"
+            }
+        );
         eprintln!("└─────────────────────────────────────────────────────────┘");
         assert_eq!(matches.len(), 1);
     }

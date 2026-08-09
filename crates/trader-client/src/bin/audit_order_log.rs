@@ -35,34 +35,88 @@ fn hex32(b: &[u8; 32]) -> String {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let api_base = args.get(1).expect("usage: audit_order_log <api_base_url>").trim_end_matches('/').to_string();
+    let api_base = args
+        .get(1)
+        .expect("usage: audit_order_log <api_base_url>")
+        .trim_end_matches('/')
+        .to_string();
 
     let http = reqwest::Client::new();
     let api_key = std::env::var("MEX_API_KEY").unwrap_or_else(|_| "dev-default-key".to_string());
 
     println!("=== Fetching order log and match log from {api_base} ===\n");
 
-    let order_root: LogRootResponse = http.get(format!("{api_base}/api/v1/order_log/root"))
-        .header("X-API-Key", &api_key).send().await.unwrap().json().await.unwrap();
-    let order_entries: Vec<LogEntry<OrderReceipt>> = http.get(format!("{api_base}/api/v1/order_log/entries"))
-        .header("X-API-Key", &api_key).send().await.unwrap().json().await.unwrap();
+    let order_root: LogRootResponse = http
+        .get(format!("{api_base}/api/v1/order_log/root"))
+        .header("X-API-Key", &api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let order_entries: Vec<LogEntry<OrderReceipt>> = http
+        .get(format!("{api_base}/api/v1/order_log/entries"))
+        .header("X-API-Key", &api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-    let match_root: LogRootResponse = http.get(format!("{api_base}/api/v1/match_log/root"))
-        .header("X-API-Key", &api_key).send().await.unwrap().json().await.unwrap();
-    let match_entries: Vec<LogEntry<Match>> = http.get(format!("{api_base}/api/v1/match_log/entries"))
-        .header("X-API-Key", &api_key).send().await.unwrap().json().await.unwrap();
+    let match_root: LogRootResponse = http
+        .get(format!("{api_base}/api/v1/match_log/root"))
+        .header("X-API-Key", &api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let match_entries: Vec<LogEntry<Match>> = http
+        .get(format!("{api_base}/api/v1/match_log/entries"))
+        .header("X-API-Key", &api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-    println!("order_log: {} entries, published root {}", order_root.len, hex32(&order_root.root));
-    println!("match_log: {} entries, published root {}\n", match_root.len, hex32(&match_root.root));
+    println!(
+        "order_log: {} entries, published root {}",
+        order_root.len,
+        hex32(&order_root.root)
+    );
+    println!(
+        "match_log: {} entries, published root {}\n",
+        match_root.len,
+        hex32(&match_root.root)
+    );
 
-    assert_eq!(order_entries.len() as u64, order_root.len, "order_log entry count doesn't match published root's len");
-    assert_eq!(match_entries.len() as u64, match_root.len, "match_log entry count doesn't match published root's len");
+    assert_eq!(
+        order_entries.len() as u64,
+        order_root.len,
+        "order_log entry count doesn't match published root's len"
+    );
+    assert_eq!(
+        match_entries.len() as u64,
+        match_root.len,
+        "match_log entry count doesn't match published root's len"
+    );
 
     // Step 1: hash-chain integrity -- proves nothing was inserted,
     // deleted, or reordered after being logged, independent of trusting
     // the server that served this data right now.
-    assert!(verify_chain(&order_entries), "order_log hash chain is broken -- log has been tampered with");
-    assert!(verify_chain(&match_entries), "match_log hash chain is broken -- log has been tampered with");
+    assert!(
+        verify_chain(&order_entries),
+        "order_log hash chain is broken -- log has been tampered with"
+    );
+    assert!(
+        verify_chain(&match_entries),
+        "match_log hash chain is broken -- log has been tampered with"
+    );
     println!("order_log hash chain: internally consistent (untampered)");
     println!("match_log hash chain: internally consistent (untampered)\n");
 
@@ -77,9 +131,16 @@ async fn main() {
     // Step 2: every receipt's signature -- proves each receipt really was
     // signed by the node key it claims, not fabricated after the fact.
     for entry in &order_entries {
-        assert!(verify_receipt(&entry.payload), "order_log entry seq={} has an invalid signature", entry.seq);
+        assert!(
+            verify_receipt(&entry.payload),
+            "order_log entry seq={} has an invalid signature",
+            entry.seq
+        );
     }
-    println!("all {} order receipts independently verified against their claimed node_pubkey: OK\n", order_entries.len());
+    println!(
+        "all {} order receipts independently verified against their claimed node_pubkey: OK\n",
+        order_entries.len()
+    );
 
     // Step 3: replay strict price-time-priority matching against the
     // order log using the REAL engine::OrderBook, and diff against what
@@ -89,7 +150,10 @@ async fn main() {
     // one running `api` server (crates/api/src/main.rs) only ever serves
     // one symbol (MEX_API_SYMBOL), so there is no cross-symbol ordering
     // question to resolve here.
-    let symbol = order_entries.first().map(|e| e.payload.symbol.clone()).unwrap_or_default();
+    let symbol = order_entries
+        .first()
+        .map(|e| e.payload.symbol.clone())
+        .unwrap_or_default();
     let mut book = OrderBook::new(symbol);
     let mut replayed_matches: Vec<Match> = Vec::new();
 
@@ -111,15 +175,27 @@ async fn main() {
         replayed_matches.extend(book.add_order(order));
     }
 
-    println!("replayed {} orders through a fresh, independent OrderBook -> {} matches produced\n", order_entries.len(), replayed_matches.len());
+    println!(
+        "replayed {} orders through a fresh, independent OrderBook -> {} matches produced\n",
+        order_entries.len(),
+        replayed_matches.len()
+    );
 
     if replayed_matches.len() != match_entries.len() {
-        println!("MISMATCH: server reported {} matches, replay produced {} -- FAIRNESS VIOLATION", match_entries.len(), replayed_matches.len());
+        println!(
+            "MISMATCH: server reported {} matches, replay produced {} -- FAIRNESS VIOLATION",
+            match_entries.len(),
+            replayed_matches.len()
+        );
         std::process::exit(1);
     }
 
     let mut mismatches = 0;
-    for (i, (replayed, reported)) in replayed_matches.iter().zip(match_entries.iter().map(|e| &e.payload)).enumerate() {
+    for (i, (replayed, reported)) in replayed_matches
+        .iter()
+        .zip(match_entries.iter().map(|e| &e.payload))
+        .enumerate()
+    {
         let core_matches = replayed.maker_order_id == reported.maker_order_id
             && replayed.taker_order_id == reported.taker_order_id
             && replayed.maker_trader == reported.maker_trader
@@ -132,10 +208,22 @@ async fn main() {
         if !core_matches {
             mismatches += 1;
             println!("MISMATCH at match #{i}:");
-            println!("  replayed: maker={} taker={} price={} amount={} seller={}",
-                hex::encode(replayed.maker_order_id), hex::encode(replayed.taker_order_id), replayed.price, replayed.amount, hex::encode(replayed.seller));
-            println!("  reported: maker={} taker={} price={} amount={} seller={}",
-                hex::encode(reported.maker_order_id), hex::encode(reported.taker_order_id), reported.price, reported.amount, hex::encode(reported.seller));
+            println!(
+                "  replayed: maker={} taker={} price={} amount={} seller={}",
+                hex::encode(replayed.maker_order_id),
+                hex::encode(replayed.taker_order_id),
+                replayed.price,
+                replayed.amount,
+                hex::encode(replayed.seller)
+            );
+            println!(
+                "  reported: maker={} taker={} price={} amount={} seller={}",
+                hex::encode(reported.maker_order_id),
+                hex::encode(reported.taker_order_id),
+                reported.price,
+                reported.amount,
+                hex::encode(reported.seller)
+            );
         }
     }
 

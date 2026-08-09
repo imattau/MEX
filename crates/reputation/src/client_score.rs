@@ -50,7 +50,10 @@ impl ClientScoreAggregator {
     }
 
     pub fn record_trade_outcome(&mut self, outcome: TradeOutcome) {
-        let entry = self.outcomes.entry(outcome.node_id).or_insert_with(Vec::new);
+        let entry = self
+            .outcomes
+            .entry(outcome.node_id)
+            .or_insert_with(Vec::new);
         entry.push(outcome);
         if entry.len() > self.max_reports_per_node {
             entry.remove(0);
@@ -156,7 +159,10 @@ impl ClientScoreAggregator {
 
         for metric in &outcome.metrics {
             let (metric_score, weight) = match metric {
-                TradeMetric::MatchFairness { slippage_bps, suspicious } => {
+                TradeMetric::MatchFairness {
+                    slippage_bps,
+                    suspicious,
+                } => {
                     if *suspicious {
                         (0.0, 0.3)
                     } else {
@@ -164,7 +170,10 @@ impl ClientScoreAggregator {
                         (n, 0.2)
                     }
                 }
-                TradeMetric::SettlementSpeed { actual_latency_secs, expected_latency_secs } => {
+                TradeMetric::SettlementSpeed {
+                    actual_latency_secs,
+                    expected_latency_secs,
+                } => {
                     if *expected_latency_secs == 0.0 {
                         (1.0, 0.3)
                     } else {

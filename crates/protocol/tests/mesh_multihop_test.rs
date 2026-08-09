@@ -12,7 +12,9 @@
 // means each relay only forwards toward higher IDs, so this chain
 // propagates in exactly one direction with no risk of loops.
 
-use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+use common::{
+    FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+};
 use ed25519_dalek::Signer;
 use protocol::{MeshConfig, MeshNode, UdpTransport, WireMessage};
 
@@ -52,7 +54,10 @@ fn now_ms() -> f64 {
 // Reads from `transport` until a Flood arrives (skipping heartbeats and
 // any message that fails to authenticate, exactly like
 // mesh_test.rs::test_flood_forwarding_over_udp), or the timeout elapses.
-async fn wait_for_flood(transport: &UdpTransport, timeout: std::time::Duration) -> Option<(NodeId, FloodMessage)> {
+async fn wait_for_flood(
+    transport: &UdpTransport,
+    timeout: std::time::Duration,
+) -> Option<(NodeId, FloodMessage)> {
     tokio::time::timeout(timeout, async {
         loop {
             match transport.recv().await {
@@ -109,15 +114,25 @@ async fn test_multi_hop_forwarding_across_three_real_relay_nodes() {
         timestamp: now_ms(),
         source_region: Region::UsEast1,
     };
-    injector.send(NodeId(1), WireMessage::Flood(flood_msg)).await.unwrap();
+    injector
+        .send(NodeId(1), WireMessage::Flood(flood_msg))
+        .await
+        .unwrap();
 
     let (from, fm) = wait_for_flood(&observer, std::time::Duration::from_secs(2))
         .await
         .expect("observer never received the flood message after 3 real relay hops");
 
-    assert_eq!(from, NodeId(3), "final hop should arrive from node3, the last real relay");
+    assert_eq!(
+        from,
+        NodeId(3),
+        "final hop should arrive from node3, the last real relay"
+    );
     assert_eq!(fm.order.id, order.id);
-    assert_eq!(fm.hop_count, 3, "three real relay hops (node1, node2, node3) should bring hop_count to 3");
+    assert_eq!(
+        fm.hop_count, 3,
+        "three real relay hops (node1, node2, node3) should bring hop_count to 3"
+    );
     assert_eq!(
         fm.path,
         vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
@@ -177,7 +192,10 @@ async fn test_down_relay_silently_breaks_downstream_propagation() {
         timestamp: now_ms(),
         source_region: Region::UsEast1,
     };
-    injector.send(NodeId(1), WireMessage::Flood(flood_msg)).await.unwrap();
+    injector
+        .send(NodeId(1), WireMessage::Flood(flood_msg))
+        .await
+        .unwrap();
 
     // node1 receives and forwards to node2's address -- node2 isn't
     // running, so that UDP send succeeds locally (nothing to reject it)

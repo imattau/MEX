@@ -49,8 +49,10 @@ mod tests {
         low_nonce.nonce = 41;
         let msg3 = OrderValidator::serialize_order_message(&low_nonce);
         low_nonce.signature = signing_key.sign(&msg3).to_vec();
-        assert!(!validator.validate_order(&low_nonce),
-            "Nonce sequencing blocks lower nonces");
+        assert!(
+            !validator.validate_order(&low_nonce),
+            "Nonce sequencing blocks lower nonces"
+        );
     }
 
     #[test]

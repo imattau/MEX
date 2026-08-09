@@ -1,6 +1,6 @@
 pub mod fees;
-pub mod types;
 pub mod tests;
+pub mod types;
 
 pub use fees::FeeCalculator;
 pub use types::FloodMessage;

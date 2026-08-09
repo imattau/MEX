@@ -37,8 +37,8 @@
 
 use common::{NodeId, Region};
 use orderlog::{HashChainLog, OrderReceipt};
-use prover::BACKEND;
 use protocol::{MeshConfig, MeshNode, WireMessage};
+use prover::BACKEND;
 use watchtower::{MockOnChainState, WatchtowerClient};
 
 // Shared by both the settlement-proof and order-log-mirror loops --
@@ -75,16 +75,27 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = std::env::args().collect();
-    let node_id: u32 = args.get(1).expect("usage: watchtower_node <node_id> <listen_addr> <peers>").parse().unwrap();
-    let listen_addr: std::net::SocketAddr = args.get(2).expect("missing listen_addr").parse().unwrap();
+    let node_id: u32 = args
+        .get(1)
+        .expect("usage: watchtower_node <node_id> <listen_addr> <peers>")
+        .parse()
+        .unwrap();
+    let listen_addr: std::net::SocketAddr =
+        args.get(2).expect("missing listen_addr").parse().unwrap();
     let peers_str = args.get(3).cloned().unwrap_or_default();
 
     let peers: Vec<(NodeId, std::net::SocketAddr, [u8; 32])> = peers_str
         .split(',')
         .filter(|s| !s.is_empty())
         .map(|entry| {
-            let (id_part, addr_part) = entry.split_once('@').expect("peer entries must be id@host:port");
-            (NodeId(id_part.parse().unwrap()), addr_part.parse().unwrap(), [0u8; 32])
+            let (id_part, addr_part) = entry
+                .split_once('@')
+                .expect("peer entries must be id@host:port");
+            (
+                NodeId(id_part.parse().unwrap()),
+                addr_part.parse().unwrap(),
+                [0u8; 32],
+            )
         })
         .collect();
 
@@ -146,7 +157,8 @@ async fn main() {
                         self_id,
                         from,
                         format!("order log entry seq={seq} failed try_append_remote: {e}"),
-                    ).await;
+                    )
+                    .await;
                 }
             }
         }

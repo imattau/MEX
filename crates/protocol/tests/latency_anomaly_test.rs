@@ -96,8 +96,22 @@ async fn test_no_false_positive_under_normal_conditions() {
     let base = 10800u16;
     let addrs: Vec<_> = (0..4).map(|i| addr(base + i)).collect();
 
-    let node1 = spawn_relay(1, addrs[1], (NodeId(0), addrs[0]), Some((NodeId(2), addrs[2])), None).await;
-    let node2 = spawn_relay(2, addrs[2], (NodeId(1), addrs[1]), Some((NodeId(3), addrs[3])), None).await;
+    let node1 = spawn_relay(
+        1,
+        addrs[1],
+        (NodeId(0), addrs[0]),
+        Some((NodeId(2), addrs[2])),
+        None,
+    )
+    .await;
+    let node2 = spawn_relay(
+        2,
+        addrs[2],
+        (NodeId(1), addrs[1]),
+        Some((NodeId(3), addrs[3])),
+        None,
+    )
+    .await;
     let mut node3 = spawn_relay(3, addrs[3], (NodeId(2), addrs[2]), None, None).await;
     let mut misconduct = node3.misconduct_receiver();
 
@@ -113,8 +127,17 @@ async fn test_no_false_positive_under_normal_conditions() {
     injector.register_peer(NodeId(1), addrs[1], [0u8; 32]);
 
     let order = signed_order(31, 1);
-    let flood_msg = FloodMessage { order, hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-    injector.send(NodeId(1), WireMessage::Flood(flood_msg)).await.unwrap();
+    let flood_msg = FloodMessage {
+        order,
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: now_ms(),
+        source_region: Region::UsEast1,
+    };
+    injector
+        .send(NodeId(1), WireMessage::Flood(flood_msg))
+        .await
+        .unwrap();
 
     let result = tokio::time::timeout(Duration::from_millis(700), misconduct.recv()).await;
     assert!(
@@ -132,8 +155,22 @@ async fn test_detects_a_deliberately_delayed_relay() {
     // withholding, simulated. Its HopWitness commitment is NOT delayed
     // (see node.rs), so this is exactly the naive-withholding case this
     // mechanism is scoped to catch.
-    let node1 = spawn_relay(1, addrs[1], (NodeId(0), addrs[0]), Some((NodeId(2), addrs[2])), Some(300)).await;
-    let node2 = spawn_relay(2, addrs[2], (NodeId(1), addrs[1]), Some((NodeId(3), addrs[3])), None).await;
+    let node1 = spawn_relay(
+        1,
+        addrs[1],
+        (NodeId(0), addrs[0]),
+        Some((NodeId(2), addrs[2])),
+        Some(300),
+    )
+    .await;
+    let node2 = spawn_relay(
+        2,
+        addrs[2],
+        (NodeId(1), addrs[1]),
+        Some((NodeId(3), addrs[3])),
+        None,
+    )
+    .await;
     let mut node3 = spawn_relay(3, addrs[3], (NodeId(2), addrs[2]), None, None).await;
     let mut misconduct = node3.misconduct_receiver();
 
@@ -147,15 +184,32 @@ async fn test_detects_a_deliberately_delayed_relay() {
     injector.register_peer(NodeId(1), addrs[1], [0u8; 32]);
 
     let order = signed_order(32, 1);
-    let flood_msg = FloodMessage { order, hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-    injector.send(NodeId(1), WireMessage::Flood(flood_msg)).await.unwrap();
+    let flood_msg = FloodMessage {
+        order,
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: now_ms(),
+        source_region: Region::UsEast1,
+    };
+    injector
+        .send(NodeId(1), WireMessage::Flood(flood_msg))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(2), misconduct.recv())
         .await
         .expect("timed out waiting for node3 to receive a misconduct report from node2")
         .expect("misconduct channel closed unexpectedly");
 
-    assert_eq!(event.subject, NodeId(1), "node1 -- the relay that actually delayed its forward -- should be the reported subject");
-    assert_eq!(event.reporter, NodeId(2), "node2 -- the peer that measured the anomalous transit time -- should be the reporter");
+    assert_eq!(
+        event.subject,
+        NodeId(1),
+        "node1 -- the relay that actually delayed its forward -- should be the reported subject"
+    );
+    assert_eq!(
+        event.reporter,
+        NodeId(2),
+        "node2 -- the peer that measured the anomalous transit time -- should be the reporter"
+    );
     println!("detected: {}", event.reason);
 }

@@ -35,7 +35,9 @@ use std::time::Duration;
 fn parse_pubkey(hex_str: &str, label: &str) -> [u8; 32] {
     let bytes = hex::decode(hex_str.trim_start_matches("0x"))
         .unwrap_or_else(|e| panic!("{label} is not valid hex: {e}"));
-    bytes.try_into().unwrap_or_else(|v: Vec<u8>| panic!("{label} must be exactly 32 bytes, got {}", v.len()))
+    bytes
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| panic!("{label} must be exactly 32 bytes, got {}", v.len()))
 }
 
 fn now_secs() -> f64 {
@@ -47,7 +49,9 @@ fn now_secs() -> f64 {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 9 {
         eprintln!("usage: verify_mesh_chain_status <rpc_url> <query_private_key> <factory_address> <registry_address> <pubkey_a_hex> <pubkey_b_hex> <stake_threshold_wei> <expect_quorum: yes|no>");
@@ -78,8 +82,16 @@ async fn main() {
         region: Region::UsEast1,
         listen_addr: detector_addr,
         peers: vec![
-            (NodeId(20), "127.0.0.1:19998".parse().unwrap(), active_pubkey),
-            (NodeId(21), "127.0.0.1:19999".parse().unwrap(), inactive_pubkey),
+            (
+                NodeId(20),
+                "127.0.0.1:19998".parse().unwrap(),
+                active_pubkey,
+            ),
+            (
+                NodeId(21),
+                "127.0.0.1:19999".parse().unwrap(),
+                inactive_pubkey,
+            ),
         ],
         node_key: None,
         mesh_encryption_key: None,
@@ -111,16 +123,24 @@ async fn main() {
     println!("waiting for at least one real NodeRegistry poll to land...");
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    let mut injector = UdpTransport::bind("127.0.0.1:19501".parse().unwrap(), None).await.unwrap();
+    let mut injector = UdpTransport::bind("127.0.0.1:19501".parse().unwrap(), None)
+        .await
+        .unwrap();
     injector.register_peer(NodeId(1), detector_addr, [0u8; 32]);
     let subject = NodeId(99);
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(1), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s live-chain-gated claim"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(1),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s live-chain-gated claim"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_secs(3), confirmed.recv()).await;

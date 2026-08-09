@@ -106,15 +106,18 @@ impl ReputationEngine {
             let client_score = self.client_engine.recompute_score(node_id);
             state.client_score = client_score;
 
-            let composite_score = (p2p_score * SCORE_P2P_WEIGHT) + (client_score * SCORE_CLIENT_WEIGHT);
+            let composite_score =
+                (p2p_score * SCORE_P2P_WEIGHT) + (client_score * SCORE_CLIENT_WEIGHT);
             state.composite_score = composite_score.clamp(0.0, 1.0);
 
             let vesting_progress = self.stake_manager.calculate_vesting_progress(node_id, now);
-            let effective_stake = self.stake_manager.get_effective_stake(&node_id) as f64 * vesting_progress;
+            let effective_stake =
+                self.stake_manager.get_effective_stake(&node_id) as f64 * vesting_progress;
 
             let loyalty_mult = calculate_loyalty_multiplier(state, now);
             let id_penalty = calculate_id_penalty(state, now);
-            let base_score = state.composite_score * (effective_stake / 1000.0).clamp(0.0, 10.0).max(0.5);
+            let base_score =
+                state.composite_score * (effective_stake / 1000.0).clamp(0.0, 10.0).max(0.5);
 
             let mut reputation = (base_score * loyalty_mult * id_penalty).clamp(0.0, 100.0);
 
@@ -174,7 +177,9 @@ impl ReputationEngine {
                 }
                 PenaltyType::BondForfeiture(bond_type) => {
                     let _ = self.stake_manager.forfeit_bond(node_id, bond_type.clone());
-                    state.bonds.retain(|b| b.bond_type != *bond_type || !b.forfeited);
+                    state
+                        .bonds
+                        .retain(|b| b.bond_type != *bond_type || !b.forfeited);
                 }
                 PenaltyType::Downgrade => {
                     state.trust_level = TrustLevel::Newcomer;
@@ -280,7 +285,11 @@ fn calculate_recovery_multiplier(state: &ReputationState, now: f64) -> f64 {
     }
 }
 
-fn determine_trust_level(state: &ReputationState, now: f64, _stake_mgr: &StakeManager) -> TrustLevel {
+fn determine_trust_level(
+    state: &ReputationState,
+    now: f64,
+    _stake_mgr: &StakeManager,
+) -> TrustLevel {
     for penalty in &state.penalty_history {
         match &penalty.penalty_type {
             PenaltyType::PermanentBan => return TrustLevel::Banned,
@@ -293,17 +302,31 @@ fn determine_trust_level(state: &ReputationState, now: f64, _stake_mgr: &StakeMa
         }
     }
 
-    let has_tss_bond = state.bonds.iter().any(|b| b.bond_type == BondType::TSS && !b.forfeited);
-    let has_watchtower_bond = state.bonds.iter().any(|b| b.bond_type == BondType::Watchtower && !b.forfeited);
+    let has_tss_bond = state
+        .bonds
+        .iter()
+        .any(|b| b.bond_type == BondType::TSS && !b.forfeited);
+    let has_watchtower_bond = state
+        .bonds
+        .iter()
+        .any(|b| b.bond_type == BondType::Watchtower && !b.forfeited);
 
     match state.reputation_score {
         s if s < 0.1 => TrustLevel::Banned,
         s if s < 0.5 => TrustLevel::Newcomer,
         s if s < 10.0 => {
-            if has_watchtower_bond { TrustLevel::Contributor } else { TrustLevel::Newcomer }
+            if has_watchtower_bond {
+                TrustLevel::Contributor
+            } else {
+                TrustLevel::Newcomer
+            }
         }
         s if s < 50.0 => {
-            if has_tss_bond { TrustLevel::Trusted } else { TrustLevel::Contributor }
+            if has_tss_bond {
+                TrustLevel::Trusted
+            } else {
+                TrustLevel::Contributor
+            }
         }
         _ => {
             if has_tss_bond && state.staked_amount > 100_000 {
@@ -344,13 +367,16 @@ mod tests {
         engine.register_node(NodeId(1), 5000);
         engine.update_reputation(NodeId(1));
 
-        engine.apply_penalty(NodeId(1), PenaltyRecord {
-            penalty_type: PenaltyType::ReputationPenalty(20.0),
-            amount: 0,
-            applied_at: engine.now(),
-            expires_at: f64::MAX,
-            reason: "test".to_string(),
-        });
+        engine.apply_penalty(
+            NodeId(1),
+            PenaltyRecord {
+                penalty_type: PenaltyType::ReputationPenalty(20.0),
+                amount: 0,
+                applied_at: engine.now(),
+                expires_at: f64::MAX,
+                reason: "test".to_string(),
+            },
+        );
 
         let state = engine.get_state(&NodeId(1)).unwrap();
         assert!(state.reputation_score < 50.0);

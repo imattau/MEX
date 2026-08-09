@@ -78,7 +78,11 @@ pub struct OrderBatchQuorum {
 
 impl OrderBatchQuorum {
     pub fn new(min_reporters: usize, window_secs: f64) -> Self {
-        Self { proposals: HashMap::new(), min_reporters, window_secs }
+        Self {
+            proposals: HashMap::new(),
+            min_reporters,
+            window_secs,
+        }
     }
 
     // Records `reporter`'s claim that `batch_key` resolves to
@@ -90,7 +94,13 @@ impl OrderBatchQuorum {
     // once min_reporters distinct reporters agree on THIS hash; None
     // otherwise (not enough agreement yet -- including when reporters
     // are actively disagreeing, see distinct_hash_count).
-    pub fn record(&mut self, batch_key: [u8; 32], reporter: NodeId, proposed_hash: [u8; 32], now: f64) -> Option<[u8; 32]> {
+    pub fn record(
+        &mut self,
+        batch_key: [u8; 32],
+        reporter: NodeId,
+        proposed_hash: [u8; 32],
+        now: f64,
+    ) -> Option<[u8; 32]> {
         let by_hash = self.proposals.entry(batch_key).or_default();
         for reporters in by_hash.values_mut() {
             reporters.retain(|_, last_seen| now - *last_seen < self.window_secs);
@@ -124,14 +134,22 @@ mod tests {
     fn test_compute_batch_key_is_order_insensitive() {
         let a = [1u8; 32];
         let b = [2u8; 32];
-        assert_eq!(compute_batch_key(&[a, b]), compute_batch_key(&[b, a]), "batch_key must be the same regardless of the order order_ids are passed in");
+        assert_eq!(
+            compute_batch_key(&[a, b]),
+            compute_batch_key(&[b, a]),
+            "batch_key must be the same regardless of the order order_ids are passed in"
+        );
     }
 
     #[test]
     fn test_compute_proposal_hash_is_order_sensitive() {
         let a = [1u8; 32];
         let b = [2u8; 32];
-        assert_ne!(compute_proposal_hash(&[a, b]), compute_proposal_hash(&[b, a]), "proposal hash must differ when the resolved SEQUENCE differs");
+        assert_ne!(
+            compute_proposal_hash(&[a, b]),
+            compute_proposal_hash(&[b, a]),
+            "proposal hash must differ when the resolved SEQUENCE differs"
+        );
     }
 
     #[test]
@@ -144,7 +162,10 @@ mod tests {
     fn test_two_distinct_reporters_on_same_hash_reach_quorum() {
         let mut q = OrderBatchQuorum::new(2, 60.0);
         assert_eq!(q.record([1u8; 32], NodeId(1), [9u8; 32], 0.0), None);
-        assert_eq!(q.record([1u8; 32], NodeId(2), [9u8; 32], 0.0), Some([9u8; 32]));
+        assert_eq!(
+            q.record([1u8; 32], NodeId(2), [9u8; 32], 0.0),
+            Some([9u8; 32])
+        );
     }
 
     #[test]
@@ -159,8 +180,16 @@ mod tests {
     fn test_disagreeing_reporters_never_reach_quorum_on_either_hash() {
         let mut q = OrderBatchQuorum::new(2, 60.0);
         assert_eq!(q.record([1u8; 32], NodeId(1), [9u8; 32], 0.0), None);
-        assert_eq!(q.record([1u8; 32], NodeId(2), [8u8; 32], 0.0), None, "a different reporter proposing a DIFFERENT hash must not confirm the first one");
-        assert_eq!(q.distinct_hash_count(&[1u8; 32]), 2, "genuine disagreement should be visible as more than one distinct hash");
+        assert_eq!(
+            q.record([1u8; 32], NodeId(2), [8u8; 32], 0.0),
+            None,
+            "a different reporter proposing a DIFFERENT hash must not confirm the first one"
+        );
+        assert_eq!(
+            q.distinct_hash_count(&[1u8; 32]),
+            2,
+            "genuine disagreement should be visible as more than one distinct hash"
+        );
     }
 
     #[test]
@@ -172,7 +201,10 @@ mod tests {
         assert_eq!(q.distinct_hash_count(&[2u8; 32]), 1);
         // Same reporter, same hash, but DIFFERENT batch_key -- must not
         // count toward the other batch_key's quorum.
-        assert_eq!(q.record([2u8; 32], NodeId(2), [9u8; 32], 0.0), Some([9u8; 32]));
+        assert_eq!(
+            q.record([2u8; 32], NodeId(2), [9u8; 32], 0.0),
+            Some([9u8; 32])
+        );
         assert_eq!(q.distinct_hash_count(&[1u8; 32]), 1, "batch_key [1u8;32] must still only have 1 reporter -- unaffected by votes on a different batch_key");
     }
 
@@ -181,6 +213,10 @@ mod tests {
         let mut q = OrderBatchQuorum::new(2, 10.0);
         assert_eq!(q.record([1u8; 32], NodeId(1), [9u8; 32], 0.0), None);
         // Reporter 2 votes long after reporter 1's vote has expired.
-        assert_eq!(q.record([1u8; 32], NodeId(2), [9u8; 32], 100.0), None, "reporter 1's stale vote must not still count toward quorum");
+        assert_eq!(
+            q.record([1u8; 32], NodeId(2), [9u8; 32], 100.0),
+            None,
+            "reporter 1's stale vote must not still count toward quorum"
+        );
     }
 }

@@ -10,10 +10,10 @@
 //     <rpc_url> <deployer_private_key> <factory_address> <registry_address>
 
 use alloy::network::EthereumWallet;
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
-use alloy::network::TransactionBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use chain::OnChainAccount;
@@ -64,8 +64,16 @@ fn u64_to_bytes32(val: u64) -> [u8; 32] {
 
 async fn fund(provider: &impl Provider, to: Address, eth: &str) {
     let wei: u128 = eth.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
-    let tx = TransactionRequest::default().with_to(to).with_value(U256::from(wei));
-    provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
+    let tx = TransactionRequest::default()
+        .with_to(to)
+        .with_value(U256::from(wei));
+    provider
+        .send_transaction(tx)
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
 }
 
 #[tokio::main]
@@ -82,15 +90,31 @@ async fn main() {
     let deployer_signer: PrivateKeySigner = deployer_key.trim_start_matches("0x").parse().unwrap();
     let deployer_address = deployer_signer.address();
     let deployer_wallet = EthereumWallet::from(deployer_signer);
-    let deployer_provider = ProviderBuilder::new().wallet(deployer_wallet).connect_http(rpc_url.parse().unwrap());
+    let deployer_provider = ProviderBuilder::new()
+        .wallet(deployer_wallet)
+        .connect_http(rpc_url.parse().unwrap());
 
-    let node_pubkey: OnChainAccount = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"NETT"); b };
+    let node_pubkey: OnChainAccount = {
+        let mut b = [0u8; 32];
+        b[0..4].copy_from_slice(b"NETT");
+        b
+    };
     let registry_contract = INodeRegistryNet::new(registry_addr, &deployer_provider);
-    if !registry_contract.isActiveNode(FixedBytes::from(node_pubkey)).call().await.unwrap() {
+    if !registry_contract
+        .isActiveNode(FixedBytes::from(node_pubkey))
+        .call()
+        .await
+        .unwrap()
+    {
         registry_contract
             .registerNode(FixedBytes::from(node_pubkey), "netting-test".to_string())
             .value(U256::from(10_000_000_000_000_000_000u128))
-            .send().await.unwrap().get_receipt().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .get_receipt()
+            .await
+            .unwrap();
     }
     println!("settlement node registered: OK\n");
 
@@ -100,23 +124,57 @@ async fn main() {
     println!("=== Netted case: 1 maker, {MAX_BATCH_TRADES} distinct counterparties, 1 proof, 1 settleBatchWithFees call ===");
     let maker_signer = PrivateKeySigner::random();
     fund(&deployer_provider, maker_signer.address(), "10").await;
-    let maker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..5].copy_from_slice(b"NETMK"); b };
+    let maker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0..5].copy_from_slice(b"NETMK");
+        b
+    };
 
     let mut tokens = chain_ethereum::TokenRegistry::new();
     tokens.register([0u8; 20], "ETH-USD");
-    let mut maker_client = TraderClient::new(&rpc_url, &hex::encode(maker_signer.to_bytes()), &factory_address, maker_pubkey, tokens.clone(), 0).await.unwrap();
+    let mut maker_client = TraderClient::new(
+        &rpc_url,
+        &hex::encode(maker_signer.to_bytes()),
+        &factory_address,
+        maker_pubkey,
+        tokens.clone(),
+        0,
+    )
+    .await
+    .unwrap();
     maker_client.ensure_escrow().await.unwrap();
-    maker_client.deposit_native(U256::from(5_000_000_000_000_000_000u128)).await.unwrap();
+    maker_client
+        .deposit_native(U256::from(5_000_000_000_000_000_000u128))
+        .await
+        .unwrap();
 
     let mut matches = Vec::with_capacity(MAX_BATCH_TRADES);
     for i in 0..MAX_BATCH_TRADES {
         let taker_signer = PrivateKeySigner::random();
         fund(&deployer_provider, taker_signer.address(), "1").await;
-        let taker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"NETT"); b[4] = i as u8; b };
-        let taker_client = TraderClient::new(&rpc_url, &hex::encode(taker_signer.to_bytes()), &factory_address, taker_pubkey, tokens.clone(), 0).await.unwrap();
+        let taker_pubkey: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(b"NETT");
+            b[4] = i as u8;
+            b
+        };
+        let taker_client = TraderClient::new(
+            &rpc_url,
+            &hex::encode(taker_signer.to_bytes()),
+            &factory_address,
+            taker_pubkey,
+            tokens.clone(),
+            0,
+        )
+        .await
+        .unwrap();
         taker_client.ensure_escrow().await.unwrap();
 
-        let deadline = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
         let m = Match {
             maker_order_id: u64_to_bytes32(30_000 + i as u64 * 2),
             taker_order_id: u64_to_bytes32(30_000 + i as u64 * 2 + 1),
@@ -155,26 +213,47 @@ async fn main() {
 
     let entries: Vec<ISettlementFactoryNet::TradeEntry> = matches
         .iter()
-        .map(|(m, trade_hash, taker_address)| ISettlementFactoryNet::TradeEntry {
-            trader: maker_signer.address(),
-            counterparty: *taker_address,
-            token: Address::ZERO,
-            amount: U256::from(m.price * m.amount),
-            fee: U256::from((m.price * m.amount) * m.fee_basis_points as u64 / 10_000),
-            deadline: U256::from(m.settlement_deadline),
-            tradeHash: FixedBytes::from(*trade_hash),
-            assignedNode: FixedBytes::from(node_pubkey),
-        })
+        .map(
+            |(m, trade_hash, taker_address)| ISettlementFactoryNet::TradeEntry {
+                trader: maker_signer.address(),
+                counterparty: *taker_address,
+                token: Address::ZERO,
+                amount: U256::from(m.price * m.amount),
+                fee: U256::from((m.price * m.amount) * m.fee_basis_points as u64 / 10_000),
+                deadline: U256::from(m.settlement_deadline),
+                tradeHash: FixedBytes::from(*trade_hash),
+                assignedNode: FixedBytes::from(node_pubkey),
+            },
+        )
         .collect();
-    let fee_config = ISettlementFactoryNet::FeeConfig { feeRecipient: deployer_address, tier: 0 };
+    let fee_config = ISettlementFactoryNet::FeeConfig {
+        feeRecipient: deployer_address,
+        tier: 0,
+    };
     let calldata = prover::decode_proof_calldata(&proof).unwrap();
-    let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
-    let b = [
-        [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
-        [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+    let a = [
+        U256::from_be_bytes(calldata.a[0]),
+        U256::from_be_bytes(calldata.a[1]),
     ];
-    let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
-    let input: Vec<U256> = calldata.public_inputs.iter().map(|bytes| U256::from_be_bytes(*bytes)).collect();
+    let b = [
+        [
+            U256::from_be_bytes(calldata.b[0][0]),
+            U256::from_be_bytes(calldata.b[0][1]),
+        ],
+        [
+            U256::from_be_bytes(calldata.b[1][0]),
+            U256::from_be_bytes(calldata.b[1][1]),
+        ],
+    ];
+    let c = [
+        U256::from_be_bytes(calldata.c[0]),
+        U256::from_be_bytes(calldata.c[1]),
+    ];
+    let input: Vec<U256> = calldata
+        .public_inputs
+        .iter()
+        .map(|bytes| U256::from_be_bytes(*bytes))
+        .collect();
 
     let factory_contract = ISettlementFactoryNet::new(factory_addr, &deployer_provider);
     let receipt = factory_contract

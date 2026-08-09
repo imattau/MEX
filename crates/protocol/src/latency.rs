@@ -38,7 +38,9 @@ impl Default for PeerLatencyStats {
 
 impl PeerLatencyStats {
     pub fn new() -> Self {
-        Self { samples: HashMap::new() }
+        Self {
+            samples: HashMap::new(),
+        }
     }
 
     pub fn record_rtt(&mut self, peer: NodeId, rtt_ms: f64) {
@@ -119,7 +121,9 @@ impl PeerLatencyStats {
     // misconduct reporting -- being suspiciously fast isn't provable
     // misconduct the way being slow is.
     pub fn is_implausibly_fast(&self, peer: NodeId, observed_one_way_ms: f64) -> bool {
-        let Some((mean, stddev)) = self.mean_stddev(peer) else { return false; };
+        let Some((mean, stddev)) = self.mean_stddev(peer) else {
+            return false;
+        };
         let one_way_mean = mean / 2.0;
         let tolerance = (stddev * ANOMALY_STDDEV_MULTIPLIER).max(MIN_TOLERANCE_MS);
         observed_one_way_ms < one_way_mean - tolerance
@@ -142,8 +146,14 @@ mod tests {
         for _ in 0..20 {
             stats.record_rtt(NodeId(1), 2.0);
         }
-        assert!(!stats.is_anomalous(NodeId(1), 1.5), "well within baseline must not be flagged");
-        assert!(stats.is_anomalous(NodeId(1), 200.0), "100x the established one-way estimate must be flagged");
+        assert!(
+            !stats.is_anomalous(NodeId(1), 1.5),
+            "well within baseline must not be flagged"
+        );
+        assert!(
+            stats.is_anomalous(NodeId(1), 200.0),
+            "100x the established one-way estimate must be flagged"
+        );
     }
 
     #[test]
@@ -176,9 +186,18 @@ mod tests {
         for _ in 0..20 {
             stats.record_rtt(NodeId(1), 500.0);
         }
-        assert!(!stats.is_implausibly_fast(NodeId(1), 250.0), "a transit matching the baseline exactly must not be flagged");
-        assert!(!stats.is_implausibly_fast(NodeId(1), 230.0), "modest, plausible jitter below the mean must not be flagged");
-        assert!(stats.is_implausibly_fast(NodeId(1), 0.5), "a transit far faster than the established baseline must be flagged as implausible");
+        assert!(
+            !stats.is_implausibly_fast(NodeId(1), 250.0),
+            "a transit matching the baseline exactly must not be flagged"
+        );
+        assert!(
+            !stats.is_implausibly_fast(NodeId(1), 230.0),
+            "modest, plausible jitter below the mean must not be flagged"
+        );
+        assert!(
+            stats.is_implausibly_fast(NodeId(1), 0.5),
+            "a transit far faster than the established baseline must be flagged as implausible"
+        );
     }
 
     #[test]

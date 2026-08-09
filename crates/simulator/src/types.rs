@@ -4,18 +4,9 @@ use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    OrderGenerated {
-        order: Order,
-        source_node: NodeId,
-    },
-    PacketDeliver {
-        to_node: NodeId,
-        msg: FloodMessage,
-    },
-    NodeStatusChange {
-        node_id: NodeId,
-        online: bool,
-    },
+    OrderGenerated { order: Order, source_node: NodeId },
+    PacketDeliver { to_node: NodeId, msg: FloodMessage },
+    NodeStatusChange { node_id: NodeId, online: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +32,10 @@ impl PartialOrd for ScheduledEvent {
 impl Ord for ScheduledEvent {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap behavior: smaller time comes first
-        other.time.partial_cmp(&self.time).unwrap_or(Ordering::Equal)
+        other
+            .time
+            .partial_cmp(&self.time)
+            .unwrap_or(Ordering::Equal)
     }
 }
 

@@ -106,7 +106,12 @@ impl StakeManager {
         Ok(())
     }
 
-    pub fn slash(&mut self, node_id: NodeId, amount: u64, reason: SlashReason) -> Result<u64, String> {
+    pub fn slash(
+        &mut self,
+        node_id: NodeId,
+        amount: u64,
+        reason: SlashReason,
+    ) -> Result<u64, String> {
         let staked = self.stakes.get_mut(&node_id).ok_or("Node not found")?;
         let slash_amount = amount.min(*staked);
         *staked -= slash_amount;
@@ -121,7 +126,10 @@ impl StakeManager {
     pub fn forfeit_bond(&mut self, node_id: NodeId, bond_type: BondType) -> Result<u64, String> {
         let bonds = self.bonds.get_mut(&node_id).ok_or("Node not found")?;
 
-        if let Some(bond) = bonds.iter_mut().find(|b| b.bond_type == bond_type && !b.forfeited) {
+        if let Some(bond) = bonds
+            .iter_mut()
+            .find(|b| b.bond_type == bond_type && !b.forfeited)
+        {
             bond.forfeited = true;
             bond.forfeited_at = Some(
                 std::time::SystemTime::now()
@@ -154,10 +162,18 @@ impl StakeManager {
 
     pub fn get_bonds(&self, node_id: &NodeId) -> &[ReputationBond] {
         static EMPTY: Vec<ReputationBond> = Vec::new();
-        self.bonds.get(node_id).map(|v| v.as_slice()).unwrap_or(&EMPTY)
+        self.bonds
+            .get(node_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&EMPTY)
     }
 
-    pub fn check_bond_conditions(&self, node_id: &NodeId, uptime_percentage: f64, has_disputes_lost: bool) -> Vec<BondType> {
+    pub fn check_bond_conditions(
+        &self,
+        node_id: &NodeId,
+        uptime_percentage: f64,
+        has_disputes_lost: bool,
+    ) -> Vec<BondType> {
         let mut forfeited = Vec::new();
         let bonds = self.get_bonds(node_id);
 

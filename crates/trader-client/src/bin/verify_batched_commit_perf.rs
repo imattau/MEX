@@ -13,10 +13,10 @@
 //     <rpc_url> <deployer_private_key> <factory_address> <registry_address> [n]
 
 use alloy::network::EthereumWallet;
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
-use alloy::network::TransactionBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use chain::OnChainAccount;
@@ -50,8 +50,16 @@ sol! {
 
 async fn fund(provider: &impl Provider, to: Address, eth: &str) {
     let wei: u128 = eth.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
-    let tx = TransactionRequest::default().with_to(to).with_value(U256::from(wei));
-    provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
+    let tx = TransactionRequest::default()
+        .with_to(to)
+        .with_value(U256::from(wei));
+    provider
+        .send_transaction(tx)
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
 }
 
 fn u64_to_bytes32(val: u64) -> [u8; 32] {
@@ -77,21 +85,62 @@ async fn setup_pair(
     fund(deployer_provider, maker_eth.address(), "5").await;
     fund(deployer_provider, taker_eth.address(), "5").await;
 
-    let maker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0] = seed; b[1..5].copy_from_slice(b"MAKR"); b };
-    let taker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0] = seed; b[1..5].copy_from_slice(b"TAKR"); b };
+    let maker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0] = seed;
+        b[1..5].copy_from_slice(b"MAKR");
+        b
+    };
+    let taker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0] = seed;
+        b[1..5].copy_from_slice(b"TAKR");
+        b
+    };
 
     let mut tokens = chain_ethereum::TokenRegistry::new();
     tokens.register([0u8; 20], "ETH-USD");
-    let maker_client = TraderClient::new(rpc_url, &hex::encode(maker_eth.to_bytes()), factory_address, maker_pubkey, tokens.clone(), 0).await.unwrap();
-    let taker_client = TraderClient::new(rpc_url, &hex::encode(taker_eth.to_bytes()), factory_address, taker_pubkey, tokens, 0).await.unwrap();
+    let maker_client = TraderClient::new(
+        rpc_url,
+        &hex::encode(maker_eth.to_bytes()),
+        factory_address,
+        maker_pubkey,
+        tokens.clone(),
+        0,
+    )
+    .await
+    .unwrap();
+    let taker_client = TraderClient::new(
+        rpc_url,
+        &hex::encode(taker_eth.to_bytes()),
+        factory_address,
+        taker_pubkey,
+        tokens,
+        0,
+    )
+    .await
+    .unwrap();
     maker_client.ensure_escrow().await.unwrap();
     taker_client.ensure_escrow().await.unwrap();
-    maker_client.deposit_native(U256::from(2_000_000_000_000_000_000u128)).await.unwrap();
+    maker_client
+        .deposit_native(U256::from(2_000_000_000_000_000_000u128))
+        .await
+        .unwrap();
 
-    TraderPair { maker_client, maker_pubkey, taker_pubkey }
+    TraderPair {
+        maker_client,
+        maker_pubkey,
+        taker_pubkey,
+    }
 }
 
-fn build_match(maker_pubkey: [u8; 32], taker_pubkey: [u8; 32], node_pubkey: OnChainAccount, seed: u64, deadline: u64) -> Match {
+fn build_match(
+    maker_pubkey: [u8; 32],
+    taker_pubkey: [u8; 32],
+    node_pubkey: OnChainAccount,
+    seed: u64,
+    deadline: u64,
+) -> Match {
     Match {
         maker_order_id: u64_to_bytes32(seed * 2),
         taker_order_id: u64_to_bytes32(seed * 2 + 1),
@@ -124,20 +173,46 @@ async fn main() {
 
     let deployer_signer: PrivateKeySigner = deployer_key.trim_start_matches("0x").parse().unwrap();
     let deployer_wallet = EthereumWallet::from(deployer_signer);
-    let deployer_provider = ProviderBuilder::new().wallet(deployer_wallet).connect_http(rpc_url.parse().unwrap());
+    let deployer_provider = ProviderBuilder::new()
+        .wallet(deployer_wallet)
+        .connect_http(rpc_url.parse().unwrap());
     let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
 
-    let node_pubkey: OnChainAccount = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"BCOM"); b };
+    let node_pubkey: OnChainAccount = {
+        let mut b = [0u8; 32];
+        b[0..4].copy_from_slice(b"BCOM");
+        b
+    };
     let registry_contract = INodeRegistryPerf::new(registry_addr, &deployer_provider);
-    if !registry_contract.isActiveNode(FixedBytes::from(node_pubkey)).call().await.unwrap() {
+    if !registry_contract
+        .isActiveNode(FixedBytes::from(node_pubkey))
+        .call()
+        .await
+        .unwrap()
+    {
         registry_contract
-            .registerNode(FixedBytes::from(node_pubkey), "batched-commit-test".to_string())
+            .registerNode(
+                FixedBytes::from(node_pubkey),
+                "batched-commit-test".to_string(),
+            )
             .value(U256::from(10_000_000_000_000_000_000u128))
-            .send().await.unwrap().get_receipt().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .get_receipt()
+            .await
+            .unwrap();
     }
     println!("settlement node registered: OK\n");
 
-    let deadline = read_provider.get_block_by_number(alloy::eips::BlockNumberOrTag::Latest).await.unwrap().unwrap().header.timestamp + 3600;
+    let deadline = read_provider
+        .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+        .await
+        .unwrap()
+        .unwrap()
+        .header
+        .timestamp
+        + 3600;
 
     // === Baseline: N individual commitTrade transactions ===
     println!("=== Baseline: {n} individual commitTrade transactions ===");
@@ -146,9 +221,22 @@ async fn main() {
     let mut baseline_gas_total = 0u64;
     for i in 0..n {
         let mut pair = setup_pair(&rpc_url, &deployer_provider, &factory_address, i as u8).await;
-        let m = build_match(pair.maker_pubkey, pair.taker_pubkey, node_pubkey, i as u64, deadline);
-        pair.maker_client.commit_trade(&m).await.expect("baseline commitTrade failed");
-        let block = read_provider.get_block_by_number(alloy::eips::BlockNumberOrTag::Latest).await.unwrap().unwrap();
+        let m = build_match(
+            pair.maker_pubkey,
+            pair.taker_pubkey,
+            node_pubkey,
+            i as u64,
+            deadline,
+        );
+        pair.maker_client
+            .commit_trade(&m)
+            .await
+            .expect("baseline commitTrade failed");
+        let block = read_provider
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+            .await
+            .unwrap()
+            .unwrap();
         baseline_gas_total += block.header.gas_used;
         print!(".");
         use std::io::Write;
@@ -159,13 +247,31 @@ async fn main() {
     println!("baseline: {baseline_gas_total} total gas / {n} trades = {baseline_gas_per_trade} gas/trade\n");
 
     // === Batched: N traders sign off-chain, one commitTradeBatch call ===
-    println!("=== Batched: {n} traders sign off-chain (zero gas each), one commitTradeBatch call ===");
+    println!(
+        "=== Batched: {n} traders sign off-chain (zero gas each), one commitTradeBatch call ==="
+    );
     let mut entries = Vec::with_capacity(n);
     let mut signatures = Vec::with_capacity(n);
     for i in 0..n {
-        let mut pair = setup_pair(&rpc_url, &deployer_provider, &factory_address, (100 + i) as u8).await;
-        let m = build_match(pair.maker_pubkey, pair.taker_pubkey, node_pubkey, (1000 + i) as u64, deadline);
-        let (entry, sig) = pair.maker_client.sign_commit_authorization(&m).await.expect("sign_commit_authorization failed");
+        let mut pair = setup_pair(
+            &rpc_url,
+            &deployer_provider,
+            &factory_address,
+            (100 + i) as u8,
+        )
+        .await;
+        let m = build_match(
+            pair.maker_pubkey,
+            pair.taker_pubkey,
+            node_pubkey,
+            (1000 + i) as u64,
+            deadline,
+        );
+        let (entry, sig) = pair
+            .maker_client
+            .sign_commit_authorization(&m)
+            .await
+            .expect("sign_commit_authorization failed");
         entries.push(ISettlementFactoryPerf::TradeEntry {
             trader: entry.trader,
             counterparty: entry.counterparty,
@@ -194,7 +300,9 @@ async fn main() {
     assert!(receipt.status(), "commitTradeBatch must succeed");
     let batched_gas_total = receipt.gas_used;
     let batched_gas_per_trade = batched_gas_total / n as u64;
-    println!("batched: {batched_gas_total} total gas / {n} trades = {batched_gas_per_trade} gas/trade\n");
+    println!(
+        "batched: {batched_gas_total} total gas / {n} trades = {batched_gas_per_trade} gas/trade\n"
+    );
 
     println!("=== Result ===");
     println!("commitTrade (individual):    ~{baseline_gas_per_trade} gas/trade");

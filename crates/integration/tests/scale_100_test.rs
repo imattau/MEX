@@ -1,12 +1,12 @@
-use common::{Order, OrderSide, NodeId, Region, SettlementPreference, SettlementRequester};
+use common::{NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
-use rdma::{TraderMemoryRegionManager, PullScheduler};
-use validation::OrderValidator;
-use topology::{NetworkTopology, TopologyNode};
-use security::{encrypt_packet, decrypt_packet};
 use heartbeat::DeterministicHeartbeat;
-use prover::{TradeBatch, BACKEND, ProverBackend};
-use watchtower::{WatchtowerClient, MockOnChainState};
+use prover::{ProverBackend, TradeBatch, BACKEND};
+use rdma::{PullScheduler, TraderMemoryRegionManager};
+use security::{decrypt_packet, encrypt_packet};
+use topology::{NetworkTopology, TopologyNode};
+use validation::OrderValidator;
+use watchtower::{MockOnChainState, WatchtowerClient};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
@@ -48,7 +48,10 @@ fn test_scale_100_nodes_e2e() {
                     3 | 4 => Region::EuWest1,
                     _ => Region::ApSoutheast1,
                 },
-                position: (pos.0 + (node_idx as f64 * 0.001), pos.1 + (node_idx as f64 * 0.001)),
+                position: (
+                    pos.0 + (node_idx as f64 * 0.001),
+                    pos.1 + (node_idx as f64 * 0.001),
+                ),
                 zone_id,
             });
             node_idx += 1;
@@ -57,7 +60,10 @@ fn test_scale_100_nodes_e2e() {
     assert_eq!(nodes.len(), 100);
 
     let topology = NetworkTopology::generate(nodes, &zone_defs);
-    println!("  Generated network topology for {} nodes.", topology.routing_tables.len());
+    println!(
+        "  Generated network topology for {} nodes.",
+        topology.routing_tables.len()
+    );
 
     // 3. Setup Scaled Heartbeat Tracker
     let mut peers = Vec::new();
@@ -131,8 +137,16 @@ fn test_scale_100_nodes_e2e() {
     let msg_b = OrderValidator::serialize_order_message(&order_b);
     order_b_signed.signature = signing_key_b.sign(&msg_b).to_vec();
 
-    mr_manager.get_region_mut(&trader_a_bytes).unwrap().write_orders(&[order_a_signed]).unwrap();
-    mr_manager.get_region_mut(&trader_b_bytes).unwrap().write_orders(&[order_b_signed]).unwrap();
+    mr_manager
+        .get_region_mut(&trader_a_bytes)
+        .unwrap()
+        .write_orders(&[order_a_signed])
+        .unwrap();
+    mr_manager
+        .get_region_mut(&trader_b_bytes)
+        .unwrap()
+        .write_orders(&[order_b_signed])
+        .unwrap();
 
     // 6. Pull, Validate, and Match orders
     let (mut pulled_orders, _) = pull_scheduler.perform_pull(&mr_manager);

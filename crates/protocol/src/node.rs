@@ -3,7 +3,7 @@ use crate::heartbeat::HeartbeatTracker;
 use crate::transport::{UdpTransport, WireMessage};
 use crate::types::{FloodError, FloodSchedule, Peer, RoutingTable};
 use common::{FloodMessage, NodeId, Region};
-use security::{encrypt_packet, decrypt_packet};
+use security::{decrypt_packet, encrypt_packet};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,18 +39,15 @@ impl MeshNode {
         let start = std::time::Instant::now();
         let result = {
             let t = transport;
-            tokio::time::timeout(
-                tokio::time::Duration::from_secs(2),
-                async {
-                    loop {
-                        if let Ok((from, WireMessage::SignedHeartbeat { .. })) = t.recv().await {
-                            if from == peer_id {
-                                break;
-                            }
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+                loop {
+                    if let Ok((from, WireMessage::SignedHeartbeat { .. })) = t.recv().await {
+                        if from == peer_id {
+                            break;
                         }
                     }
-                },
-            )
+                }
+            })
             .await
         };
         let rtt = start.elapsed().as_secs_f64() * 1000.0;
@@ -82,9 +79,7 @@ impl CensorshipMonitor {
     fn new() -> Self {
         use std::num::NonZeroUsize;
         Self {
-            recent_orders: lru::LruCache::new(
-                NonZeroUsize::new(RECENT_ORDER_CACHE_SIZE).unwrap(),
-            ),
+            recent_orders: lru::LruCache::new(NonZeroUsize::new(RECENT_ORDER_CACHE_SIZE).unwrap()),
             peer_flags: HashMap::new(),
             flag_threshold: CENSORSHIP_FLAG_THRESHOLD,
             window_secs: CENSORSHIP_WINDOW_SECS,
@@ -98,7 +93,10 @@ impl CensorshipMonitor {
     fn flag_peer(&mut self, peer_id: NodeId, now_secs: u64) -> bool {
         let flags = self.peer_flags.entry(peer_id).or_default();
         flags.push_back(now_secs);
-        while flags.front().map_or(false, |t| now_secs - t > self.window_secs) {
+        while flags
+            .front()
+            .map_or(false, |t| now_secs - t > self.window_secs)
+        {
             flags.pop_front();
         }
         flags.len() as u32 >= self.flag_threshold
@@ -110,7 +108,10 @@ impl CensorshipMonitor {
             return None;
         }
         use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let idx = (seed as usize) % keys.len();
         Some(*keys[idx])
     }
@@ -167,13 +168,24 @@ impl HopLatencyMonitor {
         }
     }
 
-    fn on_flood_received(&mut self, order_id: [u8; 32], from: NodeId, recv_time: f64) -> Option<(NodeId, f64)> {
+    fn on_flood_received(
+        &mut self,
+        order_id: [u8; 32],
+        from: NodeId,
+        recv_time: f64,
+    ) -> Option<(NodeId, f64)> {
         self.pending_floods.insert((order_id, from), recv_time);
         self.try_match(order_id, from)
     }
 
-    fn on_witness_received(&mut self, order_id: [u8; 32], hop_node: NodeId, forwarded_at: f64) -> Option<(NodeId, f64)> {
-        self.pending_witnesses.insert((order_id, hop_node), forwarded_at);
+    fn on_witness_received(
+        &mut self,
+        order_id: [u8; 32],
+        hop_node: NodeId,
+        forwarded_at: f64,
+    ) -> Option<(NodeId, f64)> {
+        self.pending_witnesses
+            .insert((order_id, hop_node), forwarded_at);
         self.try_match(order_id, hop_node)
     }
 
@@ -187,11 +199,18 @@ impl HopLatencyMonitor {
         Some((hop_node, recv_time - forwarded_at))
     }
 
-    fn record_verdict(&mut self, order_id: [u8; 32], hop_node: NodeId, observed_ms: f64, anomalous: bool) {
+    fn record_verdict(
+        &mut self,
+        order_id: [u8; 32],
+        hop_node: NodeId,
+        observed_ms: f64,
+        anomalous: bool,
+    ) {
         if let Some(v) = self.verdicts.get_mut(&order_id) {
             v.push((hop_node, observed_ms, anomalous));
         } else {
-            self.verdicts.put(order_id, vec![(hop_node, observed_ms, anomalous)]);
+            self.verdicts
+                .put(order_id, vec![(hop_node, observed_ms, anomalous)]);
         }
     }
 
@@ -202,10 +221,17 @@ impl HopLatencyMonitor {
     // other recorded path at all -- a single-path observation is real
     // evidence on its own (Stage 1 already established that), just not
     // corroborated evidence.
-    fn has_corroborating_non_anomalous_hop(&mut self, order_id: &[u8; 32], hop_node: NodeId) -> bool {
+    fn has_corroborating_non_anomalous_hop(
+        &mut self,
+        order_id: &[u8; 32],
+        hop_node: NodeId,
+    ) -> bool {
         self.verdicts
             .get(order_id)
-            .map(|v| v.iter().any(|(h, _, anomalous)| *h != hop_node && !*anomalous))
+            .map(|v| {
+                v.iter()
+                    .any(|(h, _, anomalous)| *h != hop_node && !*anomalous)
+            })
             .unwrap_or(false)
     }
 }
@@ -281,7 +307,12 @@ struct MisconductQuorum {
 
 impl MisconductQuorum {
     fn new(min_reporters: usize, stake_threshold: f64, window_secs: f64) -> Self {
-        Self { accusations: HashMap::new(), min_reporters, stake_threshold, window_secs }
+        Self {
+            accusations: HashMap::new(),
+            min_reporters,
+            stake_threshold,
+            window_secs,
+        }
     }
 
     // Records `reporter`'s accusation of `subject`, worth `weight`, at
@@ -292,7 +323,13 @@ impl MisconductQuorum {
     // accumulating (still one vote per distinct reporter, just refreshed
     // -- see MeshNode's docs on report spam not manufacturing quorum).
     // Returns (quorum_now_met, distinct_reporter_count, total_weight).
-    fn record(&mut self, subject: NodeId, reporter: NodeId, weight: f64, now: f64) -> (bool, usize, f64) {
+    fn record(
+        &mut self,
+        subject: NodeId,
+        reporter: NodeId,
+        weight: f64,
+        now: f64,
+    ) -> (bool, usize, f64) {
         let reporters = self.accusations.entry(subject).or_default();
         reporters.retain(|_, (_, last_seen)| now - *last_seen < self.window_secs);
         reporters.insert(reporter, (weight, now));
@@ -335,13 +372,24 @@ pub struct MeshNode {
     // pattern as chain_status_tx/rx.
     origin_time_query_tx: mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)>,
     origin_time_query_rx: Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<f64>>)>>,
-    compare_orders_query_tx: mpsc::Sender<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)>,
-    compare_orders_query_rx: Option<mpsc::Receiver<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)>>,
+    compare_orders_query_tx: mpsc::Sender<(
+        [u8; 32],
+        [u8; 32],
+        oneshot::Sender<Option<crate::ordering::OrderingDecision>>,
+    )>,
+    compare_orders_query_rx: Option<
+        mpsc::Receiver<(
+            [u8; 32],
+            [u8; 32],
+            oneshot::Sender<Option<crate::ordering::OrderingDecision>>,
+        )>,
+    >,
     // Stage P1: OrderSequencer needs a (witnessing_hop, estimate)
     // snapshot per order, not just the estimate -- see sequencer.rs's
     // docs on why it needs the hop for its tie-break input too.
     earliest_witness_query_tx: mpsc::Sender<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)>,
-    earliest_witness_query_rx: Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)>>,
+    earliest_witness_query_rx:
+        Option<mpsc::Receiver<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)>>,
     misconduct_quorum: MisconductQuorum,
     // Stage P3a: whether multiple independent nodes' order-batch
     // proposals agree -- see crate::batch_quorum's docs.
@@ -537,10 +585,8 @@ impl MeshNode {
             config.schedule.unwrap_or_default(),
         );
 
-        let heartbeat = HeartbeatTracker::new(
-            config.heartbeat_interval_ms,
-            config.max_missed_heartbeats,
-        );
+        let heartbeat =
+            HeartbeatTracker::new(config.heartbeat_interval_ms, config.max_missed_heartbeats);
 
         let (tx, rx) = mpsc::channel(1024);
         let (echo_tx, echo_rx) = mpsc::channel(256);
@@ -586,7 +632,11 @@ impl MeshNode {
             // misconduct_stake_threshold's docs on why 0 is a no-op).
             misconduct_quorum: MisconductQuorum::new(
                 2,
-                if config.require_staked_reporters { config.misconduct_stake_threshold as f64 } else { 0.0 },
+                if config.require_staked_reporters {
+                    config.misconduct_stake_threshold as f64
+                } else {
+                    0.0
+                },
                 60.0,
             ),
             // min_reporters=2, same rationale as MisconductQuorum's
@@ -634,7 +684,9 @@ impl MeshNode {
     // visibility beyond that, same take-before-run() rule as the other
     // receiver() methods.
     pub fn misconduct_receiver(&mut self) -> mpsc::Receiver<MisconductEvent> {
-        self.misconduct_rx.take().expect("misconduct_receiver already taken")
+        self.misconduct_rx
+            .take()
+            .expect("misconduct_receiver already taken")
     }
 
     // Stage P3c-2: every Flood this node receives genuinely from another
@@ -648,7 +700,9 @@ impl MeshNode {
     // (origin_time) for every arrival happens regardless of whether
     // anyone takes this receiver at all.
     pub fn flood_receiver(&mut self) -> mpsc::Receiver<(NodeId, FloodMessage)> {
-        self.flood_observer_rx.take().expect("flood_receiver already taken")
+        self.flood_observer_rx
+            .take()
+            .expect("flood_receiver already taken")
     }
 
     // Fires the subject NodeId once this node's own MisconductQuorum
@@ -656,7 +710,9 @@ impl MeshNode {
     // (every individual accusation, confirmed or not), this only fires
     // on confirmation. Same take-before-run() rule.
     pub fn confirmed_misconduct_receiver(&mut self) -> mpsc::Receiver<NodeId> {
-        self.confirmation_rx.take().expect("confirmed_misconduct_receiver already taken")
+        self.confirmation_rx
+            .take()
+            .expect("confirmed_misconduct_receiver already taken")
     }
 
     // Resolves a mesh NodeId to the chain-native pubkey pinned for it at
@@ -685,7 +741,9 @@ impl MeshNode {
     // caller that doesn't own the MeshNode anymore (run() has already
     // taken self by value) -- same shape as chain_status_sender. Take
     // before run(); each query is (order_id, reply channel).
-    pub fn origin_time_query_sender(&self) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)> {
+    pub fn origin_time_query_sender(
+        &self,
+    ) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<f64>>)> {
         self.origin_time_query_tx.clone()
     }
 
@@ -693,7 +751,11 @@ impl MeshNode {
     // estimates -- see crate::ordering::OriginTimeEstimator::
     // compare_orders and OrderingDecision's docs for exactly what this
     // does (and doesn't) guarantee.
-    pub fn compare_orders(&mut self, order_a: &[u8; 32], order_b: &[u8; 32]) -> Option<crate::ordering::OrderingDecision> {
+    pub fn compare_orders(
+        &mut self,
+        order_a: &[u8; 32],
+        order_b: &[u8; 32],
+    ) -> Option<crate::ordering::OrderingDecision> {
         self.origin_time.compare_orders(order_a, order_b)
     }
 
@@ -701,7 +763,13 @@ impl MeshNode {
     // doesn't own the MeshNode anymore -- same shape as
     // origin_time_query_sender. Take before run(); each query is
     // (order_a, order_b, reply channel).
-    pub fn compare_orders_query_sender(&self) -> mpsc::Sender<([u8; 32], [u8; 32], oneshot::Sender<Option<crate::ordering::OrderingDecision>>)> {
+    pub fn compare_orders_query_sender(
+        &self,
+    ) -> mpsc::Sender<(
+        [u8; 32],
+        [u8; 32],
+        oneshot::Sender<Option<crate::ordering::OrderingDecision>>,
+    )> {
         self.compare_orders_query_tx.clone()
     }
 
@@ -710,7 +778,9 @@ impl MeshNode {
     // estimate_ms) for a single order_id, the raw evidence
     // OrderSequencer::flush needs a snapshot of for every order in a
     // batch. Take before run(); each query is (order_id, reply channel).
-    pub fn earliest_witness_query_sender(&self) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)> {
+    pub fn earliest_witness_query_sender(
+        &self,
+    ) -> mpsc::Sender<([u8; 32], oneshot::Sender<Option<(NodeId, f64)>>)> {
         self.earliest_witness_query_tx.clone()
     }
 
@@ -722,7 +792,11 @@ impl MeshNode {
     fn reporter_pubkey(&self, reporter: NodeId) -> Option<[u8; 32]> {
         if reporter == self.node_id {
             let pk = self.transport.public_key();
-            if pk != [0u8; 32] { Some(pk) } else { None }
+            if pk != [0u8; 32] {
+                Some(pk)
+            } else {
+                None
+            }
         } else {
             self.transport.peer_pubkey(reporter)
         }
@@ -765,7 +839,10 @@ impl MeshNode {
         if !self.require_staked_reporters {
             return 1.0;
         }
-        match self.reporter_pubkey(reporter).and_then(|pk| self.chain_status.get(&pk)) {
+        match self
+            .reporter_pubkey(reporter)
+            .and_then(|pk| self.chain_status.get(&pk))
+        {
             Some(status) if status.active => status.stake as f64,
             _ => 0.0,
         }
@@ -786,7 +863,9 @@ impl MeshNode {
     // actually reaches threshold -- take-before-run() rule, same as
     // confirmed_misconduct_receiver.
     pub fn confirmed_batch_receiver(&mut self) -> mpsc::Receiver<([u8; 32], [u8; 32])> {
-        self.confirmed_batch_rx.take().expect("confirmed_batch_receiver already taken")
+        self.confirmed_batch_rx
+            .take()
+            .expect("confirmed_batch_receiver already taken")
     }
 
     // The channel-based counterpart to propose_batch, for a caller that
@@ -828,12 +907,26 @@ impl MeshNode {
     // Shared by propose_batch's own vote and every incoming
     // WireMessage::BatchProposal this node receives (see run()'s
     // batch_proposal_rx branch).
-    fn record_batch_proposal(&mut self, batch_key: [u8; 32], reporter: NodeId, proposed_hash: [u8; 32], now: f64) {
-        if let Some(agreed_hash) = self.batch_quorum.record(batch_key, reporter, proposed_hash, now) {
+    fn record_batch_proposal(
+        &mut self,
+        batch_key: [u8; 32],
+        reporter: NodeId,
+        proposed_hash: [u8; 32],
+        now: f64,
+    ) {
+        if let Some(agreed_hash) = self
+            .batch_quorum
+            .record(batch_key, reporter, proposed_hash, now)
+        {
             tracing::info!(?batch_key, "order batch quorum reached");
             let _ = self.confirmed_batch_tx.try_send((batch_key, agreed_hash));
         } else {
-            tracing::debug!(?batch_key, ?reporter, distinct_hashes = self.batch_quorum.distinct_hash_count(&batch_key), "batch proposal recorded, quorum not yet reached");
+            tracing::debug!(
+                ?batch_key,
+                ?reporter,
+                distinct_hashes = self.batch_quorum.distinct_hash_count(&batch_key),
+                "batch proposal recorded, quorum not yet reached"
+            );
         }
     }
 
@@ -860,19 +953,44 @@ impl MeshNode {
     // applies the real reputation consequence
     // (reputation::integration::on_misconduct_reported) once
     // MisconductQuorum says enough distinct reporters agree.
-    fn apply_or_record_accusation(&mut self, subject: NodeId, reporter: NodeId, reason: &str, now: f64) {
+    fn apply_or_record_accusation(
+        &mut self,
+        subject: NodeId,
+        reporter: NodeId,
+        reason: &str,
+        now: f64,
+    ) {
         let weight = self.reporter_weight(reporter);
         if weight <= 0.0 {
             tracing::debug!(?subject, ?reporter, "accusation ignored: reporter is not an active staked identity per the last chain_status snapshot");
             return;
         }
-        let (quorum_met, count, total_weight) = self.misconduct_quorum.record(subject, reporter, weight, now);
+        let (quorum_met, count, total_weight) = self
+            .misconduct_quorum
+            .record(subject, reporter, weight, now);
         if quorum_met {
-            tracing::warn!(?subject, reporter_count = count, total_weight, "misconduct quorum reached, applying reputation consequence");
-            reputation::integration::on_misconduct_reported(&mut self.reputation, subject, reporter, reason);
+            tracing::warn!(
+                ?subject,
+                reporter_count = count,
+                total_weight,
+                "misconduct quorum reached, applying reputation consequence"
+            );
+            reputation::integration::on_misconduct_reported(
+                &mut self.reputation,
+                subject,
+                reporter,
+                reason,
+            );
             let _ = self.confirmation_tx.try_send(subject);
         } else {
-            tracing::debug!(?subject, reporter_count = count, total_weight, min_reporters = self.misconduct_quorum.min_reporters, stake_threshold = self.misconduct_quorum.stake_threshold, "misconduct accusation recorded, quorum not yet reached");
+            tracing::debug!(
+                ?subject,
+                reporter_count = count,
+                total_weight,
+                min_reporters = self.misconduct_quorum.min_reporters,
+                stake_threshold = self.misconduct_quorum.stake_threshold,
+                "misconduct accusation recorded, quorum not yet reached"
+            );
         }
     }
 
@@ -884,9 +1002,15 @@ impl MeshNode {
     // and only reports misconduct (annotated with whether any other
     // independent path corroborates it) when this hop specifically
     // looks anomalous.
-    async fn handle_hop_latency_result(&mut self, order_id: [u8; 32], hop_node: NodeId, observed_ms: f64) {
+    async fn handle_hop_latency_result(
+        &mut self,
+        order_id: [u8; 32],
+        hop_node: NodeId,
+        observed_ms: f64,
+    ) {
         let anomalous = self.latency_stats.is_anomalous(hop_node, observed_ms);
-        self.hop_latency.record_verdict(order_id, hop_node, observed_ms, anomalous);
+        self.hop_latency
+            .record_verdict(order_id, hop_node, observed_ms, anomalous);
 
         // Stage O3: checked independently of `anomalous` -- is_anomalous
         // is deliberately one-sided (too slow only, see its own docs),
@@ -897,7 +1021,10 @@ impl MeshNode {
         // OriginTimeEstimator needs to distrust for ordering purposes,
         // even though it's never misconduct-reportable the way
         // withholding is.
-        if self.latency_stats.is_implausibly_fast(hop_node, observed_ms) {
+        if self
+            .latency_stats
+            .is_implausibly_fast(hop_node, observed_ms)
+        {
             self.origin_time.mark_anomalous(order_id, hop_node);
         }
 
@@ -908,9 +1035,20 @@ impl MeshNode {
         // estimate for this order shouldn't be trusted over an honest
         // alternative either -- see its docs.
         self.origin_time.mark_anomalous(order_id, hop_node);
-        let bound = self.latency_stats.expected_one_way_bound_ms(hop_node).unwrap_or(0.0);
-        let corroborated = self.hop_latency.has_corroborating_non_anomalous_hop(&order_id, hop_node);
-        tracing::warn!(?hop_node, observed_ms, bound_ms = bound, corroborated, "hop transit time exceeds established latency baseline");
+        let bound = self
+            .latency_stats
+            .expected_one_way_bound_ms(hop_node)
+            .unwrap_or(0.0);
+        let corroborated = self
+            .hop_latency
+            .has_corroborating_non_anomalous_hop(&order_id, hop_node);
+        tracing::warn!(
+            ?hop_node,
+            observed_ms,
+            bound_ms = bound,
+            corroborated,
+            "hop transit time exceeds established latency baseline"
+        );
         let corroboration_note = if corroborated {
             "corroborated: another independent path for the same order showed normal timing"
         } else {
@@ -926,16 +1064,24 @@ impl MeshNode {
     // for a caller (e.g. a watchtower loop) to independently re-verify --
     // see WireMessage::SettlementProof's docs. Must be called before
     // run(), which consumes self; panics if called twice.
-    pub fn settlement_proof_receiver(&mut self) -> mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)> {
-        self.settlement_rx.take().expect("settlement_proof_receiver already taken")
+    pub fn settlement_proof_receiver(
+        &mut self,
+    ) -> mpsc::Receiver<(NodeId, prover::TradeBatch, Vec<u8>)> {
+        self.settlement_rx
+            .take()
+            .expect("settlement_proof_receiver already taken")
     }
 
     // Every WireMessage::LogEntryBroadcast this node receives, for a
     // caller to mirror into its own HashChainLog (see
     // orderlog::HashChainLog::try_append_remote) -- same
     // take-before-run() rule as settlement_proof_receiver.
-    pub fn log_entry_receiver(&mut self) -> mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)> {
-        self.log_entry_rx.take().expect("log_entry_receiver already taken")
+    pub fn log_entry_receiver(
+        &mut self,
+    ) -> mpsc::Receiver<(NodeId, orderlog::LogEntry<orderlog::OrderReceipt>)> {
+        self.log_entry_rx
+            .take()
+            .expect("log_entry_receiver already taken")
     }
 
     // Direct handle to this node's transport, for a caller that needs to
@@ -960,9 +1106,18 @@ impl MeshNode {
         let misconduct_tx = self.misconduct_tx.clone();
         let mesh_key = self.mesh_key;
         let mut chain_status_rx = self.chain_status_rx.take().expect("run() already called");
-        let mut origin_time_query_rx = self.origin_time_query_rx.take().expect("run() already called");
-        let mut compare_orders_query_rx = self.compare_orders_query_rx.take().expect("run() already called");
-        let mut earliest_witness_query_rx = self.earliest_witness_query_rx.take().expect("run() already called");
+        let mut origin_time_query_rx = self
+            .origin_time_query_rx
+            .take()
+            .expect("run() already called");
+        let mut compare_orders_query_rx = self
+            .compare_orders_query_rx
+            .take()
+            .expect("run() already called");
+        let mut earliest_witness_query_rx = self
+            .earliest_witness_query_rx
+            .take()
+            .expect("run() already called");
         let mut propose_batch_rx = self.propose_batch_rx.take().expect("run() already called");
 
         // Purely internal to this loop (unlike settlement_tx/log_entry_tx/
@@ -970,13 +1125,16 @@ impl MeshNode {
         // events -- only the derived anomaly, which goes out as a
         // MisconductReport the same way CensorshipMonitor's does).
         let (pong_tx, mut pong_rx) = mpsc::channel::<(NodeId, u64, f64)>(256);
-        let (hop_witness_tx, mut hop_witness_rx) = mpsc::channel::<(NodeId, [u8; 32], NodeId, f64)>(1024);
-        let (batch_proposal_tx, mut batch_proposal_rx) = mpsc::channel::<([u8; 32], [u8; 32], NodeId, f64)>(256);
+        let (hop_witness_tx, mut hop_witness_rx) =
+            mpsc::channel::<(NodeId, [u8; 32], NodeId, f64)>(1024);
+        let (batch_proposal_tx, mut batch_proposal_rx) =
+            mpsc::channel::<([u8; 32], [u8; 32], NodeId, f64)>(256);
         // Every incoming MisconductReport is dual-sent: misconduct_tx
         // (external, unchanged -- e.g. watchtower_node printing it) and
         // this one, which only the main loop below drains, to run it
         // through MisconductQuorum and apply_or_record_accusation.
-        let (misconduct_internal_tx, mut misconduct_internal_rx) = mpsc::channel::<MisconductEvent>(256);
+        let (misconduct_internal_tx, mut misconduct_internal_rx) =
+            mpsc::channel::<MisconductEvent>(256);
 
         let recv_transport = self.transport.clone();
         tokio::spawn(async move {
@@ -988,10 +1146,13 @@ impl MeshNode {
                             let _ = tx.send((from, fm)).await;
                         }
                         WireMessage::EncryptedFlood(ref encrypted) => {
-                            if mesh_key == [0u8; 32] { continue; }
+                            if mesh_key == [0u8; 32] {
+                                continue;
+                            }
                             match decrypt_packet(&mesh_key, encrypted) {
                                 Ok(decrypted) => {
-                                    if let Ok(fm) = bincode::deserialize::<FloodMessage>(&decrypted) {
+                                    if let Ok(fm) = bincode::deserialize::<FloodMessage>(&decrypted)
+                                    {
                                         let _ = tx.send((from, fm)).await;
                                     }
                                 }
@@ -1009,7 +1170,9 @@ impl MeshNode {
                                 let _ = echo_tx.send((from, vec![])).await;
                             }
                         }
-                        WireMessage::SignedHeartbeat { node_id, timestamp, .. } => {
+                        WireMessage::SignedHeartbeat {
+                            node_id, timestamp, ..
+                        } => {
                             tracing::trace!(?node_id, %timestamp, "Signed heartbeat");
                         }
                         WireMessage::Heartbeat { node_id, .. } => {
@@ -1022,8 +1185,19 @@ impl MeshNode {
                         WireMessage::LogEntryBroadcast { entry } => {
                             let _ = log_entry_tx.send((from, entry)).await;
                         }
-                        WireMessage::MisconductReport { reporter, subject, reason, timestamp } => {
-                            let event = MisconductEvent { from, reporter, subject, reason, timestamp };
+                        WireMessage::MisconductReport {
+                            reporter,
+                            subject,
+                            reason,
+                            timestamp,
+                        } => {
+                            let event = MisconductEvent {
+                                from,
+                                reporter,
+                                subject,
+                                reason,
+                                timestamp,
+                            };
                             let _ = misconduct_tx.send(event.clone()).await;
                             let _ = misconduct_internal_tx.send(event).await;
                         }
@@ -1038,14 +1212,28 @@ impl MeshNode {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
-                                .as_secs_f64() * 1000.0;
+                                .as_secs_f64()
+                                * 1000.0;
                             let _ = pong_tx.send((from, nonce, now)).await;
                         }
-                        WireMessage::HopWitness { order_id, hop_node, forwarded_at } => {
-                            let _ = hop_witness_tx.send((from, order_id, hop_node, forwarded_at)).await;
+                        WireMessage::HopWitness {
+                            order_id,
+                            hop_node,
+                            forwarded_at,
+                        } => {
+                            let _ = hop_witness_tx
+                                .send((from, order_id, hop_node, forwarded_at))
+                                .await;
                         }
-                        WireMessage::BatchProposal { batch_key, proposed_hash, reporter, timestamp } => {
-                            let _ = batch_proposal_tx.send((batch_key, proposed_hash, reporter, timestamp)).await;
+                        WireMessage::BatchProposal {
+                            batch_key,
+                            proposed_hash,
+                            reporter,
+                            timestamp,
+                        } => {
+                            let _ = batch_proposal_tx
+                                .send((batch_key, proposed_hash, reporter, timestamp))
+                                .await;
                         }
                     },
                     Err(e) => {
@@ -1056,19 +1244,14 @@ impl MeshNode {
             }
         });
 
-        let mut heartbeat_tick = tokio::time::interval(
-            tokio::time::Duration::from_millis(100),
-        );
-        let mut echo_tick = tokio::time::interval(
-            tokio::time::Duration::from_secs(ECHO_INTERVAL_SECS),
-        );
+        let mut heartbeat_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
+        let mut echo_tick =
+            tokio::time::interval(tokio::time::Duration::from_secs(ECHO_INTERVAL_SECS));
         // Deliberately fast relative to heartbeat_tick -- this experiment
         // wants a usable RTT baseline within a couple of real seconds, not
         // production-cadence pinging (which would want to be far less
         // frequent to avoid flooding the network with its own traffic).
-        let mut ping_tick = tokio::time::interval(
-            tokio::time::Duration::from_millis(100),
-        );
+        let mut ping_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
 
         loop {
             tokio::select! {

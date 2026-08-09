@@ -23,15 +23,24 @@ mod tests {
         let mut queue = BinaryHeap::new();
         queue.push(ScheduledEvent {
             time: 250.5,
-            event: Event::OrderGenerated { order: order.clone(), source_node: NodeId(1) },
+            event: Event::OrderGenerated {
+                order: order.clone(),
+                source_node: NodeId(1),
+            },
         });
         queue.push(ScheduledEvent {
             time: 50.2,
-            event: Event::OrderGenerated { order: order.clone(), source_node: NodeId(2) },
+            event: Event::OrderGenerated {
+                order: order.clone(),
+                source_node: NodeId(2),
+            },
         });
         queue.push(ScheduledEvent {
             time: 500.0,
-            event: Event::OrderGenerated { order: order.clone(), source_node: NodeId(3) },
+            event: Event::OrderGenerated {
+                order: order.clone(),
+                source_node: NodeId(3),
+            },
         });
 
         // Min-heap check: 50.2 should come out first

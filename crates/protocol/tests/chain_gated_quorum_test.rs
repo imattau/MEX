@@ -69,12 +69,18 @@ async fn test_reporters_without_active_chain_status_never_reach_quorum() {
     let subject = NodeId(99);
 
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(13), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s claim, no known chain status"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(13),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s claim, no known chain status"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;
@@ -91,8 +97,20 @@ async fn test_reporters_marked_active_in_chain_status_do_reach_quorum() {
     let mut confirmed = detector.confirmed_misconduct_receiver();
 
     let mut snapshot = HashMap::new();
-    snapshot.insert([20u8; 32], ChainNodeStatus { active: true, stake: 10_000 });
-    snapshot.insert([21u8; 32], ChainNodeStatus { active: true, stake: 10_000 });
+    snapshot.insert(
+        [20u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 10_000,
+        },
+    );
+    snapshot.insert(
+        [21u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 10_000,
+        },
+    );
     detector.set_chain_status(snapshot);
 
     tokio::spawn(detector.run());
@@ -103,12 +121,18 @@ async fn test_reporters_marked_active_in_chain_status_do_reach_quorum() {
     let subject = NodeId(99);
 
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(14), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s claim, active on chain"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(14),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s claim, active on chain"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_secs(2), confirmed.recv())
@@ -116,7 +140,10 @@ async fn test_reporters_marked_active_in_chain_status_do_reach_quorum() {
         .expect("timed out waiting for quorum from two chain-active reporters")
         .expect("confirmation channel closed unexpectedly");
 
-    assert_eq!(result, subject, "the confirmed subject should be the one both chain-eligible reporters accused");
+    assert_eq!(
+        result, subject,
+        "the confirmed subject should be the one both chain-eligible reporters accused"
+    );
 }
 
 #[tokio::test]
@@ -131,8 +158,20 @@ async fn test_one_active_one_inactive_reporter_does_not_reach_quorum() {
     // deregistered or slashed-out node still gets replies, it just isn't
     // eligible to vote).
     let mut snapshot = HashMap::new();
-    snapshot.insert([20u8; 32], ChainNodeStatus { active: true, stake: 10_000 });
-    snapshot.insert([21u8; 32], ChainNodeStatus { active: false, stake: 0 });
+    snapshot.insert(
+        [20u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 10_000,
+        },
+    );
+    snapshot.insert(
+        [21u8; 32],
+        ChainNodeStatus {
+            active: false,
+            stake: 0,
+        },
+    );
     detector.set_chain_status(snapshot);
 
     tokio::spawn(detector.run());
@@ -143,12 +182,18 @@ async fn test_one_active_one_inactive_reporter_does_not_reach_quorum() {
     let subject = NodeId(99);
 
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(15), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s claim"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(15),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s claim"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;

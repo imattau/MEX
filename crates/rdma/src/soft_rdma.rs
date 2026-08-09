@@ -88,15 +88,25 @@ pub struct RegisteredMemory {
 }
 
 impl RegisteredMemory {
-    pub fn lkey(&self) -> u32 { self.lkey }
-    pub fn rkey(&self) -> u32 { self.rkey }
-    pub fn len(&self) -> usize { self.len }
-    pub fn remote_addr(&self) -> u64 { self.mr.as_ptr() as u64 }
+    pub fn lkey(&self) -> u32 {
+        self.lkey
+    }
+    pub fn rkey(&self) -> u32 {
+        self.rkey
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn remote_addr(&self) -> u64 {
+        self.mr.as_ptr() as u64
+    }
 }
 
 impl Drop for RegisteredMemory {
     fn drop(&mut self) {
-        unsafe { verbs::rdma_dereg_mr(self.mr.as_ptr()); }
+        unsafe {
+            verbs::rdma_dereg_mr(self.mr.as_ptr());
+        }
     }
 }
 
@@ -126,9 +136,7 @@ impl QueuePair {
     }
 
     fn connect(&self, dest_qpn: u32, dlid: u16) -> Result<(), String> {
-        let ret = unsafe {
-            verbs::rdma_modify_qp_to_rtr(self.qp.as_ptr(), dest_qpn, dlid, 1)
-        };
+        let ret = unsafe { verbs::rdma_modify_qp_to_rtr(self.qp.as_ptr(), dest_qpn, dlid, 1) };
         if ret != 0 {
             return Err(format!("QP RTR failed: {}", ret));
         }
@@ -168,7 +176,12 @@ impl QueuePair {
     }
 
     pub fn poll_completion(&self, cq: NonNull<verbs::ibv_cq>) -> Option<verbs::rdma_wc> {
-        let mut wc = verbs::rdma_wc { wr_id: 0, status: 0, byte_len: 0, qp_num: 0 };
+        let mut wc = verbs::rdma_wc {
+            wr_id: 0,
+            status: 0,
+            byte_len: 0,
+            qp_num: 0,
+        };
         let ret = unsafe { verbs::rdma_poll_cq(cq.as_ptr(), &mut wc) };
         if ret > 0 && wc.status == verbs::IBV_WC_SUCCESS {
             Some(wc)
@@ -180,6 +193,8 @@ impl QueuePair {
 
 impl Drop for QueuePair {
     fn drop(&mut self) {
-        unsafe { verbs::rdma_destroy_qp(self.qp.as_ptr()); }
+        unsafe {
+            verbs::rdma_destroy_qp(self.qp.as_ptr());
+        }
     }
 }

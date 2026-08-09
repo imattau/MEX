@@ -15,10 +15,10 @@
 //     <rpc_url> <deployer_private_key> <factory_address> <registry_address>
 
 use alloy::network::EthereumWallet;
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
-use alloy::network::TransactionBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use chain::OnChainAccount;
@@ -50,8 +50,16 @@ sol! {
 
 async fn fund(provider: &impl Provider, to: Address, eth: &str) {
     let wei: u128 = eth.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
-    let tx = TransactionRequest::default().with_to(to).with_value(U256::from(wei));
-    provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
+    let tx = TransactionRequest::default()
+        .with_to(to)
+        .with_value(U256::from(wei));
+    provider
+        .send_transaction(tx)
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
 }
 
 fn u64_to_bytes32(val: u64) -> [u8; 32] {
@@ -72,18 +80,29 @@ async fn main() {
 
     let deployer_signer: PrivateKeySigner = deployer_key.trim_start_matches("0x").parse().unwrap();
     let deployer_wallet = EthereumWallet::from(deployer_signer);
-    let deployer_provider = ProviderBuilder::new().wallet(deployer_wallet).connect_http(rpc_url.parse().unwrap());
+    let deployer_provider = ProviderBuilder::new()
+        .wallet(deployer_wallet)
+        .connect_http(rpc_url.parse().unwrap());
 
     // Register a node with a known 10 ETH stake -- claimSlash takes half
     // of whatever the node's current stake is, so the expected payout here
     // is exactly 5 ETH.
-    let node_pubkey: OnChainAccount = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"SLSH"); b };
+    let node_pubkey: OnChainAccount = {
+        let mut b = [0u8; 32];
+        b[0..4].copy_from_slice(b"SLSH");
+        b
+    };
     let stake_wei: u128 = 10_000_000_000_000_000_000u128;
     let registry_contract = INodeRegistrySlash::new(registry_addr, &deployer_provider);
     registry_contract
         .registerNode(FixedBytes::from(node_pubkey), "slash-test".to_string())
         .value(U256::from(stake_wei))
-        .send().await.unwrap().get_receipt().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
     println!("node registered with 10 ETH stake: OK");
 
     // Maker (will commit, then claim the slash) and taker.
@@ -92,16 +111,45 @@ async fn main() {
     fund(&deployer_provider, maker_signer.address(), "5").await;
     fund(&deployer_provider, taker_signer.address(), "5").await;
 
-    let maker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..5].copy_from_slice(b"MAKER"); b };
-    let taker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..5].copy_from_slice(b"TAKER"); b };
+    let maker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0..5].copy_from_slice(b"MAKER");
+        b
+    };
+    let taker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0..5].copy_from_slice(b"TAKER");
+        b
+    };
     let mut tokens = chain_ethereum::TokenRegistry::new();
     tokens.register([0u8; 20], "ETH-USD");
 
-    let mut maker_client = TraderClient::new(&rpc_url, &hex::encode(maker_signer.to_bytes()), &factory_address, maker_pubkey, tokens.clone(), 0).await.unwrap();
-    let taker_client = TraderClient::new(&rpc_url, &hex::encode(taker_signer.to_bytes()), &factory_address, taker_pubkey, tokens, 0).await.unwrap();
+    let mut maker_client = TraderClient::new(
+        &rpc_url,
+        &hex::encode(maker_signer.to_bytes()),
+        &factory_address,
+        maker_pubkey,
+        tokens.clone(),
+        0,
+    )
+    .await
+    .unwrap();
+    let taker_client = TraderClient::new(
+        &rpc_url,
+        &hex::encode(taker_signer.to_bytes()),
+        &factory_address,
+        taker_pubkey,
+        tokens,
+        0,
+    )
+    .await
+    .unwrap();
     maker_client.ensure_escrow().await.unwrap();
     taker_client.ensure_escrow().await.unwrap();
-    maker_client.deposit_native(U256::from(2_000_000_000_000_000_000u128)).await.unwrap();
+    maker_client
+        .deposit_native(U256::from(2_000_000_000_000_000_000u128))
+        .await
+        .unwrap();
     println!("maker + taker escrows created + funded: OK");
 
     // A trade with a deadline just 3 seconds out -- short enough to blow
@@ -109,7 +157,11 @@ async fn main() {
     let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
     let chain_now = read_provider
         .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-        .await.unwrap().unwrap().header.timestamp;
+        .await
+        .unwrap()
+        .unwrap()
+        .header
+        .timestamp;
     let deadline = chain_now + 3;
 
     let m = Match {
@@ -129,7 +181,10 @@ async fn main() {
         assigned_node: node_pubkey,
     };
     let trade_hash = maker_client.commit_trade(&m).await.unwrap();
-    println!("commitTrade succeeded (deadline in 3s), trade_hash = {}", hex::encode(trade_hash));
+    println!(
+        "commitTrade succeeded (deadline in 3s), trade_hash = {}",
+        hex::encode(trade_hash)
+    );
 
     // Time-travel past the deadline without ever settling the trade.
     let _: serde_json::Value = read_provider
@@ -144,12 +199,21 @@ async fn main() {
         .expect("evm_mine failed");
     println!("advanced chain time past the deadline: OK");
 
-    let maker_balance_before = read_provider.get_balance(maker_signer.address()).await.unwrap();
+    let maker_balance_before = read_provider
+        .get_balance(maker_signer.address())
+        .await
+        .unwrap();
 
-    let claim_tx = maker_client.claim_slash(&[trade_hash]).await.expect("claimSlash failed");
+    let claim_tx = maker_client
+        .claim_slash(&[trade_hash])
+        .await
+        .expect("claimSlash failed");
     println!("claimSlash succeeded, tx = {claim_tx}");
 
-    let maker_balance_after = read_provider.get_balance(maker_signer.address()).await.unwrap();
+    let maker_balance_after = read_provider
+        .get_balance(maker_signer.address())
+        .await
+        .unwrap();
     let received = maker_balance_after - maker_balance_before;
 
     // received will be slightly under 5 ETH (gas spent on the claimSlash
@@ -157,7 +221,9 @@ async fn main() {
     // not stuck at, the expected 5 ETH slash payout.
     let expected = U256::from(5_000_000_000_000_000_000u128);
     let tolerance = U256::from(1_000_000_000_000_000u128); // 0.001 ETH, well above any reasonable gas cost
-    println!("maker balance change from claimSlash: {received} wei (expected ~{expected} wei minus gas)");
+    println!(
+        "maker balance change from claimSlash: {received} wei (expected ~{expected} wei minus gas)"
+    );
     assert!(
         received + tolerance >= expected,
         "trader received {received} wei, expected close to {expected} wei -- slashed stake did not reach the wronged trader"
@@ -167,9 +233,20 @@ async fn main() {
     // (10 ETH) -- NodeRegistry.slashNode deletes the node entirely in that
     // case rather than leaving it active-but-under-minimum, so getNode
     // correctly returns a zeroed-out struct here, not "5 ETH, inactive".
-    let node_info = registry_contract.getNode(FixedBytes::from(node_pubkey)).call().await.unwrap();
-    assert_eq!(node_info.stake, U256::ZERO, "a node slashed below MIN_STAKE should be fully deleted, not left partially staked");
-    assert!(!node_info.active, "a slashed (and deleted) node must not read as active");
+    let node_info = registry_contract
+        .getNode(FixedBytes::from(node_pubkey))
+        .call()
+        .await
+        .unwrap();
+    assert_eq!(
+        node_info.stake,
+        U256::ZERO,
+        "a node slashed below MIN_STAKE should be fully deleted, not left partially staked"
+    );
+    assert!(
+        !node_info.active,
+        "a slashed (and deleted) node must not read as active"
+    );
 
     println!("\nSLASH COMPENSATION REGRESSION TEST PASSED: wronged trader actually received the slashed stake, node correctly deactivated with reduced stake.");
 }

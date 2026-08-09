@@ -6,7 +6,10 @@ use alloy::signers::Signer as _;
 use alloy::sol;
 use alloy::sol_types::{eip712_domain, SolStruct};
 use chain::{SettlementTrade, Token};
-use chain_ethereum::{account_to_address, address_to_account, compute_trade_hash, token_to_address, ChainSync, TokenRegistry};
+use chain_ethereum::{
+    account_to_address, address_to_account, compute_trade_hash, token_to_address, ChainSync,
+    TokenRegistry,
+};
 use engine::Match;
 
 sol! {
@@ -163,7 +166,9 @@ impl TraderClient {
             .await
             .map_err(|e| format!("getEscrow call failed: {e}"))?;
         if escrow_address == Address::ZERO {
-            return Err("no escrow exists for this trader yet -- call ensure_escrow first".to_string());
+            return Err(
+                "no escrow exists for this trader yet -- call ensure_escrow first".to_string(),
+            );
         }
 
         let escrow = ITraderEscrowDeposit::new(escrow_address, &self.provider);
@@ -187,17 +192,15 @@ impl TraderClient {
     // few times rather than running it as a continuous background service,
     // since a trader-client only needs this resolved right before
     // committing a trade, not kept warm continuously.
-    pub async fn resolve_counterparty(&mut self, counterparty_pubkey: [u8; 32]) -> Result<Address, String> {
+    pub async fn resolve_counterparty(
+        &mut self,
+        counterparty_pubkey: [u8; 32],
+    ) -> Result<Address, String> {
         for _ in 0..10 {
-            if let Some(owner) = self
-                .sync
-                .escrows()
-                .known_escrows()
-                .find_map(|escrow| {
-                    let owner = self.sync.escrows().owner_of(*escrow)?;
-                    (owner.offchain_pubkey == counterparty_pubkey).then_some(owner)
-                })
-            {
+            if let Some(owner) = self.sync.escrows().known_escrows().find_map(|escrow| {
+                let owner = self.sync.escrows().owner_of(*escrow)?;
+                (owner.offchain_pubkey == counterparty_pubkey).then_some(owner)
+            }) {
                 return Ok(Address::from(owner.trader));
             }
             self.sync.poll_once().await?;
@@ -227,7 +230,10 @@ impl TraderClient {
     // SettlementFactory.TradeEntry (commitTrade locks and pays from
     // `trader`'s escrow to `counterparty`; the other side isn't the one
     // committing this particular trade at all).
-    async fn build_trade_entry(&mut self, m: &Match) -> Result<(ISettlementFactoryTrader::TradeEntry, [u8; 32]), String> {
+    async fn build_trade_entry(
+        &mut self,
+        m: &Match,
+    ) -> Result<(ISettlementFactoryTrader::TradeEntry, [u8; 32]), String> {
         if m.fee_payer != self.own_pubkey {
             return Err(format!(
                 "this client ({}) is not the fee_payer ({}) for this match -- nothing to commit",
@@ -245,7 +251,8 @@ impl TraderClient {
 
         let notional = m.price as u128 * m.amount as u128;
         let fee = notional * m.fee_basis_points as u128 / 10_000;
-        let amount = u64::try_from(notional).map_err(|_| "trade notional exceeds u64 range".to_string())?;
+        let amount =
+            u64::try_from(notional).map_err(|_| "trade notional exceeds u64 range".to_string())?;
         let fee = u64::try_from(fee).map_err(|_| "trade fee exceeds u64 range".to_string())?;
 
         let token = self
@@ -352,7 +359,8 @@ impl TraderClient {
     // `msg.sender`'s own escrow).
     pub async fn claim_slash(&self, trade_hashes: &[[u8; 32]]) -> Result<String, String> {
         let factory = ISettlementFactoryTrader::new(self.factory_address, &self.provider);
-        let hashes: Vec<FixedBytes<32>> = trade_hashes.iter().map(|h| FixedBytes::from(*h)).collect();
+        let hashes: Vec<FixedBytes<32>> =
+            trade_hashes.iter().map(|h| FixedBytes::from(*h)).collect();
         let pending = factory
             .claimSlash(hashes)
             .send()

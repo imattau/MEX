@@ -1,6 +1,6 @@
 use common::{FloodMessage, NodeId, Order};
-use protocol::{FloodSchedule, RoutingTable};
 use lru::LruCache;
+use protocol::{FloodSchedule, RoutingTable};
 use std::num::NonZeroUsize;
 
 pub struct SimpleFlood {
@@ -27,10 +27,7 @@ impl SimpleFlood {
             return Err(());
         }
 
-        if msg.order.amount == 0
-            || msg.order.price == 0
-            || msg.order.price > 1_000_000_000_000
-        {
+        if msg.order.amount == 0 || msg.order.price == 0 || msg.order.price > 1_000_000_000_000 {
             return Err(());
         }
 

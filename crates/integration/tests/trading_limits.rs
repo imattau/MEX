@@ -21,7 +21,19 @@ mod trading_limits {
         let mut t = [0u8; 32];
         oid[0] = id;
         t[0] = trader_id;
-        Order { id: oid, trader: t, symbol: "ETH-USD".to_string(), side, price, amount, signature: vec![], nonce: id as u64, expiry: 0, settlement_preference: SettlementPreference::Standard, settlement_requester: SettlementRequester::Seller }
+        Order {
+            id: oid,
+            trader: t,
+            symbol: "ETH-USD".to_string(),
+            side,
+            price,
+            amount,
+            signature: vec![],
+            nonce: id as u64,
+            expiry: 0,
+            settlement_preference: SettlementPreference::Standard,
+            settlement_requester: SettlementRequester::Seller,
+        }
     }
 
     // ── LIMIT 1: Extreme Order Book Depth ──
@@ -32,7 +44,11 @@ mod trading_limits {
         let start = Instant::now();
 
         for i in 0..n {
-            let side = if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell };
+            let side = if i % 2 == 0 {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            };
             let price = if side == OrderSide::Buy {
                 1000 + (i % 500) as u64
             } else {
@@ -55,9 +71,14 @@ mod trading_limits {
         eprintln!("│  Ask price levels:   {}", ask_levels);
         eprintln!("│  Total bid orders:   {}", total_bid_orders);
         eprintln!("│  Total ask orders:   {}", total_ask_orders);
-        eprintln!("│  Throughput:         {:.0} orders/sec", n as f64 / elapsed.as_secs_f64());
-        assert!(total_bid_orders + total_ask_orders >= n as usize * 9 / 10,
-            "At least 90% of orders must enter the book");
+        eprintln!(
+            "│  Throughput:         {:.0} orders/sec",
+            n as f64 / elapsed.as_secs_f64()
+        );
+        assert!(
+            total_bid_orders + total_ask_orders >= n as usize * 9 / 10,
+            "At least 90% of orders must enter the book"
+        );
         eprintln!("│  PASS                ✓                                   │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
     }
@@ -69,7 +90,7 @@ mod trading_limits {
 
         // Create an ask ladder: 10 orders across 10 price levels, 100 units each
         for i in 0..10 {
-            let price = 3000 + (i as u64 * 10);  // 3000, 3010, 3020, ..., 3090
+            let price = 3000 + (i as u64 * 10); // 3000, 3010, 3020, ..., 3090
             let o = make_order(i as u8, (50 + i) as u8, OrderSide::Sell, price, 100);
             book.add_order(o);
         }
@@ -79,7 +100,8 @@ mod trading_limits {
         let matches = book.add_order(buy);
 
         let total_filled: u64 = matches.iter().map(|m| m.amount).sum();
-        let levels_touched: std::collections::HashSet<u64> = matches.iter().map(|m| m.price).collect();
+        let levels_touched: std::collections::HashSet<u64> =
+            matches.iter().map(|m| m.price).collect();
 
         eprintln!("\n┌─ LIMIT 2: MULTI-LEVEL SLIPPAGE ─────────────────────────┐");
         eprintln!("│  Resting asks:       10 levels × 100 @ 3000-3090");
@@ -87,8 +109,14 @@ mod trading_limits {
         eprintln!("│  Matches executed:   {}", matches.len());
         eprintln!("│  Total filled:       {} units", total_filled);
         eprintln!("│  Prices touched:     {} levels", levels_touched.len());
-        eprintln!("│  Avg fill price:     {:.0}", matches.iter().map(|m| m.amount * m.price).sum::<u64>() as f64 / total_filled as f64);
-        eprintln!("│  Total value:        {} USD", matches.iter().map(|m| m.amount * m.price).sum::<u64>());
+        eprintln!(
+            "│  Avg fill price:     {:.0}",
+            matches.iter().map(|m| m.amount * m.price).sum::<u64>() as f64 / total_filled as f64
+        );
+        eprintln!(
+            "│  Total value:        {} USD",
+            matches.iter().map(|m| m.amount * m.price).sum::<u64>()
+        );
         eprintln!("│  Remaining asks:     {} levels", book.asks.len());
         assert_eq!(total_filled, 1000);
         assert!(levels_touched.len() == 10 || levels_touched.len() == 9);
@@ -125,13 +153,32 @@ mod trading_limits {
         let matches_near = book.add_order(near_overflow);
 
         eprintln!("\n┌─ LIMIT 3: PRICE BOUNDARIES ─────────────────────────────┐");
-        eprintln!("│  Price=1 order:        {} matches (entered book)", matches_min.len());
-        eprintln!("│  Price=999B order:     {} matches (entered book)", matches_max.len());
-        eprintln!("│  Price=0 order:        {} matches (should be 0 — rejected)", matches_zero.len());
-        eprintln!("│  Price>1e12 order:     {} matches (should be 0 — rejected)", matches_huge.len());
-        eprintln!("│  Max safe amount:      {} units (u64::MAX/3000)", max_amount);
+        eprintln!(
+            "│  Price=1 order:        {} matches (entered book)",
+            matches_min.len()
+        );
+        eprintln!(
+            "│  Price=999B order:     {} matches (entered book)",
+            matches_max.len()
+        );
+        eprintln!(
+            "│  Price=0 order:        {} matches (should be 0 — rejected)",
+            matches_zero.len()
+        );
+        eprintln!(
+            "│  Price>1e12 order:     {} matches (should be 0 — rejected)",
+            matches_huge.len()
+        );
+        eprintln!(
+            "│  Max safe amount:      {} units (u64::MAX/3000)",
+            max_amount
+        );
         eprintln!("│  Near-overflow result: {} matches", matches_near.len());
-        eprintln!("│  Book depth:           bid={} ask={}", book.bids.len(), book.asks.len());
+        eprintln!(
+            "│  Book depth:           bid={} ask={}",
+            book.bids.len(),
+            book.asks.len()
+        );
         eprintln!("│  PASS                  ✓                                 │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
         assert!(matches_zero.is_empty());
@@ -166,10 +213,20 @@ mod trading_limits {
         let recovery_matches = book.add_order(recovery_buy);
 
         eprintln!("\n┌─ LIMIT 4: FLASH CRASH SCENARIO ─────────────────────────┐");
-        eprintln!("│  Pre-crash:  bid={} ask={}                          ", pre_bid_depth, pre_ask_depth);
-        eprintln!("│  Crash sell: {} matches, {} value                    ", crash_matches.len(), crash_value);
+        eprintln!(
+            "│  Pre-crash:  bid={} ask={}                          ",
+            pre_bid_depth, pre_ask_depth
+        );
+        eprintln!(
+            "│  Crash sell: {} matches, {} value                    ",
+            crash_matches.len(),
+            crash_value
+        );
         eprintln!("│  Post-crash: bid depth={}", post_crash_bid);
-        eprintln!("│  Recovery:   {} matches                            ", recovery_matches.len());
+        eprintln!(
+            "│  Recovery:   {} matches                            ",
+            recovery_matches.len()
+        );
         eprintln!("│  No panics:  ✓                                         │");
         eprintln!("│  PASS        ✓                                         │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
@@ -183,7 +240,13 @@ mod trading_limits {
         // Build 100 bid levels at 100 orders each = 10,000 resting bids
         for level in 0..100u64 {
             for j in 0..10u8 {
-                let o = make_order((level * 10 + j as u64) as u8, (10 + level) as u8, OrderSide::Buy, 1000 + level, 5);
+                let o = make_order(
+                    (level * 10 + j as u64) as u8,
+                    (10 + level) as u8,
+                    OrderSide::Buy,
+                    1000 + level,
+                    5,
+                );
                 book.add_order(o);
             }
         }
@@ -202,11 +265,28 @@ mod trading_limits {
         let actual_empty = book.bids.iter().filter(|(_, v)| v.is_empty()).count();
 
         eprintln!("\n┌─ LIMIT 5: CASCADING FILL CONSISTENCY ───────────────────┐");
-        eprintln!("│  Pre-fill:     {} bid orders across {} levels        ", pre_bid_count, book.bids.len());
-        eprintln!("│  50 market sells: {} total partial matches           ", total_matches);
-        eprintln!("│  Post-fill:    {} bid orders across {} levels        ", post_bid_count, book.bids.len());
-        eprintln!("│  Empty levels: {} (should auto-remove)                ", actual_empty);
-        assert_eq!(actual_empty, 0, "No empty price levels should remain in book");
+        eprintln!(
+            "│  Pre-fill:     {} bid orders across {} levels        ",
+            pre_bid_count,
+            book.bids.len()
+        );
+        eprintln!(
+            "│  50 market sells: {} total partial matches           ",
+            total_matches
+        );
+        eprintln!(
+            "│  Post-fill:    {} bid orders across {} levels        ",
+            post_bid_count,
+            book.bids.len()
+        );
+        eprintln!(
+            "│  Empty levels: {} (should auto-remove)                ",
+            actual_empty
+        );
+        assert_eq!(
+            actual_empty, 0,
+            "No empty price levels should remain in book"
+        );
         eprintln!("│  PASS          ✓                                       │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
     }
@@ -232,10 +312,22 @@ mod trading_limits {
         let post_depth = book.bids.get(&3000).map(|v| v.len()).unwrap_or(0);
 
         eprintln!("\n┌─ LIMIT 6: PRICE LEVEL SATURATION ───────────────────────┐");
-        eprintln!("│  Resting orders:  {} @ 3000 (same price)            ", depth);
-        eprintln!("│  Market sell:     10000 units → {} matches         ", matches.len());
-        eprintln!("│  Total filled:    {} units                          ", total_filled);
-        eprintln!("│  Remaining:       {} orders                          ", post_depth);
+        eprintln!(
+            "│  Resting orders:  {} @ 3000 (same price)            ",
+            depth
+        );
+        eprintln!(
+            "│  Market sell:     10000 units → {} matches         ",
+            matches.len()
+        );
+        eprintln!(
+            "│  Total filled:    {} units                          ",
+            total_filled
+        );
+        eprintln!(
+            "│  Remaining:       {} orders                          ",
+            post_depth
+        );
         assert_eq!(total_filled, 10000);
         assert_eq!(post_depth, 0);
         eprintln!("│  PASS             ✓                                    │");
@@ -260,14 +352,22 @@ mod trading_limits {
             let max_bid = book.bids.keys().max().copied().unwrap_or(0);
             let min_ask = book.asks.keys().min().copied().unwrap_or(u64::MAX);
 
-            assert!(max_bid < min_ask || book.bids.is_empty() || book.asks.is_empty(),
-                "Book crossed: best bid {} >= best ask {}", max_bid, min_ask);
+            assert!(
+                max_bid < min_ask || book.bids.is_empty() || book.asks.is_empty(),
+                "Book crossed: best bid {} >= best ask {}",
+                max_bid,
+                min_ask
+            );
         }
 
         eprintln!("\n┌─ LIMIT 7: BOOK INVARIANTS ──────────────────────────────┐");
         eprintln!("│  10 rounds × 40 orders, invariants checked each round   │");
         eprintln!("│  Crossed book:     NEVER detected                       │");
-        eprintln!("│  Order book depth: bid={} ask={}                     ", book.bids.len(), book.asks.len());
+        eprintln!(
+            "│  Order book depth: bid={} ask={}                     ",
+            book.bids.len(),
+            book.asks.len()
+        );
         eprintln!("│  PASS              ✓                                    │");
         eprintln!("└─────────────────────────────────────────────────────────┘");
     }

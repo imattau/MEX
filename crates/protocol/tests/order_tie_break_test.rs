@@ -53,7 +53,11 @@ fn now_ms() -> f64 {
         * 1000.0
 }
 
-async fn spawn_detector(id: u32, listen_addr: std::net::SocketAddr, origin_addr: std::net::SocketAddr) -> MeshNode {
+async fn spawn_detector(
+    id: u32,
+    listen_addr: std::net::SocketAddr,
+    origin_addr: std::net::SocketAddr,
+) -> MeshNode {
     MeshNode::new(MeshConfig {
         node_id: NodeId(id),
         region: Region::UsEast1,
@@ -79,10 +83,20 @@ fn decision_ordering(d: OrderingDecision) -> CmpOrdering {
     }
 }
 
-async fn setup(base_port: u16) -> (
+async fn setup(
+    base_port: u16,
+) -> (
     std::sync::Arc<UdpTransport>,
-    tokio::sync::mpsc::Sender<([u8; 32], [u8; 32], tokio::sync::oneshot::Sender<Option<OrderingDecision>>)>,
-    tokio::sync::mpsc::Sender<([u8; 32], [u8; 32], tokio::sync::oneshot::Sender<Option<OrderingDecision>>)>,
+    tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<OrderingDecision>>,
+    )>,
+    tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<OrderingDecision>>,
+    )>,
 ) {
     let origin_addr = addr(base_port);
     let d1_addr = addr(base_port + 1);
@@ -118,7 +132,11 @@ async fn setup(base_port: u16) -> (
 }
 
 async fn query(
-    sender: &tokio::sync::mpsc::Sender<([u8; 32], [u8; 32], tokio::sync::oneshot::Sender<Option<OrderingDecision>>)>,
+    sender: &tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<OrderingDecision>>,
+    )>,
     order_a: [u8; 32],
     order_b: [u8; 32],
 ) -> Option<OrderingDecision> {
@@ -141,19 +159,47 @@ async fn test_independently_observing_nodes_agree_on_ranking_under_ambiguous_tim
     // ByTimestamp path with a razor-thin margin) rather than forcing it
     // artificially.
     let t = now_ms();
-    let msg_a1 = FloodMessage { order: order_a.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t, source_region: Region::UsEast1 };
+    let msg_a1 = FloodMessage {
+        order: order_a.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t,
+        source_region: Region::UsEast1,
+    };
     let msg_a2 = msg_a1.clone();
-    let msg_b1 = FloodMessage { order: order_b.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t, source_region: Region::UsEast1 };
+    let msg_b1 = FloodMessage {
+        order: order_b.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t,
+        source_region: Region::UsEast1,
+    };
     let msg_b2 = msg_b1.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_a1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_a2)).await.unwrap();
-    origin.send(NodeId(1), WireMessage::Flood(msg_b1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_b2)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_a1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_a2))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_b1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_b2))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let d1_decision = query(&d1_query, order_a.id, order_b.id).await.expect("D1 should be able to compare both orders");
-    let d2_decision = query(&d2_query, order_a.id, order_b.id).await.expect("D2 should be able to compare both orders");
+    let d1_decision = query(&d1_query, order_a.id, order_b.id)
+        .await
+        .expect("D1 should be able to compare both orders");
+    let d2_decision = query(&d2_query, order_a.id, order_b.id)
+        .await
+        .expect("D2 should be able to compare both orders");
 
     println!("D1 decision: {d1_decision:?}");
     println!("D2 decision: {d2_decision:?}");
@@ -168,7 +214,10 @@ async fn test_independently_observing_nodes_agree_on_ranking_under_ambiguous_tim
     // Repeating the SAME query must be stable -- not a fresh coin-flip
     // each call.
     let d1_decision_again = query(&d1_query, order_a.id, order_b.id).await.unwrap();
-    assert_eq!(d1_decision, d1_decision_again, "repeated comparisons of the same evidence must be stable");
+    assert_eq!(
+        d1_decision, d1_decision_again,
+        "repeated comparisons of the same evidence must be stable"
+    );
 
     // Comparing in the reverse order must invert cleanly.
     let d1_reversed = query(&d1_query, order_b.id, order_a.id).await.unwrap();
@@ -188,18 +237,42 @@ async fn test_clearly_separated_orders_use_timestamp_not_tie_break() {
     const TRUE_GAP_MS: u64 = 200; // comfortably clear of AMBIGUITY_WINDOW_MS
 
     let t_a = now_ms();
-    let msg_a1 = FloodMessage { order: order_a.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t_a, source_region: Region::UsEast1 };
+    let msg_a1 = FloodMessage {
+        order: order_a.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t_a,
+        source_region: Region::UsEast1,
+    };
     let msg_a2 = msg_a1.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_a1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_a2)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_a1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_a2))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(TRUE_GAP_MS)).await;
 
     let t_b = now_ms();
-    let msg_b1 = FloodMessage { order: order_b.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t_b, source_region: Region::UsEast1 };
+    let msg_b1 = FloodMessage {
+        order: order_b.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t_b,
+        source_region: Region::UsEast1,
+    };
     let msg_b2 = msg_b1.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_b1)).await.unwrap();
-    origin.send(NodeId(2), WireMessage::Flood(msg_b2)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_b1))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(2), WireMessage::Flood(msg_b2))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 

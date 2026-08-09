@@ -24,8 +24,13 @@ const MSG_BATCH_PROPOSAL: u8 = 0x0E;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WireMessage {
     Flood(FloodMessage),
-    Heartbeat { node_id: NodeId, timestamp: f64 },
-    Ack { node_id: NodeId },
+    Heartbeat {
+        node_id: NodeId,
+        timestamp: f64,
+    },
+    Ack {
+        node_id: NodeId,
+    },
     EncryptedFlood(Vec<u8>),
     SignedHeartbeat {
         node_id: NodeId,
@@ -141,7 +146,11 @@ impl UdpTransport {
             socket,
             peer_addrs: HashMap::new(),
             peer_keys: HashMap::new(),
-            node_private_key: if private_seed == [0u8; 32] { None } else { Some(private_seed) },
+            node_private_key: if private_seed == [0u8; 32] {
+                None
+            } else {
+                Some(private_seed)
+            },
             node_public_key: public_key,
         })
     }
@@ -191,45 +200,55 @@ impl UdpTransport {
             .ok_or_else(|| format!("Unknown peer: {:?}", node_id))?;
 
         let (msg_type, payload) = match &msg {
-            WireMessage::Flood(_) => {
-                (MSG_FLOOD, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::EncryptedFlood(ref data) => {
-                (MSG_ENCRYPTED_FLOOD, data.clone())
-            }
-            WireMessage::Heartbeat { .. } | WireMessage::Ack { .. } => {
-                (MSG_HEARTBEAT, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::SignedHeartbeat { .. } => {
-                (MSG_SIGNED_HEARTBEAT, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::EchoRequest { .. } => {
-                (MSG_ECHO_REQUEST, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::EchoResponse { .. } => {
-                (MSG_ECHO_RESPONSE, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::SettlementProof { .. } => {
-                (MSG_SETTLEMENT_PROOF, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::LogEntryBroadcast { .. } => {
-                (MSG_LOG_ENTRY, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::MisconductReport { .. } => {
-                (MSG_MISCONDUCT_REPORT, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::Ping { .. } => {
-                (MSG_PING, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::Pong { .. } => {
-                (MSG_PONG, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::HopWitness { .. } => {
-                (MSG_HOP_WITNESS, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
-            WireMessage::BatchProposal { .. } => {
-                (MSG_BATCH_PROPOSAL, bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?)
-            }
+            WireMessage::Flood(_) => (
+                MSG_FLOOD,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::EncryptedFlood(ref data) => (MSG_ENCRYPTED_FLOOD, data.clone()),
+            WireMessage::Heartbeat { .. } | WireMessage::Ack { .. } => (
+                MSG_HEARTBEAT,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::SignedHeartbeat { .. } => (
+                MSG_SIGNED_HEARTBEAT,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::EchoRequest { .. } => (
+                MSG_ECHO_REQUEST,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::EchoResponse { .. } => (
+                MSG_ECHO_RESPONSE,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::SettlementProof { .. } => (
+                MSG_SETTLEMENT_PROOF,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::LogEntryBroadcast { .. } => (
+                MSG_LOG_ENTRY,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::MisconductReport { .. } => (
+                MSG_MISCONDUCT_REPORT,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::Ping { .. } => (
+                MSG_PING,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::Pong { .. } => (
+                MSG_PONG,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::HopWitness { .. } => (
+                MSG_HOP_WITNESS,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
+            WireMessage::BatchProposal { .. } => (
+                MSG_BATCH_PROPOSAL,
+                bincode::serialize(&msg).map_err(|e| format!("Serialize: {}", e))?,
+            ),
         };
 
         let mut packet = Vec::with_capacity(1 + payload.len());
@@ -260,22 +279,33 @@ impl UdpTransport {
         let payload = &buf[1..len];
 
         let msg = match msg_type {
-            MSG_ENCRYPTED_FLOOD => {
-                WireMessage::EncryptedFlood(payload.to_vec())
-            }
-            MSG_SIGNED_HEARTBEAT | MSG_HEARTBEAT | MSG_FLOOD | MSG_ACK
-            | MSG_ECHO_REQUEST | MSG_ECHO_RESPONSE | MSG_SETTLEMENT_PROOF | MSG_LOG_ENTRY
-            | MSG_MISCONDUCT_REPORT | MSG_PING | MSG_PONG | MSG_HOP_WITNESS | MSG_BATCH_PROPOSAL => {
-                bincode::deserialize::<WireMessage>(payload)
-                    .map_err(|e| format!("Deserialize: {}", e))?
-            }
+            MSG_ENCRYPTED_FLOOD => WireMessage::EncryptedFlood(payload.to_vec()),
+            MSG_SIGNED_HEARTBEAT
+            | MSG_HEARTBEAT
+            | MSG_FLOOD
+            | MSG_ACK
+            | MSG_ECHO_REQUEST
+            | MSG_ECHO_RESPONSE
+            | MSG_SETTLEMENT_PROOF
+            | MSG_LOG_ENTRY
+            | MSG_MISCONDUCT_REPORT
+            | MSG_PING
+            | MSG_PONG
+            | MSG_HOP_WITNESS
+            | MSG_BATCH_PROPOSAL => bincode::deserialize::<WireMessage>(payload)
+                .map_err(|e| format!("Deserialize: {}", e))?,
             _ => return Err(format!("Unknown message type: {}", msg_type)),
         };
 
         let node_id = self.resolve_sender(addr);
 
         match &msg {
-            WireMessage::SignedHeartbeat { node_id: hb_id, timestamp, node_public_key, signature } => {
+            WireMessage::SignedHeartbeat {
+                node_id: hb_id,
+                timestamp,
+                node_public_key,
+                signature,
+            } => {
                 let pinned_key = self
                     .peer_keys
                     .get(hb_id)

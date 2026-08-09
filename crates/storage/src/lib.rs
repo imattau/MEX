@@ -34,7 +34,9 @@ impl TradeLogger {
                     .and_then(|b| <[u8; 8]>::try_from(b.as_ref()).ok())
                     .map(u64::from_be_bytes)
                     .unwrap_or(0);
-                let next = current.checked_add(1).expect("Sequence counter overflowed u64");
+                let next = current
+                    .checked_add(1)
+                    .expect("Sequence counter overflowed u64");
                 Some(sled::IVec::from(next.to_be_bytes().to_vec()))
             })
             .map_err(|e| format!("Failed to fetch sequence: {}", e))?;
@@ -60,19 +62,16 @@ impl TradeLogger {
     }
 
     pub fn recover(&self) -> impl Iterator<Item = Result<LogEntry, String>> + '_ {
-        self.db
-            .iter()
-            .values()
-            .filter_map(|v| {
-                let bytes = v.ok()?;
-                if bytes.len() == 8 {
-                    return None;
-                }
-                match serde_json::from_slice::<LogEntry>(&bytes) {
-                    Ok(entry) => Some(Ok(entry)),
-                    Err(_) => None,
-                }
-            })
+        self.db.iter().values().filter_map(|v| {
+            let bytes = v.ok()?;
+            if bytes.len() == 8 {
+                return None;
+            }
+            match serde_json::from_slice::<LogEntry>(&bytes) {
+                Ok(entry) => Some(Ok(entry)),
+                Err(_) => None,
+            }
+        })
     }
 
     pub fn recover_all(&self) -> Result<Vec<LogEntry>, String> {
@@ -95,11 +94,7 @@ impl TradeLogger {
         self.db
             .iter()
             .values()
-            .filter(|v| {
-                v.as_ref()
-                    .map(|b| b.len() != 8)
-                    .unwrap_or(false)
-            })
+            .filter(|v| v.as_ref().map(|b| b.len() != 8).unwrap_or(false))
             .count()
     }
 }
@@ -131,9 +126,7 @@ mod tests {
             settlement_requester: SettlementRequester::Seller,
         };
 
-        logger
-            .append(LogEntry::OrderAdded(order.clone()))
-            .unwrap();
+        logger.append(LogEntry::OrderAdded(order.clone())).unwrap();
         logger
             .append(LogEntry::OrderMatched {
                 buy_order_id: [1u8; 32],

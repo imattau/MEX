@@ -62,8 +62,20 @@ async fn test_two_active_but_dust_staked_reporters_do_not_reach_quorum() {
     // against: an adversary satisfying "active" cheaply with two
     // near-minimum-stake identities.
     let mut snapshot = HashMap::new();
-    snapshot.insert([20u8; 32], ChainNodeStatus { active: true, stake: 100 });
-    snapshot.insert([21u8; 32], ChainNodeStatus { active: true, stake: 100 });
+    snapshot.insert(
+        [20u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 100,
+        },
+    );
+    snapshot.insert(
+        [21u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 100,
+        },
+    );
     detector.set_chain_status(snapshot);
 
     tokio::spawn(detector.run());
@@ -74,12 +86,18 @@ async fn test_two_active_but_dust_staked_reporters_do_not_reach_quorum() {
     let subject = NodeId(99);
 
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(16), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s dust-staked claim"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(16),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s dust-staked claim"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;
@@ -99,8 +117,20 @@ async fn test_two_reporters_with_sufficient_combined_stake_reach_quorum() {
     // SUM (6,000) does -- and there are still 2 distinct reporters, so
     // min_reporters is satisfied too.
     let mut snapshot = HashMap::new();
-    snapshot.insert([20u8; 32], ChainNodeStatus { active: true, stake: 3_000 });
-    snapshot.insert([21u8; 32], ChainNodeStatus { active: true, stake: 3_000 });
+    snapshot.insert(
+        [20u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 3_000,
+        },
+    );
+    snapshot.insert(
+        [21u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 3_000,
+        },
+    );
     detector.set_chain_status(snapshot);
 
     tokio::spawn(detector.run());
@@ -111,12 +141,18 @@ async fn test_two_reporters_with_sufficient_combined_stake_reach_quorum() {
     let subject = NodeId(99);
 
     for reporter in [NodeId(20), NodeId(21)] {
-        injector.send(NodeId(17), WireMessage::MisconductReport {
-            reporter,
-            subject,
-            reason: format!("{reporter:?}'s claim"),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(17),
+                WireMessage::MisconductReport {
+                    reporter,
+                    subject,
+                    reason: format!("{reporter:?}'s claim"),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_secs(2), confirmed.recv())
@@ -140,7 +176,13 @@ async fn test_single_whale_reporter_alone_never_reaches_quorum() {
     // independent voice must agree" (see MisconductQuorum's docs).
     // Reporter 21 never accuses here at all.
     let mut snapshot = HashMap::new();
-    snapshot.insert([20u8; 32], ChainNodeStatus { active: true, stake: 1_000_000 });
+    snapshot.insert(
+        [20u8; 32],
+        ChainNodeStatus {
+            active: true,
+            stake: 1_000_000,
+        },
+    );
     detector.set_chain_status(snapshot);
 
     tokio::spawn(detector.run());
@@ -150,12 +192,18 @@ async fn test_single_whale_reporter_alone_never_reaches_quorum() {
     injector.register_peer(NodeId(18), detector_addr, [0u8; 32]);
     let subject = NodeId(99);
 
-    injector.send(NodeId(18), WireMessage::MisconductReport {
-        reporter: NodeId(20),
-        subject,
-        reason: "reporter 20's enormous-stake, but SOLE, claim".to_string(),
-        timestamp: now_secs(),
-    }).await.unwrap();
+    injector
+        .send(
+            NodeId(18),
+            WireMessage::MisconductReport {
+                reporter: NodeId(20),
+                subject,
+                reason: "reporter 20's enormous-stake, but SOLE, claim".to_string(),
+                timestamp: now_secs(),
+            },
+        )
+        .await
+        .unwrap();
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;
     assert!(

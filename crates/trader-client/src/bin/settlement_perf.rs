@@ -19,10 +19,10 @@
 //     <rpc_url> <deployer_private_key> <factory_address> <registry_address> [iterations]
 
 use alloy::network::EthereumWallet;
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
-use alloy::network::TransactionBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use chain::OnChainAccount;
@@ -103,8 +103,16 @@ fn u64_to_bytes32(val: u64) -> [u8; 32] {
 
 async fn fund(provider: &impl Provider, to: Address, eth: &str) {
     let wei: u128 = eth.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
-    let tx = TransactionRequest::default().with_to(to).with_value(U256::from(wei));
-    provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
+    let tx = TransactionRequest::default()
+        .with_to(to)
+        .with_value(U256::from(wei));
+    provider
+        .send_transaction(tx)
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
 }
 
 #[tokio::main]
@@ -137,10 +145,20 @@ async fn main() {
     // Register one settlement node (reusing the deployer key as node
     // operator -- irrelevant to what's being measured). Signed through
     // deployer_provider, same as every other deployer action below.
-    let node_pubkey: OnChainAccount = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"PERF"); b };
+    let node_pubkey: OnChainAccount = {
+        let mut b = [0u8; 32];
+        b[0..4].copy_from_slice(b"PERF");
+        b
+    };
     let registry_contract = INodeRegistryPerf::new(registry_addr, &deployer_provider);
-    if !registry_contract.isActiveNode(FixedBytes::from(node_pubkey)).call().await.unwrap() {
-        let stake_wei: u128 = NODE_STAKE_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
+    if !registry_contract
+        .isActiveNode(FixedBytes::from(node_pubkey))
+        .call()
+        .await
+        .unwrap()
+    {
+        let stake_wei: u128 =
+            NODE_STAKE_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128;
         registry_contract
             .registerNode(FixedBytes::from(node_pubkey), "perf-test".to_string())
             .value(U256::from(stake_wei))
@@ -159,8 +177,16 @@ async fn main() {
     fund(&deployer_provider, maker_signer.address(), FUND_ETH).await;
     fund(&deployer_provider, taker_signer.address(), FUND_ETH).await;
 
-    let maker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..5].copy_from_slice(b"MAKER"); b };
-    let taker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..5].copy_from_slice(b"TAKER"); b };
+    let maker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0..5].copy_from_slice(b"MAKER");
+        b
+    };
+    let taker_pubkey: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[0..5].copy_from_slice(b"TAKER");
+        b
+    };
 
     let mut tokens = chain_ethereum::TokenRegistry::new();
     tokens.register([0u8; 20], "ETH-USD");
@@ -187,7 +213,8 @@ async fn main() {
 
     maker_client.ensure_escrow().await.unwrap();
     taker_client.ensure_escrow().await.unwrap();
-    let deposit_wei = U256::from(DEPOSIT_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128);
+    let deposit_wei =
+        U256::from(DEPOSIT_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128);
     maker_client.deposit_native(deposit_wei).await.unwrap();
     println!("two trader escrows created + funded: OK\n");
 
@@ -261,13 +288,29 @@ async fn main() {
             tier: 0,
         };
         let calldata = prover::decode_proof_calldata(&proof).unwrap();
-        let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
-        let b = [
-            [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
-            [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+        let a = [
+            U256::from_be_bytes(calldata.a[0]),
+            U256::from_be_bytes(calldata.a[1]),
         ];
-        let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
-        let input: Vec<U256> = calldata.public_inputs.iter().map(|bytes| U256::from_be_bytes(*bytes)).collect();
+        let b = [
+            [
+                U256::from_be_bytes(calldata.b[0][0]),
+                U256::from_be_bytes(calldata.b[0][1]),
+            ],
+            [
+                U256::from_be_bytes(calldata.b[1][0]),
+                U256::from_be_bytes(calldata.b[1][1]),
+            ],
+        ];
+        let c = [
+            U256::from_be_bytes(calldata.c[0]),
+            U256::from_be_bytes(calldata.c[1]),
+        ];
+        let input: Vec<U256> = calldata
+            .public_inputs
+            .iter()
+            .map(|bytes| U256::from_be_bytes(*bytes))
+            .collect();
 
         let t2 = Instant::now();
         let settle_receipt = factory_contract
@@ -295,8 +338,10 @@ async fn main() {
     }
     println!(" done\n");
 
-    let baseline_settle_gas = timings.iter().map(|t| t.settle_gas).sum::<u64>() / timings.len() as u64;
-    let baseline_commit_gas = timings.iter().map(|t| t.commit_gas).sum::<u64>() / timings.len() as u64;
+    let baseline_settle_gas =
+        timings.iter().map(|t| t.settle_gas).sum::<u64>() / timings.len() as u64;
+    let baseline_commit_gas =
+        timings.iter().map(|t| t.commit_gas).sum::<u64>() / timings.len() as u64;
     report(&timings);
 
     println!("\nrunning a batched settlement: {MAX_BATCH_TRADES} trades, one proof, one settleBatchWithFees call...");
@@ -339,7 +384,11 @@ async fn run_batched_settlement(
     let mut commit_total = Duration::ZERO;
 
     for i in 0..MAX_BATCH_TRADES {
-        let deadline = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
         let m = Match {
             maker_order_id: u64_to_bytes32(20_000 + i as u64 * 2),
             taker_order_id: u64_to_bytes32(20_000 + i as u64 * 2 + 1),
@@ -391,15 +440,34 @@ async fn run_batched_settlement(
             assignedNode: FixedBytes::from(node_pubkey),
         })
         .collect();
-    let fee_config = ISettlementFactoryPerf::FeeConfig { feeRecipient: maker_address, tier: 0 };
+    let fee_config = ISettlementFactoryPerf::FeeConfig {
+        feeRecipient: maker_address,
+        tier: 0,
+    };
     let calldata = prover::decode_proof_calldata(&proof).unwrap();
-    let a = [U256::from_be_bytes(calldata.a[0]), U256::from_be_bytes(calldata.a[1])];
-    let b = [
-        [U256::from_be_bytes(calldata.b[0][0]), U256::from_be_bytes(calldata.b[0][1])],
-        [U256::from_be_bytes(calldata.b[1][0]), U256::from_be_bytes(calldata.b[1][1])],
+    let a = [
+        U256::from_be_bytes(calldata.a[0]),
+        U256::from_be_bytes(calldata.a[1]),
     ];
-    let c = [U256::from_be_bytes(calldata.c[0]), U256::from_be_bytes(calldata.c[1])];
-    let input: Vec<U256> = calldata.public_inputs.iter().map(|bytes| U256::from_be_bytes(*bytes)).collect();
+    let b = [
+        [
+            U256::from_be_bytes(calldata.b[0][0]),
+            U256::from_be_bytes(calldata.b[0][1]),
+        ],
+        [
+            U256::from_be_bytes(calldata.b[1][0]),
+            U256::from_be_bytes(calldata.b[1][1]),
+        ],
+    ];
+    let c = [
+        U256::from_be_bytes(calldata.c[0]),
+        U256::from_be_bytes(calldata.c[1]),
+    ];
+    let input: Vec<U256> = calldata
+        .public_inputs
+        .iter()
+        .map(|bytes| U256::from_be_bytes(*bytes))
+        .collect();
 
     let t2 = Instant::now();
     let receipt = factory_contract
@@ -427,7 +495,12 @@ async fn run_batched_settlement(
 
     println!("\n=== Updated computed throughput ceiling using batched gas/trade ===");
     print_ceiling("Ethereum L1", 30_000_000, 12.0, batched_total_gas_per_trade);
-    print_ceiling("A representative L2 (e.g. Base)", 200_000_000, 2.0, batched_total_gas_per_trade);
+    print_ceiling(
+        "A representative L2 (e.g. Base)",
+        200_000_000,
+        2.0,
+        batched_total_gas_per_trade,
+    );
 }
 
 async fn latest_block_gas(provider: &impl Provider) -> u64 {
@@ -459,19 +532,27 @@ fn report(timings: &[StageTiming]) {
     println!("=== Per-stage latency (n={}) ===", timings.len());
     println!(
         "commitTrade:            p50 {:?}  p90 {:?}  p99 {:?}",
-        percentile(&commit_lat, 0.5), percentile(&commit_lat, 0.9), percentile(&commit_lat, 0.99)
+        percentile(&commit_lat, 0.5),
+        percentile(&commit_lat, 0.9),
+        percentile(&commit_lat, 0.99)
     );
     println!(
         "prove_batch (off-chain): p50 {:?}  p90 {:?}  p99 {:?}",
-        percentile(&prove_lat, 0.5), percentile(&prove_lat, 0.9), percentile(&prove_lat, 0.99)
+        percentile(&prove_lat, 0.5),
+        percentile(&prove_lat, 0.9),
+        percentile(&prove_lat, 0.99)
     );
     println!(
         "settleBatchWithFees:    p50 {:?}  p90 {:?}  p99 {:?}",
-        percentile(&settle_lat, 0.5), percentile(&settle_lat, 0.9), percentile(&settle_lat, 0.99)
+        percentile(&settle_lat, 0.5),
+        percentile(&settle_lat, 0.9),
+        percentile(&settle_lat, 0.99)
     );
     println!(
         "TOTAL end-to-end:        p50 {:?}  p90 {:?}  p99 {:?}",
-        percentile(&total_lat, 0.5), percentile(&total_lat, 0.9), percentile(&total_lat, 0.99)
+        percentile(&total_lat, 0.5),
+        percentile(&total_lat, 0.9),
+        percentile(&total_lat, 0.99)
     );
 
     println!("\n=== Gas cost per trade, single-trade-per-proof baseline (this section) ===");
@@ -484,7 +565,12 @@ fn report(timings: &[StageTiming]) {
     println!("    number above against real network block gas limits/times; local devnet");
     println!("    has neither a real gas limit nor a real block time) ===");
     print_ceiling("Ethereum L1", 30_000_000, 12.0, total_gas_per_trade);
-    print_ceiling("A representative L2 (e.g. Base)", 200_000_000, 2.0, total_gas_per_trade);
+    print_ceiling(
+        "A representative L2 (e.g. Base)",
+        200_000_000,
+        2.0,
+        total_gas_per_trade,
+    );
 }
 
 fn print_ceiling(name: &str, block_gas_limit: u64, block_time_secs: f64, gas_per_trade: u64) {
@@ -513,12 +599,22 @@ async fn concurrent_burst(
         fund(deployer_provider, maker_signer.address(), FUND_ETH).await;
         fund(deployer_provider, taker_signer.address(), FUND_ETH).await;
 
-        let maker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"BURM"); b[4] = i as u8; b };
-        let taker_pubkey: [u8; 32] = { let mut b = [0u8; 32]; b[0..4].copy_from_slice(b"BURT"); b[4] = i as u8; b };
+        let maker_pubkey: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(b"BURM");
+            b[4] = i as u8;
+            b
+        };
+        let taker_pubkey: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(b"BURT");
+            b[4] = i as u8;
+            b
+        };
 
         let handle = tokio::spawn(async move {
             let mut tokens = chain_ethereum::TokenRegistry::new();
-    tokens.register([0u8; 20], "ETH-USD");
+            tokens.register([0u8; 20], "ETH-USD");
             let mut maker_client = TraderClient::new(
                 &rpc_url,
                 &hex::encode(maker_signer.to_bytes()),
@@ -529,17 +625,30 @@ async fn concurrent_burst(
             )
             .await
             .unwrap();
-            let taker_client = TraderClient::new(&rpc_url, &hex::encode(taker_signer.to_bytes()), &factory_address, taker_pubkey, tokens, 0)
-                .await
-                .unwrap();
+            let taker_client = TraderClient::new(
+                &rpc_url,
+                &hex::encode(taker_signer.to_bytes()),
+                &factory_address,
+                taker_pubkey,
+                tokens,
+                0,
+            )
+            .await
+            .unwrap();
             maker_client.ensure_escrow().await.unwrap();
             taker_client.ensure_escrow().await.unwrap();
             maker_client
-                .deposit_native(U256::from(DEPOSIT_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128))
+                .deposit_native(U256::from(
+                    DEPOSIT_ETH.parse::<u128>().unwrap() * 1_000_000_000_000_000_000u128,
+                ))
                 .await
                 .unwrap();
 
-            let deadline = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+            let deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600;
             let m = Match {
                 maker_order_id: u64_to_bytes32(9000 + i as u64),
                 taker_order_id: u64_to_bytes32(9500 + i as u64),

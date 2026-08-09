@@ -53,7 +53,10 @@ fn now_ms() -> f64 {
 }
 
 async fn query_witness(
-    sender: &tokio::sync::mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>)>,
+    sender: &tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>,
+    )>,
     order_id: [u8; 32],
 ) -> Option<(NodeId, f64)> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -89,7 +92,10 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
         node_id: NodeId(1),
         region: Region::UsEast1,
         listen_addr: d1_addr,
-        peers: vec![(NodeId(0), origin_addr, [0u8; 32]), (NodeId(2), d2_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(0), origin_addr, [0u8; 32]),
+            (NodeId(2), d2_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -98,12 +104,17 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let d2 = MeshNode::new(MeshConfig {
         node_id: NodeId(2),
         region: Region::UsEast1,
         listen_addr: d2_addr,
-        peers: vec![(NodeId(0), origin_addr, [0u8; 32]), (NodeId(1), d1_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(0), origin_addr, [0u8; 32]),
+            (NodeId(1), d1_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -112,7 +123,9 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let d1_witness_query = d1.earliest_witness_query_sender();
     let d2_witness_query = d2.earliest_witness_query_sender();
@@ -138,10 +151,22 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
     let order_c = signed_order(43, 3);
 
     for order in [&order_a, &order_b, &order_c] {
-        let msg1 = FloodMessage { order: (*order).clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
+        let msg1 = FloodMessage {
+            order: (*order).clone(),
+            hop_count: 0,
+            path: vec![NodeId(0)],
+            timestamp: now_ms(),
+            source_region: Region::UsEast1,
+        };
         let msg2 = msg1.clone();
-        origin.send(NodeId(1), WireMessage::Flood(msg1)).await.unwrap();
-        origin.send(NodeId(2), WireMessage::Flood(msg2)).await.unwrap();
+        origin
+            .send(NodeId(1), WireMessage::Flood(msg1))
+            .await
+            .unwrap();
+        origin
+            .send(NodeId(2), WireMessage::Flood(msg2))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -172,8 +197,14 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
 
     let d1_resolved = d1_sequencer.flush(&d1_evidence);
     let d2_resolved = d2_sequencer.flush(&d2_evidence);
-    println!("D1 resolved: {:?}", d1_resolved.iter().map(|id| id[0]).collect::<Vec<_>>());
-    println!("D2 resolved: {:?}", d2_resolved.iter().map(|id| id[0]).collect::<Vec<_>>());
+    println!(
+        "D1 resolved: {:?}",
+        d1_resolved.iter().map(|id| id[0]).collect::<Vec<_>>()
+    );
+    println!(
+        "D2 resolved: {:?}",
+        d2_resolved.iter().map(|id| id[0]).collect::<Vec<_>>()
+    );
 
     d1_propose.send((batch_key, d1_resolved)).await.unwrap();
     d2_propose.send((batch_key, d2_resolved)).await.unwrap();
@@ -191,6 +222,7 @@ async fn test_two_independently_positioned_nodes_reach_batch_quorum_on_identical
     assert_eq!(d2_key, batch_key);
     assert_eq!(d1_hash, d2_hash, "both independently-positioned nodes must confirm the SAME agreed hash -- their evidence-driven resolutions must have genuinely matched, not just both reached SOME quorum independently");
 
-    let expected_hash = batch_quorum::compute_proposal_hash(&vec![order_a.id, order_b.id, order_c.id]);
+    let expected_hash =
+        batch_quorum::compute_proposal_hash(&vec![order_a.id, order_b.id, order_c.id]);
     assert_eq!(d1_hash, expected_hash, "the agreed hash should correspond to the TRUE emission order (A, B, C), not the shuffled input order");
 }

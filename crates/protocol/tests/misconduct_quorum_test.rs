@@ -56,12 +56,18 @@ async fn test_single_accusation_never_reaches_quorum() {
     let mut injector = UdpTransport::bind(addr(12001), None).await.unwrap();
     injector.register_peer(NodeId(10), detector_addr, [0u8; 32]);
     let subject = NodeId(99);
-    injector.send(NodeId(10), WireMessage::MisconductReport {
-        reporter: NodeId(20),
-        subject,
-        reason: "a single accuser's unverified claim".to_string(),
-        timestamp: now_secs(),
-    }).await.unwrap();
+    injector
+        .send(
+            NodeId(10),
+            WireMessage::MisconductReport {
+                reporter: NodeId(20),
+                subject,
+                reason: "a single accuser's unverified claim".to_string(),
+                timestamp: now_secs(),
+            },
+        )
+        .await
+        .unwrap();
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;
     assert!(
@@ -84,27 +90,42 @@ async fn test_two_independent_reporters_reach_quorum() {
 
     // First reporter -- alone, per the previous test, should not be
     // enough.
-    injector.send(NodeId(11), WireMessage::MisconductReport {
-        reporter: NodeId(20),
-        subject,
-        reason: "reporter 20's claim".to_string(),
-        timestamp: now_secs(),
-    }).await.unwrap();
+    injector
+        .send(
+            NodeId(11),
+            WireMessage::MisconductReport {
+                reporter: NodeId(20),
+                subject,
+                reason: "reporter 20's claim".to_string(),
+                timestamp: now_secs(),
+            },
+        )
+        .await
+        .unwrap();
 
     // A DIFFERENT, independent reporter accusing the SAME subject.
-    injector.send(NodeId(11), WireMessage::MisconductReport {
-        reporter: NodeId(21),
-        subject,
-        reason: "reporter 21's independent claim".to_string(),
-        timestamp: now_secs(),
-    }).await.unwrap();
+    injector
+        .send(
+            NodeId(11),
+            WireMessage::MisconductReport {
+                reporter: NodeId(21),
+                subject,
+                reason: "reporter 21's independent claim".to_string(),
+                timestamp: now_secs(),
+            },
+        )
+        .await
+        .unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(2), confirmed.recv())
         .await
         .expect("timed out waiting for quorum to be reached with two independent reporters")
         .expect("confirmation channel closed unexpectedly");
 
-    assert_eq!(result, subject, "the confirmed subject should be the one both independent reporters accused");
+    assert_eq!(
+        result, subject,
+        "the confirmed subject should be the one both independent reporters accused"
+    );
 }
 
 #[tokio::test]
@@ -124,12 +145,18 @@ async fn test_two_reports_from_the_same_reporter_do_not_reach_quorum() {
     // single malicious node could just spam repeated reports about an
     // honest peer to manufacture "quorum" on its own.
     for _ in 0..2 {
-        injector.send(NodeId(12), WireMessage::MisconductReport {
-            reporter: NodeId(20),
-            subject,
-            reason: "reporter 20's claim, sent twice".to_string(),
-            timestamp: now_secs(),
-        }).await.unwrap();
+        injector
+            .send(
+                NodeId(12),
+                WireMessage::MisconductReport {
+                    reporter: NodeId(20),
+                    subject,
+                    reason: "reporter 20's claim, sent twice".to_string(),
+                    timestamp: now_secs(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     let result = tokio::time::timeout(Duration::from_millis(500), confirmed.recv()).await;

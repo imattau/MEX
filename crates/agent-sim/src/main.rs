@@ -111,7 +111,10 @@ async fn main() {
         eprintln!("On-chain bootstrap failed, refusing to start: {e}");
         std::process::exit(1);
     }
-    tracing::info!("On-chain bootstrap complete -- {} agents ready", sim.onchain_agents.len());
+    tracing::info!(
+        "On-chain bootstrap complete -- {} agents ready",
+        sim.onchain_agents.len()
+    );
 
     let shared = Arc::new(Mutex::new(SharedState {
         sim,

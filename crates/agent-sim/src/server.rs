@@ -89,7 +89,10 @@ async fn post_action(
                     if cost > balance as u128 {
                         return Ok(Json(ActionResponse {
                             status: "error".to_string(),
-                            message: format!("Insufficient balance: need {}, have {}", cost, balance),
+                            message: format!(
+                                "Insufficient balance: need {}, have {}",
+                                cost, balance
+                            ),
                             order_id: None,
                         }));
                     }
@@ -99,7 +102,10 @@ async fn post_action(
                     if amount > position {
                         return Ok(Json(ActionResponse {
                             status: "error".to_string(),
-                            message: format!("Insufficient position: need {}, have {}", amount, position),
+                            message: format!(
+                                "Insufficient position: need {}, have {}",
+                                amount, position
+                            ),
                             order_id: None,
                         }));
                     }
@@ -185,9 +191,7 @@ async fn post_action(
     }
 }
 
-async fn post_step(
-    State(state): State<AppState>,
-) -> Json<StepResponse> {
+async fn post_step(State(state): State<AppState>) -> Json<StepResponse> {
     let mut sim = state.lock().await;
 
     sim.sim.step_matches.clear();

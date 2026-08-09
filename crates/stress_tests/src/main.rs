@@ -17,7 +17,7 @@ fn main() {
 
 fn run_udp_flood_mitigation() {
     println!("\n[1/4] Running Malicious UDP Junk Flood Mitigation Test...");
-    
+
     // Simulate a junk payload validation filter dropping bad packets
     let junk_packet = vec![0xAAu8; 128];
     let flood_count = 50000;
@@ -32,7 +32,10 @@ fn run_udp_flood_mitigation() {
     let duration = start.elapsed();
     let rate = flood_count as f64 / duration.as_secs_f64();
 
-    println!("  Processed and dropped {} junk packets in {:?}", dropped, duration);
+    println!(
+        "  Processed and dropped {} junk packets in {:?}",
+        dropped, duration
+    );
     println!("  Junk packet drop rate: {:.2} packets/sec", rate);
 }
 
@@ -54,7 +57,7 @@ fn run_gbm_market_realism() {
     for (label, sigma) in volatilities {
         let mut s_t: f64 = 3000.0; // Initial price
         let mut book = OrderBook::new("ETH-USD".to_string());
-        
+
         let start = Instant::now();
         // Generate 5,000 volatility-based trades
         for i in 0..5000 {
@@ -63,7 +66,11 @@ fn run_gbm_market_realism() {
             let exponent: f64 = (mu - 0.5 * sigma * sigma) * dt + sigma * dt.sqrt() * z;
             s_t = s_t * exponent.exp();
 
-            let side = if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell };
+            let side = if i % 2 == 0 {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            };
             let order = Order {
                 id: [i as u8; 32],
                 trader: [0u8; 32],
@@ -84,7 +91,10 @@ fn run_gbm_market_realism() {
 
         println!("  {}:", label);
         println!("    Final Simulated Price: ETH-USD ${:.2}", s_t);
-        println!("    Engine throughput:     {:.2} matches/sec (duration: {:?})", ops_rate, duration);
+        println!(
+            "    Engine throughput:     {:.2} matches/sec (duration: {:?})",
+            ops_rate, duration
+        );
     }
 }
 
@@ -97,13 +107,17 @@ fn run_throughput_scaling() {
     for count in node_counts {
         let start = Instant::now();
         let mut book = OrderBook::new("ETH-USD".to_string());
-        
+
         for i in 0..tx_count {
             let order = Order {
                 id: [i as u8; 32],
                 trader: [0u8; 32],
                 symbol: "ETH-USD".to_string(),
-                side: if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell },
+                side: if i % 2 == 0 {
+                    OrderSide::Buy
+                } else {
+                    OrderSide::Sell
+                },
                 price: 3000,
                 amount: 5,
                 signature: Vec::new(),
@@ -126,7 +140,7 @@ fn run_pull_vs_push_benchmark() {
     println!("\n[4/4] Comparing RDMA Pull vs Socket Push Transfer Modes...");
 
     let msg_count = 100000;
-    
+
     // 1. Simulating Push Model (allocating, copying, socket header writes)
     let start_push = Instant::now();
     let mut push_sink = Vec::with_capacity(msg_count);
@@ -151,7 +165,13 @@ fn run_pull_vs_push_benchmark() {
     let pull_rate = msg_count as f64 / duration_pull.as_secs_f64();
     let speedup = duration_push.as_secs_f64() / duration_pull.as_secs_f64();
 
-    println!("  Push Model: {:.2} transfers/sec ({:?})", push_rate, duration_push);
-    println!("  Pull Model: {:.2} transfers/sec ({:?})", pull_rate, duration_pull);
+    println!(
+        "  Push Model: {:.2} transfers/sec ({:?})",
+        push_rate, duration_push
+    );
+    println!(
+        "  Pull Model: {:.2} transfers/sec ({:?})",
+        pull_rate, duration_pull
+    );
     println!("  RDMA direct memory pull speedup: {:.2}x", speedup);
 }

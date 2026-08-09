@@ -186,9 +186,7 @@ impl WatchtowerClient {
             .trades
             .iter()
             .enumerate()
-            .filter(|(_, trade)| {
-                trade.fee_basis_points != trade.settlement_tier.fee_basis_points()
-            })
+            .filter(|(_, trade)| trade.fee_basis_points != trade.settlement_tier.fee_basis_points())
             .map(|(i, _)| i)
             .collect()
     }

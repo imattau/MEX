@@ -2,10 +2,12 @@ use crate::agent_state::AgentTracker;
 use crate::chain_setup::{self, OnChainAgent, OnChainConfig};
 use crate::simple_flood::SimpleFlood;
 use crate::types::{
-    AgentConfig, BidAskLevel, BookDepth, NodeSnapshot, PricePoint, SimulationStateSnapshot,
-    TradeRecord, order_id_to_hex, trader_id_to_hex,
+    order_id_to_hex, trader_id_to_hex, AgentConfig, BidAskLevel, BookDepth, NodeSnapshot,
+    PricePoint, SimulationStateSnapshot, TradeRecord,
 };
-use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+use common::{
+    FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+};
 use engine::{Match, OrderBook};
 use protocol::{FloodSchedule, Peer, RoutingTable};
 use rand::Rng;
@@ -136,12 +138,28 @@ impl MultiNodeSimulation {
                     upstream_peers.push(peer.clone());
                 } else {
                     let is_this_bridge = (node_region == Region::UsEast1 && i == 0)
-                        || (node_region == Region::EuWest1 && i == node_regions.iter().position(|&r| r == Region::EuWest1).unwrap_or(0))
-                        || (node_region == Region::ApSoutheast1 && i == node_regions.iter().position(|&r| r == Region::ApSoutheast1).unwrap_or(0));
+                        || (node_region == Region::EuWest1
+                            && i == node_regions
+                                .iter()
+                                .position(|&r| r == Region::EuWest1)
+                                .unwrap_or(0))
+                        || (node_region == Region::ApSoutheast1
+                            && i == node_regions
+                                .iter()
+                                .position(|&r| r == Region::ApSoutheast1)
+                                .unwrap_or(0));
 
                     let is_peer_bridge = (peer_region == Region::UsEast1 && j == 0)
-                        || (peer_region == Region::EuWest1 && j == node_regions.iter().position(|&r| r == Region::EuWest1).unwrap_or(0))
-                        || (peer_region == Region::ApSoutheast1 && j == node_regions.iter().position(|&r| r == Region::ApSoutheast1).unwrap_or(0));
+                        || (peer_region == Region::EuWest1
+                            && j == node_regions
+                                .iter()
+                                .position(|&r| r == Region::EuWest1)
+                                .unwrap_or(0))
+                        || (peer_region == Region::ApSoutheast1
+                            && j == node_regions
+                                .iter()
+                                .position(|&r| r == Region::ApSoutheast1)
+                                .unwrap_or(0));
 
                     if is_this_bridge && is_peer_bridge {
                         downstream_peers.push(peer.clone());
@@ -234,7 +252,9 @@ impl MultiNodeSimulation {
             source_region: node.region,
         };
 
-        self.nodes[idx].pending_messages.push((self.virtual_time, flood_msg));
+        self.nodes[idx]
+            .pending_messages
+            .push((self.virtual_time, flood_msg));
     }
 
     pub async fn propagate_and_match(&mut self, rng: &mut impl Rng) {
@@ -243,7 +263,10 @@ impl MultiNodeSimulation {
 
         let mut pending_per_node: Vec<Vec<(f64, FloodMessage)>> =
             (0..node_count).map(|_| Vec::new()).collect();
-        std::mem::swap(&mut pending_per_node[0], &mut self.nodes[0].pending_messages);
+        std::mem::swap(
+            &mut pending_per_node[0],
+            &mut self.nodes[0].pending_messages,
+        );
         for i in 1..node_count {
             let (left, right) = self.nodes.split_at_mut(i);
             std::mem::swap(&mut pending_per_node[i], &mut right[0].pending_messages);
@@ -266,15 +289,16 @@ impl MultiNodeSimulation {
 
             pending_per_node[i].retain(|(arrival_time, _)| *arrival_time <= new_time);
 
-            let arrived_msgs: Vec<FloodMessage> = pending_per_node[i]
-                .drain(..)
-                .map(|(_, msg)| msg)
-                .collect();
+            let arrived_msgs: Vec<FloodMessage> =
+                pending_per_node[i].drain(..).map(|(_, msg)| msg).collect();
 
             for msg in arrived_msgs {
                 let node_id = node.id;
                 let schedule = node.schedule.clone();
-                match node.flood.on_receive(msg, node_id, &node.routing.clone(), &schedule) {
+                match node
+                    .flood
+                    .on_receive(msg, node_id, &node.routing.clone(), &schedule)
+                {
                     Ok(forwards) => {
                         if let Some(order) = node.flood.order_book_orders.last().cloned() {
                             let matches = node.orderbook.add_order(order);
@@ -287,10 +311,9 @@ impl MultiNodeSimulation {
                         for (target_id, fwd_msg) in forwards {
                             let target_idx = target_id.0 as usize;
                             if target_idx < node_count {
-                                let latency = self.latency_model.get_latency(
-                                    region,
-                                    node_regions[target_idx],
-                                );
+                                let latency = self
+                                    .latency_model
+                                    .get_latency(region, node_regions[target_idx]);
                                 let jitter = rng.gen_range(-0.5..0.5);
                                 let delay = latency + 0.5 + jitter;
                                 new_outbound.push((target_idx, new_time + delay, fwd_msg));
@@ -374,8 +397,18 @@ impl MultiNodeSimulation {
             return;
         };
 
-        Self::restore_order_amount(&mut node.orderbook, m.maker_order_id, m.amount, &self.order_registry);
-        Self::restore_order_amount(&mut node.orderbook, m.taker_order_id, m.amount, &self.order_registry);
+        Self::restore_order_amount(
+            &mut node.orderbook,
+            m.maker_order_id,
+            m.amount,
+            &self.order_registry,
+        );
+        Self::restore_order_amount(
+            &mut node.orderbook,
+            m.taker_order_id,
+            m.amount,
+            &self.order_registry,
+        );
         node.matches_this_step = node.matches_this_step.saturating_sub(1);
     }
 
@@ -418,17 +451,21 @@ impl MultiNodeSimulation {
 
             if agent_hex == maker_hex {
                 if m.seller == agent_bytes {
-                    self.agents.record_trade_sell(&agent_id, m.amount, m.price, &m.maker_order_id);
+                    self.agents
+                        .record_trade_sell(&agent_id, m.amount, m.price, &m.maker_order_id);
                 } else {
-                    self.agents.record_trade_buy(&agent_id, m.amount, m.price, &m.maker_order_id);
+                    self.agents
+                        .record_trade_buy(&agent_id, m.amount, m.price, &m.maker_order_id);
                 }
             }
 
             if agent_hex == taker_hex {
                 if m.seller == agent_bytes {
-                    self.agents.record_trade_sell(&agent_id, m.amount, m.price, &m.taker_order_id);
+                    self.agents
+                        .record_trade_sell(&agent_id, m.amount, m.price, &m.taker_order_id);
                 } else {
-                    self.agents.record_trade_buy(&agent_id, m.amount, m.price, &m.taker_order_id);
+                    self.agents
+                        .record_trade_buy(&agent_id, m.amount, m.price, &m.taker_order_id);
                 }
             }
         }
@@ -496,8 +533,10 @@ impl MultiNodeSimulation {
             })
             .collect();
 
-        let mut aggregated_bids: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
-        let mut aggregated_asks: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+        let mut aggregated_bids: std::collections::BTreeMap<u64, u64> =
+            std::collections::BTreeMap::new();
+        let mut aggregated_asks: std::collections::BTreeMap<u64, u64> =
+            std::collections::BTreeMap::new();
 
         for node in &self.nodes {
             if !node.online {
@@ -542,7 +581,14 @@ impl MultiNodeSimulation {
             asks,
         };
 
-        let recent_clone = self.recent_trades.iter().rev().take(20).rev().cloned().collect();
+        let recent_clone = self
+            .recent_trades
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .cloned()
+            .collect();
 
         SimulationStateSnapshot {
             virtual_time: self.virtual_time,
@@ -589,7 +635,11 @@ impl MultiNodeSimulation {
                     id: order_id_bytes,
                     trader: noise_trader,
                     symbol: self.symbol.clone(),
-                    side: if rng.gen_bool(0.5) { OrderSide::Buy } else { OrderSide::Sell },
+                    side: if rng.gen_bool(0.5) {
+                        OrderSide::Buy
+                    } else {
+                        OrderSide::Sell
+                    },
                     price: noise_price,
                     amount: amt,
                     signature: Vec::new(),

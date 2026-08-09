@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::types::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+    use crate::types::{
+        FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+    };
 
     #[test]
     fn test_order_serialization() {

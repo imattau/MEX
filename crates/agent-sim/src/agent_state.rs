@@ -1,4 +1,4 @@
-use crate::types::{AgentConfig, AgentStateSnapshot, OrderSnapshot, order_id_to_hex};
+use crate::types::{order_id_to_hex, AgentConfig, AgentStateSnapshot, OrderSnapshot};
 use common::Order;
 use std::collections::HashMap;
 
@@ -125,27 +125,25 @@ impl AgentTracker {
     }
 
     pub fn snapshot(&self, agent_id: &str) -> Option<AgentStateSnapshot> {
-        self.agents.get(agent_id).map(|agent| {
-            AgentStateSnapshot {
-                id: agent.config.id.clone(),
-                balance: agent.balance,
-                position: agent.position,
-                open_orders: agent
-                    .open_orders
-                    .iter()
-                    .map(|o| OrderSnapshot {
-                        order_id: order_id_to_hex(&o.id),
-                        symbol: o.symbol.clone(),
-                        side: format!("{:?}", o.side).to_lowercase(),
-                        price: o.price,
-                        amount: o.amount,
-                        status: "open".to_string(),
-                    })
-                    .collect(),
-                pnl: agent.realized_pnl,
-                trade_count: agent.trade_count,
-                last_action: agent.last_action.clone(),
-            }
+        self.agents.get(agent_id).map(|agent| AgentStateSnapshot {
+            id: agent.config.id.clone(),
+            balance: agent.balance,
+            position: agent.position,
+            open_orders: agent
+                .open_orders
+                .iter()
+                .map(|o| OrderSnapshot {
+                    order_id: order_id_to_hex(&o.id),
+                    symbol: o.symbol.clone(),
+                    side: format!("{:?}", o.side).to_lowercase(),
+                    price: o.price,
+                    amount: o.amount,
+                    status: "open".to_string(),
+                })
+                .collect(),
+            pnl: agent.realized_pnl,
+            trade_count: agent.trade_count,
+            last_action: agent.last_action.clone(),
         })
     }
 

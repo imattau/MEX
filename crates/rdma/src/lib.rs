@@ -206,7 +206,6 @@ mod tests {
         assert!(orders_b.is_empty());
     }
 
-
     #[cfg(soft_rdma_available)]
     #[test]
     fn test_soft_rdma_self_read() {

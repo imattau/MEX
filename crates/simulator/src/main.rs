@@ -1,16 +1,19 @@
-use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
-use protocol::{DeterministicFlood, FloodSchedule, Peer, RoutingTable, HeartbeatTracker};
+use common::{
+    FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+};
+use protocol::{DeterministicFlood, FloodSchedule, HeartbeatTracker, Peer, RoutingTable};
 use rand::Rng;
-use simulator::types::{Event, ScheduledEvent, NodeInfo, Measurement, SimulationResultJson};
 use simulator::latency::LatencyModel;
+use simulator::types::{Event, Measurement, NodeInfo, ScheduledEvent, SimulationResultJson};
 use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::Write;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let use_local_profile = args.contains(&"--profile".to_string()) && args.contains(&"local".to_string());
-    
+    let use_local_profile =
+        args.contains(&"--profile".to_string()) && args.contains(&"local".to_string());
+
     let test_scenario = if let Some(idx) = args.iter().position(|r| r == "--test") {
         args.get(idx + 1).map(|s| s.as_str()).unwrap_or("default")
     } else {
@@ -28,10 +31,7 @@ fn main() {
     // 1. Setup Nodes based on scenario
     let mut nodes = Vec::new();
     let regions = match test_scenario {
-        "p2p" => vec![
-            (Region::UsEast1, 1),
-            (Region::EuWest1, 1),
-        ],
+        "p2p" => vec![(Region::UsEast1, 1), (Region::EuWest1, 1)],
         _ => vec![
             (Region::UsEast1, 3),      // Nodes 0, 1, 2
             (Region::EuWest1, 2),      // Nodes 3, 4
@@ -111,7 +111,8 @@ fn main() {
             zone_peers,
         };
 
-        let flood_state = DeterministicFlood::new(node_id, node_region, routing_table, schedule.clone());
+        let flood_state =
+            DeterministicFlood::new(node_id, node_region, routing_table, schedule.clone());
         flood_nodes.insert(node_id, flood_state);
     }
 
@@ -131,12 +132,16 @@ fn main() {
         order_id[0..8].copy_from_slice(&(o as u64).to_be_bytes());
         let mut trader_id = [0u8; 32];
         rng.fill(&mut trader_id);
-        
+
         let order = Order {
             id: order_id,
             trader: trader_id,
             symbol: "ETH-USD".to_string(),
-            side: if rng.gen_bool(0.5) { OrderSide::Buy } else { OrderSide::Sell },
+            side: if rng.gen_bool(0.5) {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            },
             price: rng.gen_range(3000..3200),
             amount: rng.gen_range(1..10),
             signature: Vec::new(),
@@ -205,7 +210,10 @@ fn main() {
         for dead_node in dead_nodes {
             if flood_nodes.contains_key(&dead_node) {
                 for state in flood_nodes.values_mut() {
-                    state.routing_table.downstream_peers.retain(|p| p.id != dead_node);
+                    state
+                        .routing_table
+                        .downstream_peers
+                        .retain(|p| p.id != dead_node);
                 }
             }
         }
@@ -224,7 +232,9 @@ fn main() {
                 heartbeat_tracker.on_heartbeat(source_node, current_virtual_time);
 
                 if let Some(flood_state) = flood_nodes.get_mut(&source_node) {
-                    if let Ok(forwards) = flood_state.on_receive(flood_msg, source_node, current_virtual_time) {
+                    if let Ok(forwards) =
+                        flood_state.on_receive(flood_msg, source_node, current_virtual_time)
+                    {
                         for (to_peer, next_msg) in forwards {
                             let to_region = nodes[to_peer.0 as usize].region;
                             let base_lat = latency_model.get_latency(node_region, to_region);
@@ -234,7 +244,10 @@ fn main() {
 
                             event_queue.push(ScheduledEvent {
                                 time: current_virtual_time + delay,
-                                event: Event::PacketDeliver { to_node: to_peer, msg: next_msg },
+                                event: Event::PacketDeliver {
+                                    to_node: to_peer,
+                                    msg: next_msg,
+                                },
                             });
                         }
                     }
@@ -276,14 +289,18 @@ fn main() {
                             }
 
                             for (to_peer, next_msg) in forwards {
-                                let base_lat = latency_model.get_latency(to_region, nodes[to_peer.0 as usize].region);
+                                let base_lat = latency_model
+                                    .get_latency(to_region, nodes[to_peer.0 as usize].region);
                                 let tx_delay = (message_size_kb / bandwidth_kbps) * 1000.0;
                                 let jitter = rng.gen_range(-0.5..0.5);
                                 let delay = base_lat + tx_delay + jitter;
 
                                 event_queue.push(ScheduledEvent {
                                     time: current_virtual_time + delay,
-                                    event: Event::PacketDeliver { to_node: to_peer, msg: next_msg },
+                                    event: Event::PacketDeliver {
+                                        to_node: to_peer,
+                                        msg: next_msg,
+                                    },
                                 });
                             }
                         }
@@ -303,7 +320,10 @@ fn main() {
         }
     }
 
-    println!("Simulation finished at virtual time {:.2}ms.", current_virtual_time);
+    println!(
+        "Simulation finished at virtual time {:.2}ms.",
+        current_virtual_time
+    );
 
     if measurements.is_empty() {
         println!("No successful deliveries recorded.");
@@ -327,9 +347,19 @@ fn main() {
     println!("Propagation Latency Metrics:");
     println!("  p50:   {:.2}ms", p50);
     println!("  p95:   {:.2}ms", p95);
-    println!("  p99.9: {:.2}ms (Target: <{}ms)", p999, target_global_propagation_limit);
+    println!(
+        "  p99.9: {:.2}ms (Target: <{}ms)",
+        p999, target_global_propagation_limit
+    );
     println!("  Max:   {:.2}ms", worst_case);
-    println!("Verification Result: {}", if verified { "SUCCESS (Go to Phase 2)" } else { "FAILED (Pivot to Gossip)" });
+    println!(
+        "Verification Result: {}",
+        if verified {
+            "SUCCESS (Go to Phase 2)"
+        } else {
+            "FAILED (Pivot to Gossip)"
+        }
+    );
 
     let sim_result = SimulationResultJson {
         scenario: test_scenario.to_string(),
@@ -343,7 +373,8 @@ fn main() {
     };
 
     if let Ok(serialized) = serde_json::to_string_pretty(&sim_result) {
-        let output_path = args.iter()
+        let output_path = args
+            .iter()
             .position(|r| r == "--output")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())

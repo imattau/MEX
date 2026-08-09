@@ -1,6 +1,6 @@
+use crate::types::TrustLevel;
 use common::NodeId;
 use metrics::{counter, gauge};
-use crate::types::TrustLevel;
 
 pub struct ReputationMetrics;
 
@@ -49,11 +49,13 @@ impl ReputationMetrics {
     }
 
     pub fn record_bond_active(bond_type_label: &str) {
-        gauge!("reputation.bonds.active", "bond_type" => bond_type_label.to_string()).increment(1.0);
+        gauge!("reputation.bonds.active", "bond_type" => bond_type_label.to_string())
+            .increment(1.0);
     }
 
     pub fn record_bond_forfeited(bond_type_label: &str) {
-        gauge!("reputation.bonds.active", "bond_type" => bond_type_label.to_string()).decrement(1.0);
+        gauge!("reputation.bonds.active", "bond_type" => bond_type_label.to_string())
+            .decrement(1.0);
     }
 
     pub fn record_node_joined(_node_id: NodeId) {

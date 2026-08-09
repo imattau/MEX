@@ -165,14 +165,17 @@ impl Default for OriginTimeEstimator {
 
 impl OriginTimeEstimator {
     pub fn new() -> Self {
-        Self { estimates: lru::LruCache::new(std::num::NonZeroUsize::new(10_000).unwrap()) }
+        Self {
+            estimates: lru::LruCache::new(std::num::NonZeroUsize::new(10_000).unwrap()),
+        }
     }
 
     pub fn record(&mut self, order_id: [u8; 32], witnessing_hop: NodeId, estimate_ms: f64) {
         if let Some(v) = self.estimates.get_mut(&order_id) {
             v.push((witnessing_hop, estimate_ms, false));
         } else {
-            self.estimates.put(order_id, vec![(witnessing_hop, estimate_ms, false)]);
+            self.estimates
+                .put(order_id, vec![(witnessing_hop, estimate_ms, false)]);
         }
     }
 
@@ -222,7 +225,11 @@ impl OriginTimeEstimator {
     // EITHER order to have an estimate at all (can't rank what you
     // haven't observed). See OrderingDecision's docs for what
     // ByTimestamp vs TieBroken means and why.
-    pub fn compare_orders(&mut self, order_a: &[u8; 32], order_b: &[u8; 32]) -> Option<OrderingDecision> {
+    pub fn compare_orders(
+        &mut self,
+        order_a: &[u8; 32],
+        order_b: &[u8; 32],
+    ) -> Option<OrderingDecision> {
         let wa = self.earliest_witness(order_a)?;
         let wb = self.earliest_witness(order_b)?;
         Some(compare_by_evidence(order_a, wa, order_b, wb))
@@ -276,8 +283,14 @@ mod tests {
         let mut est = OriginTimeEstimator::new();
         est.record([1u8; 32], NodeId(1), 1000.0);
         est.record([2u8; 32], NodeId(1), 1000.0 + AMBIGUITY_WINDOW_MS + 1.0);
-        assert_eq!(est.compare_orders(&[1u8; 32], &[2u8; 32]), Some(OrderingDecision::ByTimestamp(CmpOrdering::Less)));
-        assert_eq!(est.compare_orders(&[2u8; 32], &[1u8; 32]), Some(OrderingDecision::ByTimestamp(CmpOrdering::Greater)));
+        assert_eq!(
+            est.compare_orders(&[1u8; 32], &[2u8; 32]),
+            Some(OrderingDecision::ByTimestamp(CmpOrdering::Less))
+        );
+        assert_eq!(
+            est.compare_orders(&[2u8; 32], &[1u8; 32]),
+            Some(OrderingDecision::ByTimestamp(CmpOrdering::Greater))
+        );
     }
 
     #[test]
@@ -286,7 +299,10 @@ mod tests {
         est.record([1u8; 32], NodeId(1), 1000.0);
         est.record([2u8; 32], NodeId(1), 1000.0 + AMBIGUITY_WINDOW_MS - 1.0);
         let result = est.compare_orders(&[1u8; 32], &[2u8; 32]);
-        assert!(matches!(result, Some(OrderingDecision::TieBroken(_))), "expected a tie-break, got {result:?}");
+        assert!(
+            matches!(result, Some(OrderingDecision::TieBroken(_))),
+            "expected a tie-break, got {result:?}"
+        );
     }
 
     #[test]
@@ -300,7 +316,10 @@ mod tests {
         est.record([2u8; 32], NodeId(1), 1000.0);
         let first = est.compare_orders(&[1u8; 32], &[2u8; 32]);
         let second = est.compare_orders(&[1u8; 32], &[2u8; 32]);
-        assert_eq!(first, second, "tie-break must be deterministic across repeated calls with the same evidence");
+        assert_eq!(
+            first, second,
+            "tie-break must be deterministic across repeated calls with the same evidence"
+        );
         assert!(matches!(first, Some(OrderingDecision::TieBroken(_))));
     }
 
@@ -313,7 +332,11 @@ mod tests {
         let b_vs_a = est.compare_orders(&[2u8; 32], &[1u8; 32]);
         match (a_vs_b, b_vs_a) {
             (Some(OrderingDecision::TieBroken(o1)), Some(OrderingDecision::TieBroken(o2))) => {
-                assert_eq!(o1, o2.reverse(), "comparing A-then-B must be the exact reverse of B-then-A");
+                assert_eq!(
+                    o1,
+                    o2.reverse(),
+                    "comparing A-then-B must be the exact reverse of B-then-A"
+                );
             }
             other => panic!("expected both directions to be tie-broken, got {other:?}"),
         }
@@ -344,7 +367,11 @@ mod tests {
         // observation is still the best (only) evidence available, same
         // reasoning HopLatencyMonitor's has_corroborating_non_anomalous_hop
         // already uses for misconduct detection.
-        assert_eq!(est.earliest_estimate_ms(&[1u8; 32]), Some(500.0), "with no honest alternative, the flagged witness should still be used as a fallback");
+        assert_eq!(
+            est.earliest_estimate_ms(&[1u8; 32]),
+            Some(500.0),
+            "with no honest alternative, the flagged witness should still be used as a fallback"
+        );
     }
 
     #[test]
@@ -353,7 +380,11 @@ mod tests {
         est.record([1u8; 32], NodeId(1), 500.0);
         est.mark_anomalous([1u8; 32], NodeId(99)); // different hop, never recorded
         est.mark_anomalous([2u8; 32], NodeId(1)); // different order, never recorded
-        assert_eq!(est.earliest_estimate_ms(&[1u8; 32]), Some(500.0), "marking an unrelated (order, hop) pair must not affect an unrelated recorded estimate");
+        assert_eq!(
+            est.earliest_estimate_ms(&[1u8; 32]),
+            Some(500.0),
+            "marking an unrelated (order, hop) pair must not affect an unrelated recorded estimate"
+        );
     }
 
     #[test]
@@ -364,7 +395,7 @@ mod tests {
         // witness -- but an honest second path for A also exists and
         // wasn't manipulated.
         est.record([1u8; 32], NodeId(1), 2000.0); // manipulated, late
-        est.record([1u8; 32], NodeId(2), 500.0);  // honest, early
+        est.record([1u8; 32], NodeId(2), 500.0); // honest, early
         est.mark_anomalous([1u8; 32], NodeId(1));
 
         est.record([2u8; 32], NodeId(3), 900.0);
@@ -372,6 +403,9 @@ mod tests {
         // With the manipulated witness discarded, A's honest estimate
         // (500.0) is clearly before B's (900.0) -- correct despite the
         // manipulation attempt.
-        assert_eq!(est.compare_orders(&[1u8; 32], &[2u8; 32]), Some(OrderingDecision::ByTimestamp(CmpOrdering::Less)));
+        assert_eq!(
+            est.compare_orders(&[1u8; 32], &[2u8; 32]),
+            Some(OrderingDecision::ByTimestamp(CmpOrdering::Less))
+        );
     }
 }

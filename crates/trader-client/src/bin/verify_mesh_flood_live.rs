@@ -14,8 +14,24 @@ use rand::rngs::OsRng;
 
 fn serialize_order_message(order: &serde_json::Value) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(order["id"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect::<Vec<u8>>().as_slice());
-    msg.extend_from_slice(order["trader"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect::<Vec<u8>>().as_slice());
+    msg.extend_from_slice(
+        order["id"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect::<Vec<u8>>()
+            .as_slice(),
+    );
+    msg.extend_from_slice(
+        order["trader"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect::<Vec<u8>>()
+            .as_slice(),
+    );
     msg.extend_from_slice(order["symbol"].as_str().unwrap().as_bytes());
     msg.extend_from_slice(&order["price"].as_u64().unwrap().to_be_bytes());
     msg.extend_from_slice(&order["amount"].as_u64().unwrap().to_be_bytes());
@@ -28,8 +44,16 @@ fn serialize_order_message(order: &serde_json::Value) -> Vec<u8> {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let api_base = args.get(1).expect("usage: verify_mesh_flood_live <api_base_url> <observer_bind_addr> <mesh_node_addr> <mesh_node_id>").trim_end_matches('/').to_string();
-    let observer_addr: std::net::SocketAddr = args.get(2).expect("missing observer_bind_addr").parse().unwrap();
-    let mesh_node_addr: std::net::SocketAddr = args.get(3).expect("missing mesh_node_addr").parse().unwrap();
+    let observer_addr: std::net::SocketAddr = args
+        .get(2)
+        .expect("missing observer_bind_addr")
+        .parse()
+        .unwrap();
+    let mesh_node_addr: std::net::SocketAddr = args
+        .get(3)
+        .expect("missing mesh_node_addr")
+        .parse()
+        .unwrap();
     let mesh_node_id: u32 = args.get(4).expect("missing mesh_node_id").parse().unwrap();
 
     let mut observer = UdpTransport::bind(observer_addr, None).await.unwrap();
@@ -59,8 +83,16 @@ async fn main() {
     });
 
     println!("submitting real order via HTTP to {api_base}...");
-    let resp: serde_json::Value = http.post(format!("{api_base}/api/v1/order"))
-        .header("X-API-Key", &api_key).json(&req).send().await.unwrap().json().await.unwrap();
+    let resp: serde_json::Value = http
+        .post(format!("{api_base}/api/v1/order"))
+        .header("X-API-Key", &api_key)
+        .json(&req)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp["success"], true, "order rejected: {resp:?}");
     println!("order accepted by the live server: OK\n");
 
@@ -77,8 +109,14 @@ async fn main() {
     .expect("timed out waiting for the server's mesh node to flood the order");
 
     let (from, fm) = flood;
-    assert_eq!(from.0, mesh_node_id, "flood should arrive from the server's own configured mesh node id");
-    assert_eq!(fm.order.id, order_id, "flooded order id should match the order actually submitted over HTTP");
+    assert_eq!(
+        from.0, mesh_node_id,
+        "flood should arrive from the server's own configured mesh node id"
+    );
+    assert_eq!(
+        fm.order.id, order_id,
+        "flooded order id should match the order actually submitted over HTTP"
+    );
     assert_eq!(fm.order.trader, seller_pubkey);
     assert_eq!(fm.order.price, 3000);
 

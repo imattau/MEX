@@ -65,11 +65,7 @@ impl FeeCalculator {
         (final_bps.max(1.0).min(500.0)) as u32
     }
 
-    pub fn compute_fee_amount(
-        amount: u64,
-        price: u64,
-        tier: SettlementPreference,
-    ) -> u64 {
+    pub fn compute_fee_amount(amount: u64, price: u64, tier: SettlementPreference) -> u64 {
         let bps = Self::default_fee_basis_points(tier) as u128;
         let notional = amount as u128 * price as u128;
         let fee = notional * bps / 10_000;

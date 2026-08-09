@@ -1,10 +1,10 @@
 use crate::types::{OrderValidator, ValidationKey};
 use common::Order;
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::time::{SystemTime, UNIX_EPOCH};
-use lru::LruCache;
 
 impl OrderValidator {
     pub fn new(cache_size: usize) -> Self {

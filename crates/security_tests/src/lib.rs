@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
     use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
-    use validation::OrderValidator;
-    use security::{encrypt_packet, decrypt_packet};
-    use sandbox::WasmSandbox;
     use ed25519_dalek::Signer;
     use rand::rngs::OsRng;
+    use sandbox::WasmSandbox;
+    use security::{decrypt_packet, encrypt_packet};
+    use validation::OrderValidator;
 
     #[test]
     fn test_signature_tampering_and_cache_bypass() {

@@ -1,4 +1,6 @@
-use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+use common::{
+    FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+};
 use protocol::{UdpTransport, WireMessage};
 
 fn addr(port: u16) -> std::net::SocketAddr {
@@ -82,7 +84,9 @@ async fn test_udp_transport_send_recv_heartbeat() {
 // silently passing.
 #[tokio::test]
 async fn test_flood_forwarding_over_udp() {
-    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
     use ed25519_dalek::Signer;
     use protocol::MeshConfig;
     use protocol::MeshNode;
@@ -97,7 +101,10 @@ async fn test_flood_forwarding_over_udp() {
         listen_addr: addr_1,
         // NodeId(0) < 1 -> upstream (the injector); NodeId(2) > 1 ->
         // downstream (where a forward should go).
-        peers: vec![(NodeId(0), addr_0, [0u8; 32]), (NodeId(2), addr_2, [0u8; 32])],
+        peers: vec![
+            (NodeId(0), addr_0, [0u8; 32]),
+            (NodeId(2), addr_2, [0u8; 32]),
+        ],
         heartbeat_interval_ms: 1000.0,
         max_missed_heartbeats: 100,
         node_key: None,
@@ -176,8 +183,19 @@ async fn test_flood_forwarding_over_udp() {
     .expect("timed out waiting for node1 to forward the flood message to node2");
 
     let (from, fm) = flood;
-    assert_eq!(from, NodeId(1), "forwarded message should arrive from node1, not be re-sent by the original injector");
+    assert_eq!(
+        from,
+        NodeId(1),
+        "forwarded message should arrive from node1, not be re-sent by the original injector"
+    );
     assert_eq!(fm.order.id, order.id);
-    assert_eq!(fm.hop_count, 1, "one real hop through node1 should increment hop_count to 1");
-    assert_eq!(fm.path, vec![NodeId(0), NodeId(1)], "path should record the injector and node1, in order");
+    assert_eq!(
+        fm.hop_count, 1,
+        "one real hop through node1 should increment hop_count to 1"
+    );
+    assert_eq!(
+        fm.path,
+        vec![NodeId(0), NodeId(1)],
+        "path should record the injector and node1, in order"
+    );
 }

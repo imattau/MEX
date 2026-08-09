@@ -119,12 +119,19 @@ async fn test_baseline_inflating_relay_cannot_backdate_order_priority() {
                         // Forwarded and witnessed IMMEDIATELY -- this
                         // relay is honest about everything except its
                         // own latency baseline.
-                        let _ = malicious.send(NodeId(5), WireMessage::Flood(flood_msg)).await;
-                        let _ = malicious.send(NodeId(5), WireMessage::HopWitness {
-                            order_id,
-                            hop_node: NodeId(1),
-                            forwarded_at: now,
-                        }).await;
+                        let _ = malicious
+                            .send(NodeId(5), WireMessage::Flood(flood_msg))
+                            .await;
+                        let _ = malicious
+                            .send(
+                                NodeId(5),
+                                WireMessage::HopWitness {
+                                    order_id,
+                                    hop_node: NodeId(1),
+                                    forwarded_at: now,
+                                },
+                            )
+                            .await;
                     }
                     _ => {}
                 }
@@ -136,7 +143,10 @@ async fn test_baseline_inflating_relay_cannot_backdate_order_priority() {
         node_id: NodeId(4),
         region: Region::UsEast1,
         listen_addr: honest_addr,
-        peers: vec![(NodeId(0), origin_addr, [0u8; 32]), (NodeId(5), detector_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(0), origin_addr, [0u8; 32]),
+            (NodeId(5), detector_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -145,13 +155,18 @@ async fn test_baseline_inflating_relay_cannot_backdate_order_priority() {
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let detector = MeshNode::new(MeshConfig {
         node_id: NodeId(5),
         region: Region::UsEast1,
         listen_addr: detector_addr,
-        peers: vec![(NodeId(1), malicious_addr, [0u8; 32]), (NodeId(4), honest_addr, [0u8; 32])],
+        peers: vec![
+            (NodeId(1), malicious_addr, [0u8; 32]),
+            (NodeId(4), honest_addr, [0u8; 32]),
+        ],
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -160,7 +175,9 @@ async fn test_baseline_inflating_relay_cannot_backdate_order_priority() {
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let detector_query = detector.origin_time_query_sender();
 
     tokio::spawn(honest.run());
@@ -179,17 +196,34 @@ async fn test_baseline_inflating_relay_cannot_backdate_order_priority() {
 
     let order_a = signed_order(71, 1);
     let t_true = now_ms();
-    let msg_to_malicious = FloodMessage { order: order_a.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: t_true, source_region: Region::UsEast1 };
+    let msg_to_malicious = FloodMessage {
+        order: order_a.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: t_true,
+        source_region: Region::UsEast1,
+    };
     let msg_to_honest = msg_to_malicious.clone();
-    origin.send(NodeId(1), WireMessage::Flood(msg_to_malicious)).await.unwrap();
-    origin.send(NodeId(4), WireMessage::Flood(msg_to_honest)).await.unwrap();
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg_to_malicious))
+        .await
+        .unwrap();
+    origin
+        .send(NodeId(4), WireMessage::Flood(msg_to_honest))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let final_estimate = query(&detector_query, order_a.id).await.expect("detector should have an estimate for order A");
+    let final_estimate = query(&detector_query, order_a.id)
+        .await
+        .expect("detector should have an estimate for order A");
 
     println!("true emission time:   {t_true:.2}");
-    println!("final estimate:       {final_estimate:.2} (delta from true: {:.2}ms)", final_estimate - t_true);
+    println!(
+        "final estimate:       {final_estimate:.2} (delta from true: {:.2}ms)",
+        final_estimate - t_true
+    );
 
     // Without Stage O3, the malicious relay's estimate would be roughly
     // t_true - 300ms (half the 600ms inflated RTT) and, being smaller,

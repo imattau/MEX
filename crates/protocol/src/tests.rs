@@ -3,7 +3,9 @@ mod tests {
     use crate::flood::DeterministicFlood;
     use crate::heartbeat::HeartbeatTracker;
     use crate::types::{FloodError, FloodSchedule, Peer, RoutingTable};
-    use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+    use common::{
+        FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+    };
     use ed25519_dalek::{Signer, SigningKey};
 
     fn make_signed_order(id: u8) -> Order {
@@ -31,15 +33,25 @@ mod tests {
 
     trait OrderSigning {
         fn serialize_for_signing(
-            id: &[u8; 32], trader: &[u8; 32], symbol: &str,
-            price: u64, amount: u64, nonce: u64, expiry: u64,
+            id: &[u8; 32],
+            trader: &[u8; 32],
+            symbol: &str,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+            expiry: u64,
         ) -> Vec<u8>;
     }
 
     impl OrderSigning for Order {
         fn serialize_for_signing(
-            id: &[u8; 32], trader: &[u8; 32], symbol: &str,
-            price: u64, amount: u64, nonce: u64, expiry: u64,
+            id: &[u8; 32],
+            trader: &[u8; 32],
+            symbol: &str,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+            expiry: u64,
         ) -> Vec<u8> {
             let mut msg = Vec::new();
             msg.extend_from_slice(id);

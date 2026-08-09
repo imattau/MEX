@@ -74,7 +74,10 @@ async fn spawn_node(
         node_id: NodeId(id),
         region: Region::UsEast1,
         listen_addr,
-        peers: peers.into_iter().map(|(id, addr)| (id, addr, [0u8; 32])).collect(),
+        peers: peers
+            .into_iter()
+            .map(|(id, addr)| (id, addr, [0u8; 32]))
+            .collect(),
         node_key: None,
         mesh_encryption_key: None,
         heartbeat_interval_ms: 5000.0,
@@ -90,7 +93,9 @@ async fn spawn_node(
 
 #[tokio::test]
 async fn test_cross_witness_corroboration_on_a_diamond_topology() {
-    let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .try_init();
     let a0 = addr(11000); // origin (bare injector)
     let a1 = addr(11001); // node1 -- delayed
     let a4 = addr(11004); // node4 -- honest
@@ -99,7 +104,13 @@ async fn test_cross_witness_corroboration_on_a_diamond_topology() {
 
     let node1 = spawn_node(1, a1, vec![(NodeId(0), a0), (NodeId(5), a5)], Some(300)).await;
     let node4 = spawn_node(4, a4, vec![(NodeId(0), a0), (NodeId(5), a5)], None).await;
-    let node2 = spawn_node(5, a5, vec![(NodeId(1), a1), (NodeId(4), a4), (NodeId(6), a6)], None).await;
+    let node2 = spawn_node(
+        5,
+        a5,
+        vec![(NodeId(1), a1), (NodeId(4), a4), (NodeId(6), a6)],
+        None,
+    )
+    .await;
     let mut node6 = spawn_node(6, a6, vec![(NodeId(5), a5)], None).await;
     let mut misconduct = node6.misconduct_receiver();
 
@@ -122,10 +133,28 @@ async fn test_cross_witness_corroboration_on_a_diamond_topology() {
     // deployment would get this from genuine mesh topology (both being
     // downstream of a common upstream, or the origin itself dual-homed);
     // this test injects it directly for a controlled, deterministic path.
-    let msg1 = FloodMessage { order: order.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-    let msg4 = FloodMessage { order: order.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-    injector.send(NodeId(1), WireMessage::Flood(msg1)).await.unwrap();
-    injector.send(NodeId(4), WireMessage::Flood(msg4)).await.unwrap();
+    let msg1 = FloodMessage {
+        order: order.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: now_ms(),
+        source_region: Region::UsEast1,
+    };
+    let msg4 = FloodMessage {
+        order: order.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: now_ms(),
+        source_region: Region::UsEast1,
+    };
+    injector
+        .send(NodeId(1), WireMessage::Flood(msg1))
+        .await
+        .unwrap();
+    injector
+        .send(NodeId(4), WireMessage::Flood(msg4))
+        .await
+        .unwrap();
 
     // Widened from an initial 2s: Stage P3c-3's mesh routing fix (every
     // configured peer now genuinely forwards to every other configured
@@ -146,8 +175,16 @@ async fn test_cross_witness_corroboration_on_a_diamond_topology() {
         .expect("timed out waiting for node2 to report node1's anomalous hop")
         .expect("misconduct channel closed unexpectedly");
 
-    assert_eq!(event.subject, NodeId(1), "node1 -- the relay on the delayed path -- should be the reported subject");
-    assert_eq!(event.reporter, NodeId(5), "node2 -- the node that saw both paths -- should be the reporter");
+    assert_eq!(
+        event.subject,
+        NodeId(1),
+        "node1 -- the relay on the delayed path -- should be the reported subject"
+    );
+    assert_eq!(
+        event.reporter,
+        NodeId(5),
+        "node2 -- the node that saw both paths -- should be the reporter"
+    );
     println!("reason: {}", event.reason);
     assert!(
         event.reason.contains("corroborated:"),

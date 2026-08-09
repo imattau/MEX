@@ -1,15 +1,17 @@
-use common::{FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester};
+use common::{
+    FloodMessage, NodeId, Order, OrderSide, Region, SettlementPreference, SettlementRequester,
+};
 use engine::OrderBook;
-use rdma::{TraderMemoryRegionManager, PullScheduler};
-use validation::OrderValidator;
-use topology::{NetworkTopology, TopologyNode};
-use security::{encrypt_packet, decrypt_packet};
 use heartbeat::DeterministicHeartbeat;
 use protocol::{MeshConfig, MeshNode, UdpTransport, WireMessage};
-use prover::{TradeBatch, BACKEND, ProverBackend};
-use watchtower::{WatchtowerClient, MockOnChainState, OnChainClient};
+use prover::{ProverBackend, TradeBatch, BACKEND};
+use rdma::{PullScheduler, TraderMemoryRegionManager};
+use security::{decrypt_packet, encrypt_packet};
+use storage::{LogEntry, TradeLogger};
+use topology::{NetworkTopology, TopologyNode};
 use tss::TssSigner;
-use storage::{TradeLogger, LogEntry};
+use validation::OrderValidator;
+use watchtower::{MockOnChainState, OnChainClient, WatchtowerClient};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
@@ -26,10 +28,29 @@ fn pick_port(offset: u16) -> std::net::SocketAddr {
     format!("127.0.0.1:{}", 20000 + offset).parse().unwrap()
 }
 
-fn make_order(id: u8, trader: [u8; 32], side: OrderSide, price: u64, amount: u64, nonce: u64) -> Order {
+fn make_order(
+    id: u8,
+    trader: [u8; 32],
+    side: OrderSide,
+    price: u64,
+    amount: u64,
+    nonce: u64,
+) -> Order {
     let mut oid = [0u8; 32];
     oid[0] = id;
-    Order { id: oid, trader, symbol: "ETH-USD".to_string(), side, price, amount, signature: vec![], nonce, expiry: 0, settlement_preference: SettlementPreference::Standard, settlement_requester: SettlementRequester::Seller }
+    Order {
+        id: oid,
+        trader,
+        symbol: "ETH-USD".to_string(),
+        side,
+        price,
+        amount,
+        signature: vec![],
+        nonce,
+        expiry: 0,
+        settlement_preference: SettlementPreference::Standard,
+        settlement_requester: SettlementRequester::Seller,
+    }
 }
 
 #[tokio::test]
@@ -42,8 +63,18 @@ async fn test_full_pipeline_all_13_layers() {
         (2, "EU".to_string(), (53.3498, -6.2603)),
     ];
     let nodes = vec![
-        TopologyNode { id: NodeId(0), region: Region::UsEast1, position: (37.7, -122.4), zone_id: 1 },
-        TopologyNode { id: NodeId(1), region: Region::EuWest1, position: (53.3, -6.2), zone_id: 2 },
+        TopologyNode {
+            id: NodeId(0),
+            region: Region::UsEast1,
+            position: (37.7, -122.4),
+            zone_id: 1,
+        },
+        TopologyNode {
+            id: NodeId(1),
+            region: Region::EuWest1,
+            position: (53.3, -6.2),
+            zone_id: 2,
+        },
     ];
     let topology = NetworkTopology::generate(nodes, &zone_defs);
     assert_eq!(topology.zones.len(), 2);
@@ -51,7 +82,15 @@ async fn test_full_pipeline_all_13_layers() {
     let peers = vec![NodeId(1)];
     let mut peer_zones = HashMap::new();
     peer_zones.insert(NodeId(1), 2);
-    let _hb = DeterministicHeartbeat::new(&peers, 0, 100, 3, &topology.zone_connectivity, 1, &peer_zones);
+    let _hb = DeterministicHeartbeat::new(
+        &peers,
+        0,
+        100,
+        3,
+        &topology.zone_connectivity,
+        1,
+        &peer_zones,
+    );
 
     // ============================================================
     //   LAYER 3 (transport): P2P Mesh Node + UDP Transport
@@ -71,7 +110,9 @@ async fn test_full_pipeline_all_13_layers() {
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.expect("mesh node A");
+    })
+    .await
+    .expect("mesh node A");
 
     let node_b = MeshNode::new(MeshConfig {
         node_id: NodeId(20),
@@ -86,7 +127,9 @@ async fn test_full_pipeline_all_13_layers() {
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.expect("mesh node B");
+    })
+    .await
+    .expect("mesh node B");
 
     tokio::spawn(node_a.run());
     tokio::spawn(node_b.run());
@@ -113,14 +156,26 @@ async fn test_full_pipeline_all_13_layers() {
 
     let order_a = make_order(1, pk_a, OrderSide::Buy, 3000, 10, 101);
     let mut signed_a = order_a.clone();
-    signed_a.signature = sk_a.sign(&OrderValidator::serialize_order_message(&order_a)).to_vec();
+    signed_a.signature = sk_a
+        .sign(&OrderValidator::serialize_order_message(&order_a))
+        .to_vec();
 
     let order_b = make_order(2, pk_b, OrderSide::Sell, 3000, 10, 202);
     let mut signed_b = order_b.clone();
-    signed_b.signature = sk_b.sign(&OrderValidator::serialize_order_message(&order_b)).to_vec();
+    signed_b.signature = sk_b
+        .sign(&OrderValidator::serialize_order_message(&order_b))
+        .to_vec();
 
-    mr_manager.get_region_mut(&pk_a).unwrap().write_orders(&[signed_a]).unwrap();
-    mr_manager.get_region_mut(&pk_b).unwrap().write_orders(&[signed_b]).unwrap();
+    mr_manager
+        .get_region_mut(&pk_a)
+        .unwrap()
+        .write_orders(&[signed_a])
+        .unwrap();
+    mr_manager
+        .get_region_mut(&pk_b)
+        .unwrap()
+        .write_orders(&[signed_b])
+        .unwrap();
 
     let (mut pulled, _) = pull_scheduler.perform_pull(&mr_manager);
     let (p2, _) = pull_scheduler.perform_pull(&mr_manager);
@@ -130,7 +185,11 @@ async fn test_full_pipeline_all_13_layers() {
     let mut validator = OrderValidator::new(100);
     let mut valid_orders = Vec::new();
     for o in &pulled {
-        assert!(validator.validate_order(o), "sig validation failed for nonce {}", o.nonce);
+        assert!(
+            validator.validate_order(o),
+            "sig validation failed for nonce {}",
+            o.nonce
+        );
         valid_orders.push(o.clone());
     }
 
@@ -172,7 +231,10 @@ async fn test_full_pipeline_all_13_layers() {
         path: vec![NodeId(10)],
     };
 
-    flood_transport.send(NodeId(10), WireMessage::Flood(flood_msg)).await.unwrap();
+    flood_transport
+        .send(NodeId(10), WireMessage::Flood(flood_msg))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // ============================================================
@@ -228,12 +290,15 @@ async fn test_full_pipeline_all_13_layers() {
     assert_eq!(shares.len(), 3);
 
     let settlement_msg = b"Settle batch #42: 1 match, 3000 USD value";
-    let tss_sig = tss.sign_message(&[shares[0].clone(), shares[1].clone()], settlement_msg)
+    let tss_sig = tss
+        .sign_message(&[shares[0].clone(), shares[1].clone()], settlement_msg)
         .expect("TSS sign failed");
     assert!(tss_sig.len() > 32);
 
     // Insufficient shares
-    assert!(tss.sign_message(&[shares[0].clone()], settlement_msg).is_err());
+    assert!(tss
+        .sign_message(&[shares[0].clone()], settlement_msg)
+        .is_err());
 
     // ============================================================
     //   LAYER 12: Storage WAL (sled)
@@ -243,12 +308,14 @@ async fn test_full_pipeline_all_13_layers() {
 
     let logger = TradeLogger::open(&db_path).expect("open sled");
 
-    logger.append(LogEntry::OrderMatched {
-        buy_order_id: matches[0].maker_order_id,
-        sell_order_id: matches[0].taker_order_id,
-        price: matches[0].price,
-        amount: matches[0].amount,
-    }).expect("append");
+    logger
+        .append(LogEntry::OrderMatched {
+            buy_order_id: matches[0].maker_order_id,
+            sell_order_id: matches[0].taker_order_id,
+            price: matches[0].price,
+            amount: matches[0].amount,
+        })
+        .expect("append");
 
     let recovered = logger.recover_all().expect("recover");
     assert_eq!(recovered.len(), 1);

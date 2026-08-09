@@ -1,8 +1,8 @@
 use common::{Order, OrderSide, SettlementPreference, SettlementRequester};
 use engine::OrderBook;
-use rdma::{TraderMemoryRegionManager, PullScheduler};
+use rdma::{PullScheduler, TraderMemoryRegionManager};
+use security::{decrypt_packet, encrypt_packet};
 use validation::OrderValidator;
-use security::{encrypt_packet, decrypt_packet};
 
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
@@ -118,7 +118,10 @@ fn benchmark_signature_cache() {
     let speedup = uncached_dur.as_secs_f64() / (cached_dur.as_secs_f64() / 100000.0);
 
     println!("  Uncached verification: {:?}", uncached_dur);
-    println!("  Cached verification throughput: {:.2} checks/sec", cached_ops_sec);
+    println!(
+        "  Cached verification throughput: {:.2} checks/sec",
+        cached_ops_sec
+    );
     println!("  Cache validation speedup factor: {:.2}x", speedup);
 }
 

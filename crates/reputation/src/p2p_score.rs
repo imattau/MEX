@@ -1,6 +1,6 @@
+use crate::types::P2PMetrics;
 use common::NodeId;
 use std::collections::HashMap;
-use crate::types::P2PMetrics;
 
 const WINDOW_SIZE: usize = 100;
 const DECAY_FACTOR: f64 = 0.9;
@@ -33,7 +33,8 @@ impl P2PScoreEngine {
         let mut weight = 0.0;
 
         if metrics.heartbeat_miss_count > 0 {
-            let miss_penalty = (1.0 - (metrics.heartbeat_miss_count as f64 / 10.0).clamp(0.0, 1.0)).max(0.0);
+            let miss_penalty =
+                (1.0 - (metrics.heartbeat_miss_count as f64 / 10.0).clamp(0.0, 1.0)).max(0.0);
             score += miss_penalty * 0.3;
             weight += 0.3;
         } else {
@@ -42,7 +43,8 @@ impl P2PScoreEngine {
         }
 
         if metrics.censorship_flags > 0 {
-            let flag_penalty = (1.0 - (metrics.censorship_flags as f64 / 5.0).clamp(0.0, 1.0)).max(0.0);
+            let flag_penalty =
+                (1.0 - (metrics.censorship_flags as f64 / 5.0).clamp(0.0, 1.0)).max(0.0);
             score += flag_penalty * 0.3;
             weight += 0.3;
         } else {

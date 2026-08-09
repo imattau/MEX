@@ -54,7 +54,7 @@ impl DeterministicHeartbeat {
     pub fn on_heartbeat(&mut self, from: NodeId, received_at: u64, seq: usize) {
         if let Some(expected_times) = self.expected_schedule.get(&from) {
             let expected_time = expected_times[seq % expected_times.len()];
-            
+
             // Tolerance window for synchronization checks (e.g. 5ms)
             let tolerance = 5;
             let diff = (received_at as i64 - expected_time as i64).abs();
@@ -139,15 +139,8 @@ mod tests {
         let mut zone_connectivity = HashMap::new();
         zone_connectivity.insert((1, 1), 5.0);
 
-        let mut tracker = DeterministicHeartbeat::new(
-            &peers,
-            1000,
-            100,
-            3,
-            &zone_connectivity,
-            1,
-            &peer_zones,
-        );
+        let mut tracker =
+            DeterministicHeartbeat::new(&peers, 1000, 100, 3, &zone_connectivity, 1, &peer_zones);
 
         // Advance virtual time to 1350ms (Seq 0 expected at 1005, Seq 1 at 1105, Seq 2 at 1205)
         // Deadline for Seq 2 with 3 missed intervals is: 1205 + 300 = 1505.

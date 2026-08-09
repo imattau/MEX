@@ -63,11 +63,17 @@ impl Default for OrderSequencer {
 
 impl OrderSequencer {
     pub fn new() -> Self {
-        Self { pending: Vec::new(), next_arrival_seq: 0 }
+        Self {
+            pending: Vec::new(),
+            next_arrival_seq: 0,
+        }
     }
 
     pub fn add(&mut self, order_id: [u8; 32]) {
-        self.pending.push(PendingOrder { order_id, arrival_seq: self.next_arrival_seq });
+        self.pending.push(PendingOrder {
+            order_id,
+            arrival_seq: self.next_arrival_seq,
+        });
         self.next_arrival_seq += 1;
     }
 
@@ -91,8 +97,15 @@ impl OrderSequencer {
     }
 }
 
-fn compare(a: &PendingOrder, b: &PendingOrder, evidence: &HashMap<[u8; 32], (NodeId, f64)>) -> CmpOrdering {
-    match (evidence.get(&a.order_id).copied(), evidence.get(&b.order_id).copied()) {
+fn compare(
+    a: &PendingOrder,
+    b: &PendingOrder,
+    evidence: &HashMap<[u8; 32], (NodeId, f64)>,
+) -> CmpOrdering {
+    match (
+        evidence.get(&a.order_id).copied(),
+        evidence.get(&b.order_id).copied(),
+    ) {
         (Some(ea), Some(eb)) => match compare_by_evidence(&a.order_id, ea, &b.order_id, eb) {
             OrderingDecision::ByTimestamp(o) | OrderingDecision::TieBroken(o) => o,
         },
@@ -130,7 +143,11 @@ mod tests {
             ([3u8; 32], NodeId(1), 300.0),
         ]);
 
-        assert_eq!(seq.flush(&evidence), vec![[1u8; 32], [2u8; 32], [3u8; 32]], "flush must resolve TRUE evidence order, not raw arrival order");
+        assert_eq!(
+            seq.flush(&evidence),
+            vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            "flush must resolve TRUE evidence order, not raw arrival order"
+        );
     }
 
     #[test]
@@ -153,7 +170,11 @@ mod tests {
 
         let evidence = evidence_map(&[([1u8; 32], NodeId(1), 500.0)]);
 
-        assert_eq!(seq.flush(&evidence), vec![[1u8; 32], [2u8; 32]], "the evidence-backed order must rank first regardless of arrival order");
+        assert_eq!(
+            seq.flush(&evidence),
+            vec![[1u8; 32], [2u8; 32]],
+            "the evidence-backed order must rank first regardless of arrival order"
+        );
     }
 
     #[test]
@@ -162,7 +183,11 @@ mod tests {
         seq.add([2u8; 32]);
         seq.add([1u8; 32]);
         // Neither has any evidence at all.
-        assert_eq!(seq.flush(&HashMap::new()), vec![[2u8; 32], [1u8; 32]], "with no evidence for either, arrival order should be preserved");
+        assert_eq!(
+            seq.flush(&HashMap::new()),
+            vec![[2u8; 32], [1u8; 32]],
+            "with no evidence for either, arrival order should be preserved"
+        );
     }
 
     #[test]
@@ -181,6 +206,9 @@ mod tests {
         seq.add([1u8; 32]);
         seq.add([2u8; 32]);
         let second = seq.flush(&evidence);
-        assert_eq!(first, second, "the tie-break must be deterministic across repeated flushes with the same evidence");
+        assert_eq!(
+            first, second,
+            "the tie-break must be deterministic across repeated flushes with the same evidence"
+        );
     }
 }

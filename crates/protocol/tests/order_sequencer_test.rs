@@ -54,7 +54,10 @@ fn now_ms() -> f64 {
 }
 
 async fn query_witness(
-    sender: &tokio::sync::mpsc::Sender<([u8; 32], tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>)>,
+    sender: &tokio::sync::mpsc::Sender<(
+        [u8; 32],
+        tokio::sync::oneshot::Sender<Option<(NodeId, f64)>>,
+    )>,
     order_id: [u8; 32],
 ) -> Option<(NodeId, f64)> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -98,7 +101,9 @@ async fn test_sequencer_flush_recovers_true_order_despite_shuffled_arrival() {
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let witness_query = detector.earliest_witness_query_sender();
 
     tokio::spawn(detector.run());
@@ -111,8 +116,17 @@ async fn test_sequencer_flush_recovers_true_order_despite_shuffled_arrival() {
     const GAP_MS: u64 = 100;
 
     for order in [&order_a, &order_b, &order_c] {
-        let msg = FloodMessage { order: (*order).clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-        origin.send(NodeId(1), WireMessage::Flood(msg)).await.unwrap();
+        let msg = FloodMessage {
+            order: (*order).clone(),
+            hop_count: 0,
+            path: vec![NodeId(0)],
+            timestamp: now_ms(),
+            source_region: Region::UsEast1,
+        };
+        origin
+            .send(NodeId(1), WireMessage::Flood(msg))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(GAP_MS)).await;
     }
 
@@ -124,18 +138,27 @@ async fn test_sequencer_flush_recovers_true_order_despite_shuffled_arrival() {
     sequencer.add(order_c.id);
     sequencer.add(order_a.id);
     sequencer.add(order_b.id);
-    assert_eq!(sequencer.pending_order_ids(), vec![order_c.id, order_a.id, order_b.id], "sanity check: add() order is indeed shuffled relative to truth");
+    assert_eq!(
+        sequencer.pending_order_ids(),
+        vec![order_c.id, order_a.id, order_b.id],
+        "sanity check: add() order is indeed shuffled relative to truth"
+    );
 
     let mut evidence = HashMap::new();
     for order in [&order_a, &order_b, &order_c] {
-        let w = query_witness(&witness_query, order.id).await.expect("detector should have evidence for every order");
+        let w = query_witness(&witness_query, order.id)
+            .await
+            .expect("detector should have evidence for every order");
         evidence.insert(order.id, w);
     }
 
     let flushed = sequencer.flush(&evidence);
 
     println!("shuffled add() order: C, A, B");
-    println!("flushed order:         {:?}", flushed.iter().map(|id| id[0]).collect::<Vec<_>>());
+    println!(
+        "flushed order:         {:?}",
+        flushed.iter().map(|id| id[0]).collect::<Vec<_>>()
+    );
 
     assert_eq!(
         flushed,
@@ -177,7 +200,9 @@ async fn test_sequencer_places_evidence_lacking_order_last_even_with_live_eviden
         artificial_forward_delay_ms: None,
         require_staked_reporters: false,
         misconduct_stake_threshold: 0,
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let witness_query = detector.earliest_witness_query_sender();
 
     tokio::spawn(detector.run());
@@ -186,8 +211,17 @@ async fn test_sequencer_places_evidence_lacking_order_last_even_with_live_eviden
     let order_a = signed_order(91, 1);
     let order_ghost = signed_order(92, 2); // never sent through the mesh at all
 
-    let msg = FloodMessage { order: order_a.clone(), hop_count: 0, path: vec![NodeId(0)], timestamp: now_ms(), source_region: Region::UsEast1 };
-    origin.send(NodeId(1), WireMessage::Flood(msg)).await.unwrap();
+    let msg = FloodMessage {
+        order: order_a.clone(),
+        hop_count: 0,
+        path: vec![NodeId(0)],
+        timestamp: now_ms(),
+        source_region: Region::UsEast1,
+    };
+    origin
+        .send(NodeId(1), WireMessage::Flood(msg))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut sequencer = OrderSequencer::new();

@@ -8,7 +8,7 @@ impl WasmSandbox {
     pub fn new() -> Result<Self, String> {
         let mut config = Config::new();
         config.consume_fuel(true); // Enable CPU cycle/fuel metering
-        
+
         let engine = Engine::new(&config).map_err(|e| e.to_string())?;
         Ok(Self { engine })
     }
@@ -20,7 +20,9 @@ impl WasmSandbox {
         // Wasmtime compiles WAT strings automatically
         let module = Module::new(&self.engine, wasm_wat).map_err(|e| e.to_string())?;
         let linker = Linker::new(&self.engine);
-        let instance = linker.instantiate(&mut store, &module).map_err(|e| e.to_string())?;
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| e.to_string())?;
 
         // Call the strategy's "on_tick" entrypoint
         let on_tick = instance
