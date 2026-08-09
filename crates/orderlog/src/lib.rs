@@ -204,12 +204,25 @@ fn compute_entry_hash<T: Serialize>(seq: u64, prev_hash: [u8; 32], payload: &T) 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashChainLog<T> {
+    // Stage P4-6b: the seq of the earliest entry THIS instance is
+    // responsible for, and the chain root immediately before it. A
+    // genesis log (the only kind before this stage existed) always has
+    // base_seq=0, base_prev_hash=[0u8;32] -- see Default. A "hot window"
+    // log resuming after an archived prefix (see resume_from) has both
+    // set to wherever the archive left off, so append/root/
+    // entries_since/try_append_remote all behave exactly as if the
+    // archived entries were still physically present in `entries`,
+    // without this log ever needing to hold them.
+    base_seq: u64,
+    base_prev_hash: [u8; 32],
     entries: Vec<LogEntry<T>>,
 }
 
 impl<T> Default for HashChainLog<T> {
     fn default() -> Self {
         Self {
+            base_seq: 0,
+            base_prev_hash: [0u8; 32],
             entries: Vec::new(),
         }
     }
@@ -220,13 +233,34 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         Self::default()
     }
 
+    // Stage P4-6b: a log that picks up mid-chain, after everything
+    // before `next_seq` has been moved to archival storage. `prev_root`
+    // must be the entry_hash of whatever entry immediately precedes
+    // `next_seq` in the real, full history -- verify_chain_segment
+    // confirming the archived prefix is valid already gives you this as
+    // that prefix's own last entry_hash (or [0u8;32] if archiving
+    // nothing yet, i.e. next_seq=0). Getting `prev_root` wrong silently
+    // produces a log that looks internally self-consistent to THIS
+    // process but would fail verify_chain_segment against the real
+    // archived prefix -- there's no way to detect that mistake from
+    // inside this log alone, so callers (Stage P4-6c's archival step)
+    // must derive it from the archive itself, never guess or reuse a
+    // stale value.
+    pub fn resume_from(next_seq: u64, prev_root: [u8; 32]) -> Self {
+        Self {
+            base_seq: next_seq,
+            base_prev_hash: prev_root,
+            entries: Vec::new(),
+        }
+    }
+
     pub fn append(&mut self, payload: T) -> &LogEntry<T> {
-        let seq = self.entries.len() as u64;
+        let seq = self.next_seq();
         let prev_hash = self
             .entries
             .last()
             .map(|e| e.entry_hash)
-            .unwrap_or([0u8; 32]);
+            .unwrap_or(self.base_prev_hash);
         let entry_hash = compute_entry_hash(seq, prev_hash, &payload);
         self.entries.push(LogEntry {
             seq,
@@ -241,9 +275,14 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         self.entries
             .last()
             .map(|e| e.entry_hash)
-            .unwrap_or([0u8; 32])
+            .unwrap_or(self.base_prev_hash)
     }
 
+    // Number of entries THIS instance physically holds -- NOT the
+    // absolute seq of its last entry once base_seq is nonzero (a hot
+    // window resumed at seq 1000 with 3 entries has len() == 3, not
+    // 1003). Use next_seq() for the absolute count of everything up to
+    // and including this log, archived prefix included.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -252,12 +291,33 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         self.entries.is_empty()
     }
 
+    // The absolute seq this log will assign to its NEXT appended entry
+    // -- equivalently, base_seq + how many entries it already holds.
+    // For a genesis log this is identical to len(); Stage P4-6c's
+    // archival step uses this (not len()) to know where to resume a
+    // fresh hot window from after moving this log's current contents to
+    // cold storage.
+    pub fn next_seq(&self) -> u64 {
+        self.base_seq + self.entries.len() as u64
+    }
+
     pub fn entries(&self) -> &[LogEntry<T>] {
         &self.entries
     }
 
+    // `seq` is an ABSOLUTE seq (matching entry.seq, not a local index
+    // into this instance's own `entries`) -- correct for both a genesis
+    // log (where the two coincide) and a resumed hot window (where they
+    // don't). A `seq` older than this log's own base_seq -- i.e.
+    // already-archived history this instance never held -- clamps to
+    // the start of what it DOES have, same as an out-of-range seq
+    // always has (this method has never had a way to signal "some of
+    // what you asked for isn't here"; Stage P4-6d's fetch-API work is
+    // where that gets handled, by consulting the archive too).
     pub fn entries_since(&self, seq: u64) -> &[LogEntry<T>] {
-        let start = (seq as usize).min(self.entries.len());
+        let start = seq
+            .saturating_sub(self.base_seq)
+            .min(self.entries.len() as u64) as usize;
         &self.entries[start..]
     }
 
@@ -273,12 +333,12 @@ impl<T: Serialize + Clone> HashChainLog<T> {
     // either the sender is lying or this mirror missed an earlier entry
     // and needs to resync (see entries_since for catching back up).
     pub fn try_append_remote(&mut self, entry: LogEntry<T>) -> Result<(), String> {
-        if !verify_next_entry(self.root(), self.len() as u64, &entry) {
+        if !verify_next_entry(self.root(), self.next_seq(), &entry) {
             return Err(format!(
-                "entry seq={} does not validly extend this log (current root {}, len {})",
+                "entry seq={} does not validly extend this log (current root {}, next expected seq {})",
                 entry.seq,
                 hex_prefix(&self.root()),
-                self.len()
+                self.next_seq()
             ));
         }
         self.entries.push(entry);
@@ -536,6 +596,91 @@ mod tests {
         assert_eq!(log.entries_since(3).len(), 2);
         assert_eq!(log.entries_since(0).len(), 5);
         assert_eq!(log.entries_since(100).len(), 0);
+    }
+
+    // Stage P4-6b: the actual point of resume_from -- a hot window
+    // picking up after an archived prefix must produce a chain that's
+    // indistinguishable, verification-wise, from one continuous log
+    // that never had anything moved out of it. Splits a real 6-entry
+    // log the same way the P4-6a test does, builds a resumed log from
+    // ONLY the hot half, appends more to it, and confirms the combined
+    // (archived_prefix ++ hot_window.entries()) verifies as one
+    // unbroken segment continuation from genesis.
+    #[test]
+    fn test_resume_from_produces_a_chain_that_validly_continues_the_archived_prefix() {
+        let mut original: HashChainLog<u64> = HashChainLog::new();
+        for i in 0..6u64 {
+            original.append(i);
+        }
+        let all = original.entries().to_vec();
+        let (archived, hot_before_archiving) = all.split_at(3);
+        let boundary_root = archived.last().unwrap().entry_hash;
+
+        let mut hot = HashChainLog::resume_from(3, boundary_root);
+        // Re-append the same payloads a real archival step would have
+        // left behind in the fresh hot window.
+        for entry in hot_before_archiving {
+            hot.append(entry.payload);
+        }
+        // And some genuinely new entries, arriving after the archive
+        // point, to prove ongoing appends keep working correctly too.
+        hot.append(100);
+        hot.append(200);
+
+        assert_eq!(
+            hot.next_seq(),
+            8,
+            "next_seq must account for the archived prefix's length too"
+        );
+        assert_eq!(
+            hot.len(),
+            5,
+            "len() only counts what THIS instance physically holds"
+        );
+
+        // The resumed log's own entries verify as a continuation...
+        assert!(verify_chain_segment(3, boundary_root, hot.entries()));
+        // ...and the archived prefix plus the resumed log's entries
+        // together verify as a single, unbroken chain from genesis --
+        // exactly what a full, non-archived log's entries() would have
+        // produced.
+        let mut combined = archived.to_vec();
+        combined.extend_from_slice(hot.entries());
+        assert!(verify_chain(&combined));
+    }
+
+    #[test]
+    fn test_resume_from_with_genesis_values_behaves_like_new() {
+        let mut resumed: HashChainLog<u64> = HashChainLog::resume_from(0, [0u8; 32]);
+        resumed.append(1);
+        resumed.append(2);
+
+        let mut fresh: HashChainLog<u64> = HashChainLog::new();
+        fresh.append(1);
+        fresh.append(2);
+
+        assert_eq!(resumed.root(), fresh.root());
+        assert_eq!(resumed.next_seq(), fresh.next_seq());
+    }
+
+    #[test]
+    fn test_entries_since_on_a_resumed_log_uses_absolute_seq() {
+        let mut hot: HashChainLog<u64> = HashChainLog::resume_from(10, [0xABu8; 32]);
+        hot.append(1);
+        hot.append(2);
+        hot.append(3);
+
+        // Absolute seqs 10, 11, 12 -- NOT local indices 0, 1, 2.
+        assert_eq!(
+            hot.entries_since(11).len(),
+            2,
+            "seq 11 is the second entry, one must remain after it plus itself"
+        );
+        assert_eq!(hot.entries_since(10).len(), 3);
+        // Anything before this log's own base_seq (already-archived
+        // history it never held) clamps to everything it DOES have,
+        // not an out-of-bounds panic.
+        assert_eq!(hot.entries_since(0).len(), 3);
     }
 
     #[test]
