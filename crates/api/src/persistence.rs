@@ -65,6 +65,20 @@ pub enum WalEntry {
     BatchSubmitted {
         keys: Vec<([u8; 32], [u8; 32])>,
     },
+    // Stage P4-3: an order entered order-sequencing's intake (either
+    // submit_order's own HTTP path or gossip_replication's mesh-gossip
+    // path -- see server::queue_for_sequencing, shared by both) but
+    // hasn't been resolved/applied yet. Unlike CommitConfirmed, this
+    // needs no separate checkpoint entry: replay already knows whether
+    // an order was later actually applied via applied_order_ids (built
+    // from OrderAccepted entries during the same replay), so that's
+    // sufficient to tell "still buffered at crash time" apart from
+    // "already flushed" -- see server::replay_persistence_log's final
+    // pass.
+    OrderQueued {
+        order: Order,
+        receipt: OrderReceipt,
+    },
 }
 
 // sled::Db and sled::Tree are cheap, Arc-backed handles -- Clone gives
@@ -122,6 +136,13 @@ impl PersistenceLog {
 
     pub fn append_batch_submitted(&self, keys: Vec<([u8; 32], [u8; 32])>) -> Result<(), String> {
         self.append_entry(&WalEntry::BatchSubmitted { keys })
+    }
+
+    pub fn append_order_queued(&self, order: &Order, receipt: &OrderReceipt) -> Result<(), String> {
+        self.append_entry(&WalEntry::OrderQueued {
+            order: order.clone(),
+            receipt: receipt.clone(),
+        })
     }
 
     // Every durably-recorded entry, in the exact order they were
@@ -272,5 +293,26 @@ mod tests {
         assert!(matches!(replayed[0], WalEntry::OrderAccepted { .. }));
         assert!(matches!(replayed[1], WalEntry::CommitConfirmed { .. }));
         assert!(matches!(replayed[2], WalEntry::BatchSubmitted { .. }));
+    }
+
+    #[test]
+    fn test_order_queued_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let order = make_order(3);
+        let receipt = make_receipt(&order);
+        log.append_order_queued(&order, &receipt).unwrap();
+
+        let replayed = log.replay().unwrap();
+        assert_eq!(replayed.len(), 1);
+        let WalEntry::OrderQueued {
+            order: replayed_order,
+            ..
+        } = &replayed[0]
+        else {
+            panic!("expected OrderQueued");
+        };
+        assert_eq!(replayed_order.id, [3u8; 32]);
     }
 }

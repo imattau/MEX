@@ -307,11 +307,19 @@ async fn submit_order(
                 pending: false,
             });
         }
-        let sequencer = guard.order_sequencer.as_mut().unwrap();
-        sequencer.add(order.id);
-        guard
-            .pending_order_data
-            .insert(order.id, (order, receipt.clone()));
+        if let Err(e) = queue_for_sequencing(&mut guard, order, receipt.clone()) {
+            error!(error = %e, order_id = ?order_id, "failed to durably persist queued order, rejecting");
+            return Json(SubmitOrderResponse {
+                success: false,
+                order_id,
+                matches: Vec::new(),
+                error: Some(format!(
+                    "internal error: could not durably record order: {e}"
+                )),
+                receipt: None,
+                pending: false,
+            });
+        }
         counter!("api.orders.queued_for_sequencing").increment(1);
         debug!(order_id = ?order_id, "order queued for network-time sequencing");
         return Json(SubmitOrderResponse {
@@ -522,6 +530,31 @@ fn apply_accepted_order_locally(
 // served -- so `guard` here is a plain &mut, not a lock guard, despite
 // the name (kept for consistency with apply_accepted_order_locally's
 // parameter, which this calls through replay_accepted_order).
+
+// Stage P4-3: shared between submit_order's HTTP intake and
+// gossip_replication's mesh-gossip intake -- both queue an order into
+// order-sequencing's buffer the identical way (add to the sequencer,
+// stash its signed receipt in pending_order_data), and both now need the
+// identical durability wrapper around it. Durably records an
+// OrderQueued WAL entry BEFORE either mutation, fails closed same as
+// apply_accepted_order/confirm_committed: on a WAL write failure,
+// neither queues, and the order is not admitted. Caller is responsible
+// for its own idempotency check (order_id already pending/applied)
+// before calling this -- that check differs slightly between the two
+// call sites (see each one's own comments) so isn't folded in here.
+pub(crate) fn queue_for_sequencing(
+    guard: &mut AppState,
+    order: Order,
+    receipt: OrderReceipt,
+) -> Result<(), String> {
+    if let Some(log) = &guard.persistence {
+        log.append_order_queued(&order, &receipt)?;
+    }
+    guard.order_sequencer.as_mut().unwrap().add(order.id);
+    guard.pending_order_data.insert(order.id, (order, receipt));
+    Ok(())
+}
+
 // Stage P4-2: the confirm -> batch -> settle stage's core state
 // transition (see confirm_committed), shared between the live path
 // (after a successful durable WAL write) and replay. `m` must already
@@ -584,6 +617,14 @@ pub fn replay_persistence_log(
         }
     }
 
+    // Stage P4-3: OrderQueued entries can't be replayed inline in the
+    // loop below -- whether one needs re-queuing depends on
+    // applied_order_ids, which isn't fully populated until every
+    // OrderAccepted entry (processed in the SAME loop, in the same
+    // pass) has been replayed. Collected here, handled in a final pass
+    // once the loop below finishes.
+    let mut queued_orders: Vec<(Order, OrderReceipt)> = Vec::new();
+
     for entry in entries {
         match entry {
             WalEntry::OrderAccepted {
@@ -604,8 +645,28 @@ pub fn replay_persistence_log(
                 // Purely informational -- already folded into
                 // settled_keys above, nothing further to replay.
             }
+            WalEntry::OrderQueued { order, receipt } => {
+                queued_orders.push((order, receipt));
+            }
         }
     }
+
+    // An order_id with a later OrderAccepted entry was actually flushed
+    // and applied before the crash -- applied_order_ids (now fully
+    // populated by the loop above) already reflects that, so only an
+    // order_id NOT in it was still sitting unresolved in the buffer.
+    for (order, receipt) in queued_orders {
+        if guard.applied_order_ids.contains(&order.id) {
+            continue;
+        }
+        if guard.order_sequencer.is_none() {
+            tracing::warn!(order_id = ?order.id, "replay: found a queued-but-unapplied order in the WAL, but order-sequencing isn't enabled on this restart -- dropping it rather than applying immediately, which would bypass network-time sequencing entirely");
+            continue;
+        }
+        guard.order_sequencer.as_mut().unwrap().add(order.id);
+        guard.pending_order_data.insert(order.id, (order, receipt));
+    }
+
     Ok(count)
 }
 

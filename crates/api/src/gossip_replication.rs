@@ -87,8 +87,10 @@ pub async fn run_gossip_replication_loop(
             order.settlement_requester,
         );
 
-        guard.order_sequencer.as_mut().unwrap().add(order_id);
-        guard.pending_order_data.insert(order_id, (order, receipt));
+        if let Err(e) = crate::server::queue_for_sequencing(&mut guard, order, receipt) {
+            tracing::error!(error = %e, ?order_id, ?from_node, "failed to durably persist gossip-sourced order -- dropped, not queued");
+            continue;
+        }
         metrics::counter!("api.orders.queued_from_gossip").increment(1);
         tracing::debug!(
             ?order_id,

@@ -914,4 +914,184 @@ mod tests {
             "the already-settled match must NOT be re-enqueued -- that would risk a duplicate on-chain submission"
         );
     }
+
+    // Stage P4-3 live validation: with order-sequencing enabled, two
+    // orders are queued (both durably recorded via queue_for_sequencing
+    // -- see server.rs). One is then manually flushed/applied (standing
+    // in for run_order_sequencing_loop having processed it before the
+    // crash); the other is left sitting in the buffer, unresolved --
+    // standing in for a crash mid-window. Replay must put the still-
+    // buffered order back into a fresh OrderSequencer/pending_order_data
+    // exactly as it stood, and must NOT re-queue the one that was
+    // already flushed (applied_order_ids already accounts for it).
+    #[tokio::test]
+    async fn test_unflushed_queued_orders_are_recovered_but_flushed_ones_are_not() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use protocol::OrderSequencer;
+        use rand::rngs::OsRng;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        fn build_and_sign(
+            sk: &SigningKey,
+            trader: [u8; 32],
+            side: common::OrderSide,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+        ) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+            let unsigned = common::Order {
+                id: order_id,
+                trader,
+                symbol: "ETH-USD".to_string(),
+                side,
+                price,
+                amount,
+                signature: Vec::new(),
+                nonce,
+                expiry: 0,
+                settlement_preference: common::SettlementPreference::Standard,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount, "signature": signature,
+                "nonce": nonce, "expiry": 0,
+            })
+        }
+
+        async fn post_order(app: &axum::Router, body: &serde_json::Value) -> SubmitOrderResponse {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/order")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let mut csprng = OsRng;
+        let sk_still_buffered = SigningKey::generate(&mut csprng);
+        let pk_still_buffered = sk_still_buffered.verifying_key().to_bytes();
+        let sk_flushed = SigningKey::generate(&mut csprng);
+        let pk_flushed = sk_flushed.verifying_key().to_bytes();
+
+        let (still_buffered_id, flushed_id) = {
+            let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+            let (tx, _) = broadcast::channel(100);
+            let state = Arc::new(RwLock::new(AppState {
+                node_id: common::NodeId(0),
+                order_book: OrderBook::new("ETH-USD".to_string()),
+                validator: OrderValidator::new(100),
+                ws_broadcast: tx,
+                reputation: reputation::ReputationEngine::new(),
+                pending_commits: std::collections::HashMap::new(),
+                confirmed_trade_hashes: std::collections::HashMap::new(),
+                batcher: batcher::SettlementBatcher::new(),
+                receipt_signing_key: SigningKey::generate(&mut OsRng),
+                order_log: orderlog::HashChainLog::new(),
+                match_log: orderlog::HashChainLog::new(),
+                mesh: None,
+                order_sequencer: Some(OrderSequencer::new()),
+                pending_order_data: std::collections::HashMap::new(),
+                applied_order_ids: std::collections::HashSet::new(),
+                persistence: Some(log),
+            }));
+            let app = app(Arc::clone(&state));
+
+            let still_buffered_req = build_and_sign(
+                &sk_still_buffered,
+                pk_still_buffered,
+                common::OrderSide::Buy,
+                3000,
+                5,
+                1,
+            );
+            let resp1 = post_order(&app, &still_buffered_req).await;
+            assert!(resp1.success && resp1.pending);
+            let still_buffered_id = resp1.order_id;
+
+            let flushed_req =
+                build_and_sign(&sk_flushed, pk_flushed, common::OrderSide::Buy, 3100, 3, 1);
+            let resp2 = post_order(&app, &flushed_req).await;
+            assert!(resp2.success && resp2.pending);
+            let flushed_id = resp2.order_id;
+
+            // Stand in for run_order_sequencing_loop having flushed and
+            // applied the second order before the simulated crash --
+            // the first order is deliberately left untouched, still
+            // sitting in the buffer.
+            {
+                let mut guard = state.write().unwrap();
+                let (order, receipt) = guard.pending_order_data.remove(&flushed_id).unwrap();
+                crate::server::apply_accepted_order(&mut guard, order, receipt, None).unwrap();
+            }
+
+            (still_buffered_id, flushed_id)
+            // `state` drops here, simulating a crash with nothing else
+            // surviving.
+        };
+
+        let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+        let mut recovered_state = AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: broadcast::channel(100).0,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: SigningKey::generate(&mut OsRng),
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            mesh: None,
+            order_sequencer: Some(OrderSequencer::new()),
+            pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            persistence: None,
+        };
+        crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+
+        assert!(
+            recovered_state.applied_order_ids.contains(&flushed_id),
+            "the flushed order must be marked applied by replay"
+        );
+        assert!(
+            !recovered_state
+                .applied_order_ids
+                .contains(&still_buffered_id),
+            "the still-buffered order was never actually applied before the crash"
+        );
+
+        let sequencer = recovered_state.order_sequencer.as_ref().unwrap();
+        assert!(
+            sequencer.pending_order_ids().contains(&still_buffered_id),
+            "replay must re-queue the order that was still buffered at crash time"
+        );
+        assert!(
+            !sequencer.pending_order_ids().contains(&flushed_id),
+            "replay must NOT re-queue an order that was already flushed before the crash"
+        );
+        assert!(recovered_state
+            .pending_order_data
+            .contains_key(&still_buffered_id));
+        assert!(!recovered_state.pending_order_data.contains_key(&flushed_id));
+    }
 }
