@@ -25,7 +25,11 @@ module.exports = {
   },
   networks: {
     localhost: {
-      url: "http://127.0.0.1:8545",
+      // Overridable so docker-compose's deploy container can point this
+      // at the chain container by its service name (chain:8545) instead
+      // of 127.0.0.1, which inside that container would mean itself, not
+      // the chain service -- see docker-compose.yml.
+      url: process.env.HARDHAT_NETWORK_URL || "http://127.0.0.1:8545",
     },
     // Real deployment targets, not just gas-unit benchmarking -- deploying
     // here is a real, irreversible mainnet action and costs real ETH, so

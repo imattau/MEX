@@ -95,3 +95,38 @@ jobs:
           context: .
           push: false
           tags: mex-api:ci
+
+  compose:
+    name: docker compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same situation as the docker build job above, more so: this
+      # entire multi-container devnet (chain + deploy + api, see
+      # docker-compose.yml and docker/bootstrap.js) was written with no
+      # local Docker daemon available at all to run it against. This job
+      # actually brings it up and hits /health for real -- it is the
+      # only verification this stack has ever had.
+      - name: docker compose up
+        run: docker compose up --build -d
+
+      - name: wait for api /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/health; then
+              echo "api is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "api never became healthy within the timeout"
+          exit 1
+
+      - name: docker compose logs
+        if: always()
+        run: docker compose logs
+
+      - name: docker compose down
+        if: always()
+        run: docker compose down -v

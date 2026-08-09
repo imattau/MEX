@@ -19,6 +19,12 @@
 //                           in whole ETH. Defaults to 10 (the real/production
 //                           value). Lower this for test networks where
 //                           faucet-issued ETH is scarce -- e.g. 0.1.
+//   DEPLOYMENT_OUTPUT_PATH  Optional. Also writes the deployment summary as
+//                           JSON to this path, in addition to the existing
+//                           console.log -- lets an orchestrator (e.g.
+//                           docker-compose's bootstrap step) read the
+//                           deployed addresses back reliably instead of
+//                           screen-scraping stdout.
 const hre = require("hardhat");
 const fs = require("fs");
 
@@ -110,6 +116,11 @@ async function main() {
   };
   console.log("\nDeployment summary:");
   console.log(JSON.stringify(summary, null, 2));
+
+  if (process.env.DEPLOYMENT_OUTPUT_PATH) {
+    fs.writeFileSync(process.env.DEPLOYMENT_OUTPUT_PATH, JSON.stringify(summary, null, 2));
+    console.log(`Deployment summary also written to ${process.env.DEPLOYMENT_OUTPUT_PATH}`);
+  }
 
   return summary;
 }

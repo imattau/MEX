@@ -1,0 +1,55 @@
+# One-command local devnet: a Hardhat chain, contract deployment + node
+# registration against it, and the api server wired up to the result.
+# Devnet-only -- every key/address involved is a well-known Hardhat
+# default test account, never anything real. See README.md's "Running
+# a local devnet" section.
+#
+#   docker compose up --build
+#
+services:
+  chain:
+    build:
+      context: .
+      dockerfile: docker/hardhat.Dockerfile
+    command: ["npx", "hardhat", "node", "--hostname", "0.0.0.0"]
+    ports:
+      - "8545:8545"
+
+  # One-shot: deploys the contracts, registers this compose setup's one
+  # fixed devnet node, and writes /shared/mex.env for the api service to
+  # source. Exits 0 when done -- api's depends_on below waits for that.
+  deploy:
+    build:
+      context: .
+      dockerfile: docker/hardhat.Dockerfile
+    command: ["node", "docker/bootstrap.js"]
+    depends_on:
+      - chain
+    volumes:
+      - shared-config:/shared
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+    volumes:
+      - shared-config:/shared:ro
+    ports:
+      - "8080:8080"
+    # The image's own Dockerfile ENTRYPOINT execs the binary directly
+    # with no shell involved (see its own docs) -- overridden here,
+    # compose-only, to source the env file `deploy` produced first.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -f /shared/mex.env ]; do sleep 1; done
+        set -a
+        . /shared/mex.env
+        set +a
+        exec /usr/local/bin/api
+
+volumes:
+  shared-config:

@@ -114,9 +114,36 @@ has checked in (see "Known limitations" below) at `/app/trusted_setup.bin`
 via `MEX_TRUSTED_SETUP_PATH` -- override that env var to point at a real
 ceremony's output once one exists.
 
+### Running a local devnet
+
+`docker compose up --build` is the fastest path from a fresh checkout to
+a working node with no manual setup: it starts a local Hardhat chain,
+deploys the contracts and registers one devnet node against it, and
+starts `api` pre-wired to the result -- `MEX_API_KEY`, `MEX_RPC_URL`,
+the deployed contract addresses, and the node's key/pubkey are all
+resolved automatically (see `docker-compose.yml` and `docker/bootstrap.js`).
+Every key/address involved is one of Hardhat's well-known public default
+devnet accounts -- never use them for anything real.
+
+```sh
+docker compose up --build
+curl http://localhost:8080/health
+```
+
+This devnet deploys `BatchVerifier` with the **placeholder** verifying
+key (see `scripts/deploy.js`'s own docs), since no real ceremony key
+exists yet -- it's good for exercising order intake/matching/node
+registration end-to-end, but a real `settleBatchWithFees` call will
+revert with "Invalid ZK proof": the placeholder VK doesn't match
+`crates/prover/trusted_setup.bin`'s parameters. Point `deploy`'s
+`VERIFYING_KEY_PATH` (in `docker-compose.yml`) at a real exported
+verifying key to exercise full settlement instead.
+
 CI (`.github/workflows/ci.yml`) runs `cargo build/test/clippy/fmt` across
 the workspace, a Hardhat contract-compile check, and a `docker build` of
-the image above, on every push/PR to `master`.
+the `api` image above, on every push/PR to `master` -- not the full
+compose stack, which needs a real Docker daemon actually running
+containers, not just building an image.
 
 ## Known limitations
 
@@ -130,10 +157,18 @@ the image above, on every push/PR to `master`.
 - **Only Ethereum is wired into a runnable binary.** `chain-solana` and
   `chain-cosmwasm` exist as adapters but nothing in `crates/api` or
   elsewhere constructs and runs against them yet.
-- **No orchestration manifests.** A `Dockerfile` exists and is built in
-  CI, but there's no k8s/compose/etc. deployment manifest yet -- running
-  this in production today means building the image (or the `api`
-  binary directly) and deploying/configuring it by hand.
+- **No production orchestration manifests.** `docker-compose.yml` exists
+  but is a local-devnet convenience (placeholder ZK verifying key, fixed
+  public test keys), not a production deployment target; there's no
+  k8s/etc. manifest for a real deployment -- that still means building
+  the `Dockerfile` image (or the `api` binary directly) and deploying/
+  configuring it by hand against real infrastructure.
+- **The compose stack isn't exercised by CI**, only the `api` image's
+  `docker build` -- CI has a Docker daemon that can build images but
+  this workflow doesn't spin up and drive a running multi-container
+  stack. It hasn't been run end-to-end against a live Docker daemon
+  (none is available in the environment this was written in); review
+  `docker-compose.yml` and `docker/bootstrap.js` before trusting it.
 - **clippy is not run with `-D warnings`** in CI -- the codebase has
   pre-existing lint warnings not yet triaged. Tightening this is a
   deliberate future step once they're addressed, not an oversight.

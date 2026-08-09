@@ -6,6 +6,4 @@ cache/
 agents/
 agent_memory/
 *.md
-contracts/
-scripts/
 .github/
