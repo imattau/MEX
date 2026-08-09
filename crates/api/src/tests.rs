@@ -645,8 +645,11 @@ mod tests {
             persistence: None,
         };
 
-        let replayed = crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
-        assert_eq!(replayed, 2, "both durably-recorded orders must be replayed");
+        let summary = crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+        assert_eq!(
+            summary.entries_replayed, 2,
+            "both durably-recorded orders must be replayed"
+        );
 
         assert!(
             recovered_state
@@ -871,7 +874,22 @@ mod tests {
             applied_order_ids: std::collections::HashSet::new(),
             persistence: None,
         };
-        crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+        let summary = crate::server::replay_persistence_log(&mut recovered_state, &log).unwrap();
+
+        // Stage P4-4c: reconciliation_candidates must contain exactly
+        // the unsettled match -- the settled one has a BatchSubmitted
+        // checkpoint, so its true status was never ambiguous and it has
+        // nothing left to reconcile.
+        let candidate_ids: Vec<[u8; 32]> = summary
+            .reconciliation_candidates
+            .iter()
+            .map(|(m, _)| m.maker_order_id)
+            .collect();
+        assert_eq!(
+            candidate_ids,
+            vec![unsettled_match.maker_order_id],
+            "only the unsettled match should be a reconciliation candidate"
+        );
 
         // Neither match should still be "pending confirmation" -- both
         // were genuinely confirmed before the crash.

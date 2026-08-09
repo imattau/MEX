@@ -26,7 +26,10 @@ impl BalanceLedger {
     }
 
     pub fn deposit(&mut self, trader: [u8; 32], symbol: &str, amount: u64) {
-        *self.balances.entry((trader, symbol.to_string())).or_insert(0) += amount;
+        *self
+            .balances
+            .entry((trader, symbol.to_string()))
+            .or_insert(0) += amount;
     }
 
     pub fn credit(&mut self, trader: [u8; 32], symbol: &str, amount: u64) {

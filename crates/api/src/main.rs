@@ -500,13 +500,20 @@ async fn main() {
     // accepting any live traffic -- see persistence.rs's docs and
     // server::replay_persistence_log for why replaying the same inputs
     // apply_accepted_order originally ran with is sufficient to
-    // reproduce exact pre-crash state.
+    // reproduce exact pre-crash state. reconciliation_candidates (Stage
+    // P4-4c) is handed to run_settlement_loop below -- only it has a
+    // live chain connection to actually resolve them against.
+    let mut reconciliation_candidates: Vec<(engine::Match, [u8; 32])> = Vec::new();
     if let Some(log) = &persistence_log {
         match api::replay_persistence_log(&mut app_state, log) {
-            Ok(count) => tracing::info!(
-                replayed_entries = count,
-                "replayed persisted order-accept/apply log"
-            ),
+            Ok(summary) => {
+                tracing::info!(
+                    replayed_entries = summary.entries_replayed,
+                    reconciliation_candidates = summary.reconciliation_candidates.len(),
+                    "replayed persisted order-accept/apply log"
+                );
+                reconciliation_candidates = summary.reconciliation_candidates;
+            }
             Err(e) => {
                 eprintln!("failed to replay persistence log: {e}");
                 std::process::exit(1);
@@ -579,6 +586,7 @@ async fn main() {
     tokio::spawn(api::run_settlement_loop(
         Arc::clone(&state),
         settlement_config,
+        reconciliation_candidates,
     ));
 
     let router = api::app(state);

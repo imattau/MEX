@@ -35,7 +35,11 @@ pub struct SettlementConfig {
     pub own_settlement_pubkey: [u8; 32],
 }
 
-pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: SettlementConfig) {
+pub async fn run_settlement_loop(
+    state: Arc<RwLock<AppState>>,
+    config: SettlementConfig,
+    reconciliation_candidates: Vec<(engine::Match, [u8; 32])>,
+) {
     let chain_adapter = match EthereumAdapter::new(
         &config.rpc_url,
         &config.node_private_key,
@@ -73,6 +77,24 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
         0,
         0,
     );
+
+    if !reconciliation_candidates.is_empty() {
+        // Stage P4-4c: an immediate poll (not waiting for the first
+        // sleep below) so escrow resolution actually works for this
+        // pass -- ChainSync starts with an empty EscrowRegistry, and
+        // resolve_address needs it populated to find any of these
+        // candidates' payer addresses at all.
+        if let Err(e) = chain_sync.poll_once().await {
+            tracing::warn!(error = %e, "settlement loop: initial chain sync poll before reconciliation failed -- reconciliation candidates will be left as pending, retried via the normal settlement path");
+        }
+        reconcile_replayed_confirmations(
+            &state,
+            &chain_adapter,
+            &chain_sync,
+            reconciliation_candidates,
+        )
+        .await;
+    }
 
     tracing::info!("settlement loop started");
 
@@ -176,6 +198,94 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
                     }
                 }
             }
+        }
+    }
+}
+
+// Stage P4-4c: for every match replay reconstructed as "still awaiting
+// settlement" (see ReplaySummary's own docs on why these specifically
+// are ambiguous, not every pending match), asks the chain directly
+// whether it was actually already settled before the crash being
+// recovered from. Generic over ChainAdapter (not tied to EthereumAdapter)
+// so tests can drive this against watchtower::MockOnChainState instead
+// of a live chain.
+//
+// Deliberately conservative on anything inconclusive: a resolution
+// failure (RPC hiccup, this trader's escrow not yet synced) leaves the
+// candidate exactly as replay already left it -- still pending, to be
+// retried through the normal settlement path. Combined with Stage
+// P4-4a's fix, that's now safe from silent loss (it'll keep being
+// retried, not dropped) but not free: if it truly WAS already settled
+// and this reconciliation pass simply couldn't tell, every future
+// submission attempt for it will keep reverting harmlessly (the
+// contract's own idempotency check, see is_trade_settled's own docs)
+// rather than ever resolving. A real, bounded residual gap -- wasted
+// gas/RPC calls, never a fund-safety or data-loss issue -- not solved
+// here; periodic (not just boot-time) reconciliation would close it.
+async fn reconcile_replayed_confirmations(
+    state: &Arc<RwLock<AppState>>,
+    chain_adapter: &impl ChainAdapter,
+    chain_sync: &ChainSync<impl Provider>,
+    candidates: Vec<(engine::Match, [u8; 32])>,
+) {
+    for (m, trade_hash) in candidates {
+        // Same payer-derivation logic build_settlement_trades uses --
+        // a trade's settlement record only exists on the PAYER's
+        // escrow (see ChainAdapter::is_trade_settled's own docs).
+        let payer_pubkey = if m.fee_payer == m.maker_trader {
+            m.maker_trader
+        } else {
+            m.taker_trader
+        };
+        let Some(payer_addr) = resolve_address(chain_sync, payer_pubkey) else {
+            tracing::debug!(order_id = ?m.maker_order_id, "reconciliation: payer's escrow not yet resolvable, leaving as pending");
+            continue;
+        };
+        let payer_account = address_to_account(payer_addr);
+
+        match chain_adapter
+            .is_trade_settled(payer_account, trade_hash)
+            .await
+        {
+            Ok(true) => {
+                tracing::info!(order_id = ?m.maker_order_id, taker_order_id = ?m.taker_order_id, "reconciliation: a replayed confirmation was already settled on-chain -- removing from local pending state, not resubmitting");
+                mark_reconciled_as_settled(state, (m.maker_order_id, m.taker_order_id));
+            }
+            Ok(false) => {
+                tracing::debug!(order_id = ?m.maker_order_id, "reconciliation: not yet settled on-chain, left as pending");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, order_id = ?m.maker_order_id, "reconciliation: is_trade_settled query failed, leaving as pending");
+            }
+        }
+    }
+}
+
+// Stage P4-4c: the actual state mutation once reconciliation confirms a
+// replayed confirmation was already settled on-chain -- removes it from
+// confirmed_trade_hashes and surgically drops it out of the batcher's
+// queue (via SettlementBatcher::retain_pending, see its own docs on why
+// this can't just wait for the next process_batches call), then
+// retroactively writes the BatchSubmitted checkpoint the original crash
+// prevented, self-healing so a future crash doesn't hit the same
+// ambiguity again for this trade. Split out from
+// reconcile_replayed_confirmations so it's testable without a live
+// chain connection (the async orchestration around it -- resolving the
+// payer's address via ChainSync, calling ChainAdapter::is_trade_settled
+// -- isn't; same boundary the rest of this module's live-network code
+// already has, see restore_failed_chunk's own docs for the precedent).
+fn mark_reconciled_as_settled(state: &Arc<RwLock<AppState>>, key: ([u8; 32], [u8; 32])) {
+    let persistence_log = {
+        let mut guard = state.write().unwrap();
+        guard.confirmed_trade_hashes.remove(&key);
+        guard
+            .batcher
+            .retain_pending(|q| (q.maker_order_id, q.taker_order_id) != key);
+        guard.persistence.clone()
+    };
+    if let Some(log) = persistence_log {
+        if let Err(e) = log.append_batch_submitted(vec![key]) {
+            tracing::error!(error = %e, "reconciliation: failed to durably checkpoint a retroactively-discovered settlement -- a future crash could hit this same ambiguity again for this trade");
         }
     }
 }
@@ -435,6 +545,88 @@ mod tests {
         assert!(
             settled_ids.contains(&m2.maker_order_id),
             "trade 2 must be back in the batcher's queue after restore_failed_chunk"
+        );
+    }
+
+    // Stage P4-4c: the state-mutation half of reconciliation -- given a
+    // match replay put back into "pending settlement" (confirmed_trade_
+    // hashes entry + sitting in the batcher's queue, exactly what
+    // replay_persistence_log's CommitConfirmed handling produces), and
+    // a chain query that determined it was ACTUALLY already settled,
+    // mark_reconciled_as_settled must undo both without resubmitting
+    // it, and must leave a genuinely-still-pending match untouched.
+    #[test]
+    fn test_mark_reconciled_as_settled_removes_only_the_targeted_match() {
+        let mut state = test_state();
+        let already_settled = make_match(1);
+        let still_pending = make_match(10);
+        state.confirmed_trade_hashes.insert(
+            (
+                already_settled.maker_order_id,
+                already_settled.taker_order_id,
+            ),
+            [0xAAu8; 32],
+        );
+        state.confirmed_trade_hashes.insert(
+            (still_pending.maker_order_id, still_pending.taker_order_id),
+            [0xBBu8; 32],
+        );
+        state.batcher.deposit(
+            already_settled.taker_trader,
+            &already_settled.symbol,
+            u64::MAX / 2,
+        );
+        state.batcher.deposit(
+            still_pending.taker_trader,
+            &still_pending.symbol,
+            u64::MAX / 2,
+        );
+        state.batcher.enqueue(already_settled.clone());
+        state.batcher.enqueue(still_pending.clone());
+
+        let state = Arc::new(RwLock::new(state));
+        mark_reconciled_as_settled(
+            &state,
+            (
+                already_settled.maker_order_id,
+                already_settled.taker_order_id,
+            ),
+        );
+
+        let guard = state.read().unwrap();
+        assert!(
+            !guard.confirmed_trade_hashes.contains_key(&(
+                already_settled.maker_order_id,
+                already_settled.taker_order_id
+            )),
+            "the reconciled-as-settled match must be removed from confirmed_trade_hashes"
+        );
+        assert!(
+            guard
+                .confirmed_trade_hashes
+                .contains_key(&(still_pending.maker_order_id, still_pending.taker_order_id)),
+            "an untargeted match's confirmed_trade_hashes entry must survive"
+        );
+        drop(guard);
+
+        // Both are Instant tier (make_match's default) -- two calls to
+        // drain both tier-queue slots, same as the sibling test above.
+        let mut remaining_ids: Vec<[u8; 32]> = Vec::new();
+        for _ in 0..2 {
+            let batches = state.write().unwrap().batcher.process_batches();
+            remaining_ids.extend(
+                batches
+                    .iter()
+                    .flat_map(|b| b.trades.iter().map(|t| t.maker_order_id)),
+            );
+        }
+        assert!(
+            !remaining_ids.contains(&already_settled.maker_order_id),
+            "the reconciled-as-settled match must not be resubmitted"
+        );
+        assert!(
+            remaining_ids.contains(&still_pending.maker_order_id),
+            "the untargeted match must still settle normally"
         );
     }
 }

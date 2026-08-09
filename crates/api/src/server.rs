@@ -573,6 +573,26 @@ fn confirm_committed_locally(guard: &mut AppState, m: Match, trade_hash: [u8; 32
     guard.batcher.enqueue(m);
 }
 
+// Stage P4-4c: every match replay reconstructed as "still awaiting
+// settlement" (a CommitConfirmed entry with no later BatchSubmitted
+// checkpoint) -- exactly the population whose true settlement status is
+// AMBIGUOUS from the local WAL alone, since a real on-chain submission
+// could have succeeded right before the crash that's being recovered
+// from, just before the checkpoint's own fsync completed (see Stage
+// P4-2's own docs on this exact window). run_settlement_loop reconciles
+// each of these against the chain directly (ChainAdapter::
+// is_trade_settled) once at its own startup, before ever calling
+// process_batches on a queue that might still contain one of them --
+// see run_settlement_loop's own docs for why this can't happen any
+// earlier (no chain access exists yet at replay time) or any later (a
+// chunk's ZK proof is generated over its exact trade set, so removing
+// an already-settled trade from an already-proven chunk would leave the
+// proof mismatched).
+pub struct ReplaySummary {
+    pub entries_replayed: usize,
+    pub reconciliation_candidates: Vec<(Match, [u8; 32])>,
+}
+
 // Stage P4-1/P4-2: rebuilds order_book/order_log/match_log/
 // pending_commits/applied_order_ids/confirmed_trade_hashes/batcher by
 // replaying every durably-recorded entry in `log`, in the order they
@@ -603,7 +623,7 @@ fn confirm_committed_locally(guard: &mut AppState, m: Match, trade_hash: [u8; 32
 pub fn replay_persistence_log(
     guard: &mut AppState,
     log: &crate::persistence::PersistenceLog,
-) -> Result<usize, String> {
+) -> Result<ReplaySummary, String> {
     use crate::persistence::WalEntry;
 
     let entries = log.replay()?;
@@ -624,6 +644,8 @@ pub fn replay_persistence_log(
     // pass) has been replayed. Collected here, handled in a final pass
     // once the loop below finishes.
     let mut queued_orders: Vec<(Order, OrderReceipt)> = Vec::new();
+    // Stage P4-4c: see ReplaySummary's own docs.
+    let mut reconciliation_candidates: Vec<(Match, [u8; 32])> = Vec::new();
 
     for entry in entries {
         match entry {
@@ -638,6 +660,7 @@ pub fn replay_persistence_log(
                 let key = (m.maker_order_id, m.taker_order_id);
                 guard.pending_commits.remove(&key);
                 if !settled_keys.contains(&key) {
+                    reconciliation_candidates.push((m.clone(), trade_hash));
                     confirm_committed_locally(guard, m, trade_hash);
                 }
             }
@@ -667,7 +690,10 @@ pub fn replay_persistence_log(
         guard.pending_order_data.insert(order.id, (order, receipt));
     }
 
-    Ok(count)
+    Ok(ReplaySummary {
+        entries_replayed: count,
+        reconciliation_candidates,
+    })
 }
 
 #[instrument(skip(state))]

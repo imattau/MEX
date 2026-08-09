@@ -4,7 +4,7 @@ pub use ledger::BalanceLedger;
 
 use common::{NodeId, SettlementPreference};
 use engine::Match;
-use prover::{TradeBatch, BACKEND, ProverBackend, MAX_BATCH_TRADES};
+use prover::{ProverBackend, TradeBatch, BACKEND, MAX_BATCH_TRADES};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -80,7 +80,11 @@ impl SettlementBatcher {
             .balance_of(trader, symbol)
     }
 
-    pub fn with_reputation(mut self, node_id: NodeId, engine: reputation::ReputationEngine) -> Self {
+    pub fn with_reputation(
+        mut self,
+        node_id: NodeId,
+        engine: reputation::ReputationEngine,
+    ) -> Self {
         self.node_id = node_id;
         self.reputation = Some(engine);
         self
@@ -99,6 +103,22 @@ impl SettlementBatcher {
                 self.standard_queue.push_back(trade);
             }
         }
+    }
+
+    // Stage P4-4c: surgically drops matches out of whichever tier queue
+    // they're sitting in, without draining/proving anything -- unlike
+    // process_batches, which drains and proves an entire tier's queue at
+    // once. Needed because boot-time settlement reconciliation (see
+    // api::run_settlement_loop) has to remove a SPECIFIC match found to
+    // already be settled on-chain BEFORE build_batch ever runs over the
+    // queue, not after: a chunk's ZK proof is generated over its exact
+    // trade set, so removing a trade from an already-proven chunk would
+    // leave the proof no longer matching what's actually submitted.
+    // `keep` returning false drops that match; true leaves it queued.
+    pub fn retain_pending<F: FnMut(&Match) -> bool>(&mut self, mut keep: F) {
+        self.instant_queue.retain(&mut keep);
+        self.express_queue.retain(&mut keep);
+        self.standard_queue.retain(&mut keep);
     }
 
     pub fn process_batches(&mut self) -> Vec<SettlementBatch> {
@@ -158,10 +178,7 @@ impl SettlementBatcher {
 
         if should_flush && !self.express_queue.is_empty() {
             let trades: Vec<Match> = self.express_queue.drain(..).collect();
-            tracing::info!(
-                count = trades.len(),
-                "Processing express settlement batch"
-            );
+            tracing::info!(count = trades.len(), "Processing express settlement batch");
             self.express_timer = Instant::now();
             let batch = self.build_batch(trades, SettlementPreference::Express);
             Some(batch)
@@ -176,10 +193,7 @@ impl SettlementBatcher {
 
         if should_flush && !self.standard_queue.is_empty() {
             let trades: Vec<Match> = self.standard_queue.drain(..).collect();
-            tracing::info!(
-                count = trades.len(),
-                "Processing standard settlement batch"
-            );
+            tracing::info!(count = trades.len(), "Processing standard settlement batch");
             self.standard_timer = Instant::now();
             let batch = self.build_batch(trades, SettlementPreference::Standard);
             Some(batch)
@@ -226,7 +240,8 @@ impl SettlementBatcher {
         let mut trade_batches = Vec::new();
         let mut total_value: u64 = 0;
 
-        let mut by_node: std::collections::BTreeMap<[u8; 32], Vec<Match>> = std::collections::BTreeMap::new();
+        let mut by_node: std::collections::BTreeMap<[u8; 32], Vec<Match>> =
+            std::collections::BTreeMap::new();
         for trade in trades {
             by_node.entry(trade.assigned_node).or_default().push(trade);
         }
@@ -282,7 +297,10 @@ impl SettlementBatcher {
             // produced fail that check, undetected until something
             // actually called verify_proof against a real batch (see
             // watchtower_node, added in the same change as this fix).
-            let chunk_total_value: u64 = chunk_trades.iter().map(|t| t.price as u64 * t.amount as u64).sum();
+            let chunk_total_value: u64 = chunk_trades
+                .iter()
+                .map(|t| t.price as u64 * t.amount as u64)
+                .sum();
             let batch = TradeBatch {
                 trades: chunk_trades.clone(),
                 maker_balances: chunk_maker_balances,
@@ -298,16 +316,17 @@ impl SettlementBatcher {
                     // fully undone rather than leaving a partially-applied
                     // chunk whose proof no longer matches what actually
                     // got settled.
-                    let mut debited_so_far: Vec<(&Match, u64)> = Vec::with_capacity(chunk_trades.len());
+                    let mut debited_so_far: Vec<(&Match, u64)> =
+                        Vec::with_capacity(chunk_trades.len());
                     let mut chunk_failed = false;
 
                     for trade in &chunk_trades {
                         let trade_value = trade.price as u64 * trade.amount as u64;
-                        let debited = self
-                            .ledger
-                            .lock()
-                            .expect("ledger mutex poisoned")
-                            .debit(trade.taker_trader, &trade.symbol, trade_value);
+                        let debited = self.ledger.lock().expect("ledger mutex poisoned").debit(
+                            trade.taker_trader,
+                            &trade.symbol,
+                            trade_value,
+                        );
 
                         match debited {
                             Ok(()) => debited_so_far.push((trade, trade_value)),
@@ -436,7 +455,11 @@ mod tests {
 
         let batches = batcher.process_batches();
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].trades.len(), 0, "insolvent trade must be dropped, not proven with a fake balance");
+        assert_eq!(
+            batches[0].trades.len(),
+            0,
+            "insolvent trade must be dropped, not proven with a fake balance"
+        );
         assert_eq!(batches[0].proofs.len(), 0);
     }
 
@@ -478,7 +501,11 @@ mod tests {
         let batches = batcher.process_batches();
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
-        assert_eq!(batch.trades.len(), n, "every solvent trade across every pair must be settled");
+        assert_eq!(
+            batch.trades.len(),
+            n,
+            "every solvent trade across every pair must be settled"
+        );
 
         let expected_proof_count = n.div_ceil(MAX_BATCH_TRADES);
         assert_eq!(batch.proofs.len(), expected_proof_count);
@@ -496,7 +523,11 @@ mod tests {
         // per-chunk debit/credit logic, not just the proof-generation side.
         for i in 0..n {
             let maker = [(i * 2) as u8; 32];
-            assert_eq!(batcher.balance_of(maker, "BTC-USD"), 1000, "maker {i} should have been credited 100*10");
+            assert_eq!(
+                batcher.balance_of(maker, "BTC-USD"),
+                1000,
+                "maker {i} should have been credited 100*10"
+            );
         }
     }
 
@@ -538,7 +569,11 @@ mod tests {
         let batches = batcher.process_batches();
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
-        assert_eq!(batch.trade_batches.len(), 1, "one proof chunk should produce one TradeBatch");
+        assert_eq!(
+            batch.trade_batches.len(),
+            1,
+            "one proof chunk should produce one TradeBatch"
+        );
 
         let trade_batch = &batch.trade_batches[0];
         let proof = &batch.proofs[0];
@@ -593,12 +628,20 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
         assert_eq!(batch.trades.len(), n);
-        assert_eq!(batch.proofs.len(), 2, "one chunk per assigned_node, since neither group alone hits MAX_BATCH_TRADES");
+        assert_eq!(
+            batch.proofs.len(),
+            2,
+            "one chunk per assigned_node, since neither group alone hits MAX_BATCH_TRADES"
+        );
 
         for trade_batch in &batch.trade_batches {
             let nodes: std::collections::HashSet<[u8; 32]> =
                 trade_batch.trades.iter().map(|t| t.assigned_node).collect();
-            assert_eq!(nodes.len(), 1, "every trade in a single proof chunk must share the same assigned_node");
+            assert_eq!(
+                nodes.len(),
+                1,
+                "every trade in a single proof chunk must share the same assigned_node"
+            );
         }
     }
 
@@ -620,6 +663,43 @@ mod tests {
         let has_express = batches.iter().any(|b| b.trades.len() == 2);
         assert!(has_instant);
         assert!(has_express);
+    }
+
+    // Stage P4-4c: retain_pending must remove a specific match no matter
+    // which tier queue it's actually sitting in, and must leave every
+    // other match (in every queue) untouched.
+    #[test]
+    fn test_retain_pending_drops_matched_trade_from_any_tier_queue() {
+        let mut batcher = SettlementBatcher::new();
+        batcher.deposit([2u8; 32], "BTC-USD", 1_000_000);
+
+        batcher.enqueue(make_match(SettlementPreference::Standard, 1));
+        batcher.enqueue(make_match(SettlementPreference::Instant, 10));
+        batcher.enqueue(make_match(SettlementPreference::Express, 20));
+
+        // Drop only the Instant-tier one (maker_order_id == [10u8; 32]).
+        batcher.retain_pending(|m| m.maker_order_id != [10u8; 32]);
+
+        batcher.standard_batch_size = 1;
+        batcher.express_batch_size = 1;
+        let batches = batcher.process_batches();
+        let remaining_ids: Vec<[u8; 32]> = batches
+            .iter()
+            .flat_map(|b| b.trades.iter().map(|t| t.maker_order_id))
+            .collect();
+
+        assert!(
+            remaining_ids.contains(&[1u8; 32]),
+            "an untargeted Standard-tier match must survive retain_pending"
+        );
+        assert!(
+            remaining_ids.contains(&[20u8; 32]),
+            "an untargeted Express-tier match must survive retain_pending"
+        );
+        assert!(
+            !remaining_ids.contains(&[10u8; 32]),
+            "the targeted Instant-tier match must be gone after retain_pending"
+        );
     }
 
     #[test]
