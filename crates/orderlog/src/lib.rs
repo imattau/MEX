@@ -117,8 +117,17 @@ pub fn sign_receipt(
         .as_micros() as u64;
 
     let msg = receipt_message(
-        order_id, trader, symbol, side, price, amount, nonce, expiry,
-        settlement_preference, settlement_requester, received_at_us,
+        order_id,
+        trader,
+        symbol,
+        side,
+        price,
+        amount,
+        nonce,
+        expiry,
+        settlement_preference,
+        settlement_requester,
+        received_at_us,
     );
     let signature = signing_key.sign(&msg);
 
@@ -200,7 +209,9 @@ pub struct HashChainLog<T> {
 
 impl<T> Default for HashChainLog<T> {
     fn default() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 }
 
@@ -211,14 +222,26 @@ impl<T: Serialize + Clone> HashChainLog<T> {
 
     pub fn append(&mut self, payload: T) -> &LogEntry<T> {
         let seq = self.entries.len() as u64;
-        let prev_hash = self.entries.last().map(|e| e.entry_hash).unwrap_or([0u8; 32]);
+        let prev_hash = self
+            .entries
+            .last()
+            .map(|e| e.entry_hash)
+            .unwrap_or([0u8; 32]);
         let entry_hash = compute_entry_hash(seq, prev_hash, &payload);
-        self.entries.push(LogEntry { seq, prev_hash, entry_hash, payload });
+        self.entries.push(LogEntry {
+            seq,
+            prev_hash,
+            entry_hash,
+            payload,
+        });
         self.entries.last().unwrap()
     }
 
     pub fn root(&self) -> [u8; 32] {
-        self.entries.last().map(|e| e.entry_hash).unwrap_or([0u8; 32])
+        self.entries
+            .last()
+            .map(|e| e.entry_hash)
+            .unwrap_or([0u8; 32])
     }
 
     pub fn len(&self) -> usize {
@@ -253,7 +276,9 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         if !verify_next_entry(self.root(), self.len() as u64, &entry) {
             return Err(format!(
                 "entry seq={} does not validly extend this log (current root {}, len {})",
-                entry.seq, hex_prefix(&self.root()), self.len()
+                entry.seq,
+                hex_prefix(&self.root()),
+                self.len()
             ));
         }
         self.entries.push(entry);
@@ -261,24 +286,37 @@ impl<T: Serialize + Clone> HashChainLog<T> {
     }
 }
 
-// Recomputes the hash chain over `entries` from scratch and confirms it's
-// internally consistent (each entry's prev_hash/entry_hash match what
-// compute_entry_hash produces from the entry before it, and seq is
-// contiguous from 0) -- this is what makes the log auditable by someone
-// who doesn't trust the server that served it: if this returns true, no
-// entry could have been inserted, deleted, or reordered after the fact
-// without detection, regardless of who's asking.
-pub fn verify_chain<T: Serialize + Clone>(entries: &[LogEntry<T>]) -> bool {
-    let mut prev_hash = [0u8; 32];
+// Stage P4-6a: the general form verify_chain (below) is a special case
+// of -- confirms `entries` is an internally consistent, contiguous
+// continuation of a chain whose next expected sequence number is
+// `start_seq` and whose root (prev_hash for that next entry) is
+// `start_prev_hash`, WITHOUT needing anything before `start_seq` in
+// memory at all. This is what makes an archived prefix + a live "hot
+// window" independently verifiable as two separate calls whose results
+// compose: verify_chain_segment(0, [0;32], archived_prefix) confirms
+// the archive, verify_chain_segment(archived_prefix.len(), archived_
+// prefix.last().entry_hash, hot_window) confirms the hot window
+// genuinely continues it -- an auditor never needs the whole history
+// loaded at once to be convinced no entry anywhere was inserted,
+// deleted, or reordered.
+pub fn verify_chain_segment<T: Serialize + Clone>(
+    start_seq: u64,
+    start_prev_hash: [u8; 32],
+    entries: &[LogEntry<T>],
+) -> bool {
+    let mut prev_hash = start_prev_hash;
     for (i, entry) in entries.iter().enumerate() {
-        if entry.seq != i as u64 {
+        let Some(expected_seq) = start_seq.checked_add(i as u64) else {
+            return false;
+        };
+        if entry.seq != expected_seq {
             return false;
         }
         if entry.prev_hash != prev_hash {
             return false;
         }
-        let expected = compute_entry_hash(entry.seq, entry.prev_hash, &entry.payload);
-        if expected != entry.entry_hash {
+        let expected_hash = compute_entry_hash(entry.seq, entry.prev_hash, &entry.payload);
+        if expected_hash != entry.entry_hash {
             return false;
         }
         prev_hash = entry.entry_hash;
@@ -286,12 +324,30 @@ pub fn verify_chain<T: Serialize + Clone>(entries: &[LogEntry<T>]) -> bool {
     true
 }
 
+// Recomputes the hash chain over `entries` from scratch, starting at the
+// genesis position (seq 0, the zero prev_hash HashChainLog::new's first
+// append always uses) -- this is what makes the log auditable by
+// someone who doesn't trust the server that served it: if this returns
+// true, no entry could have been inserted, deleted, or reordered after
+// the fact without detection, regardless of who's asking. The special
+// case of verify_chain_segment where the caller holds the ENTIRE
+// history, not just some later continuation of it -- see that
+// function's own docs for verifying an archived-and-truncated log
+// without needing everything in memory at once.
+pub fn verify_chain<T: Serialize + Clone>(entries: &[LogEntry<T>]) -> bool {
+    verify_chain_segment(0, [0u8; 32], entries)
+}
+
 // The single-entry version of verify_chain's check: does `entry` validly
 // extend a log whose current root is `current_root` and whose next
 // expected sequence number is `expected_seq`? Used by
 // HashChainLog::try_append_remote for a mirror that verifies each entry
 // as it arrives instead of re-checking the whole chain from scratch.
-pub fn verify_next_entry<T: Serialize>(current_root: [u8; 32], expected_seq: u64, entry: &LogEntry<T>) -> bool {
+pub fn verify_next_entry<T: Serialize>(
+    current_root: [u8; 32],
+    expected_seq: u64,
+    entry: &LogEntry<T>,
+) -> bool {
     entry.seq == expected_seq
         && entry.prev_hash == current_root
         && entry.entry_hash == compute_entry_hash(entry.seq, entry.prev_hash, &entry.payload)
@@ -309,14 +365,38 @@ mod tests {
     #[test]
     fn test_sign_and_verify_roundtrip() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let receipt = sign_receipt(&signing_key, [1u8; 32], [2u8; 32], "ETH-USD", OrderSide::Buy, 3000, 1, 42, 9999, SettlementPreference::Standard, SettlementRequester::Seller);
+        let receipt = sign_receipt(
+            &signing_key,
+            [1u8; 32],
+            [2u8; 32],
+            "ETH-USD",
+            OrderSide::Buy,
+            3000,
+            1,
+            42,
+            9999,
+            SettlementPreference::Standard,
+            SettlementRequester::Seller,
+        );
         assert!(verify_receipt(&receipt));
     }
 
     #[test]
     fn test_tampered_receipt_fails_verification() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let mut receipt = sign_receipt(&signing_key, [1u8; 32], [2u8; 32], "ETH-USD", OrderSide::Buy, 3000, 1, 42, 9999, SettlementPreference::Standard, SettlementRequester::Seller);
+        let mut receipt = sign_receipt(
+            &signing_key,
+            [1u8; 32],
+            [2u8; 32],
+            "ETH-USD",
+            OrderSide::Buy,
+            3000,
+            1,
+            42,
+            9999,
+            SettlementPreference::Standard,
+            SettlementRequester::Seller,
+        );
         receipt.price = 4000;
         assert!(!verify_receipt(&receipt));
     }
@@ -325,7 +405,19 @@ mod tests {
     fn test_wrong_key_fails_verification() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let other_key = SigningKey::generate(&mut OsRng);
-        let mut receipt = sign_receipt(&signing_key, [1u8; 32], [2u8; 32], "ETH-USD", OrderSide::Buy, 3000, 1, 42, 9999, SettlementPreference::Standard, SettlementRequester::Seller);
+        let mut receipt = sign_receipt(
+            &signing_key,
+            [1u8; 32],
+            [2u8; 32],
+            "ETH-USD",
+            OrderSide::Buy,
+            3000,
+            1,
+            42,
+            9999,
+            SettlementPreference::Standard,
+            SettlementRequester::Seller,
+        );
         receipt.node_pubkey = other_key.verifying_key().to_bytes();
         assert!(!verify_receipt(&receipt));
     }
@@ -341,6 +433,65 @@ mod tests {
         assert_eq!(log.entries()[1].prev_hash, log.entries()[0].entry_hash);
         assert_eq!(log.entries()[2].prev_hash, log.entries()[1].entry_hash);
         assert_eq!(log.root(), log.entries()[2].entry_hash);
+    }
+
+    // Stage P4-6a: the actual point of verify_chain_segment -- splitting
+    // a log into an "archived" prefix and a "hot" suffix, verifying each
+    // independently (neither call ever sees the other half), and
+    // confirming they compose into the same trust guarantee whole-log
+    // verify_chain would have given.
+    #[test]
+    fn test_verify_chain_segment_composes_across_an_archived_boundary() {
+        let mut log: HashChainLog<u64> = HashChainLog::new();
+        for i in 0..6u64 {
+            log.append(i);
+        }
+        let all = log.entries();
+        let (archived, hot) = all.split_at(3);
+
+        // The archived prefix alone verifies exactly like a whole,
+        // self-contained log would (genesis start).
+        assert!(verify_chain_segment(0, [0u8; 32], archived));
+
+        // The hot suffix, in isolation, is NOT verifiable against
+        // genesis -- it doesn't start at seq 0.
+        assert!(!verify_chain_segment(0, [0u8; 32], hot));
+
+        // But it DOES verify as a continuation from exactly where the
+        // archived prefix left off.
+        let boundary_root = archived.last().unwrap().entry_hash;
+        assert!(verify_chain_segment(3, boundary_root, hot));
+
+        // A wrong boundary root (as if the archive had been tampered
+        // with, or the wrong checkpoint was used) must be rejected.
+        assert!(!verify_chain_segment(3, [0xFFu8; 32], hot));
+    }
+
+    #[test]
+    fn test_verify_chain_segment_matches_verify_chain_for_a_full_genesis_log() {
+        let mut log: HashChainLog<u64> = HashChainLog::new();
+        log.append(10);
+        log.append(20);
+        assert!(verify_chain_segment(0, [0u8; 32], log.entries()));
+        assert_eq!(
+            verify_chain_segment(0, [0u8; 32], log.entries()),
+            verify_chain(log.entries())
+        );
+    }
+
+    #[test]
+    fn test_verify_chain_segment_still_catches_tampering_within_a_segment() {
+        let mut log: HashChainLog<u64> = HashChainLog::new();
+        for i in 0..6u64 {
+            log.append(i);
+        }
+        let all = log.entries();
+        let (archived, hot) = all.split_at(3);
+        let boundary_root = archived.last().unwrap().entry_hash;
+
+        let mut tampered_hot = hot.to_vec();
+        tampered_hot[0].payload = 999;
+        assert!(!verify_chain_segment(3, boundary_root, &tampered_hot));
     }
 
     #[test]
@@ -396,7 +547,9 @@ mod tests {
 
         let mut mirror: HashChainLog<u64> = HashChainLog::new();
         for entry in source.entries() {
-            mirror.try_append_remote(entry.clone()).expect("valid entry should be accepted");
+            mirror
+                .try_append_remote(entry.clone())
+                .expect("valid entry should be accepted");
         }
         assert_eq!(mirror.root(), source.root());
         assert_eq!(mirror.len(), source.len());
