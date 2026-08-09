@@ -25,6 +25,14 @@ pub struct SettlementConfig {
     pub registry_address: String,
     pub fee_recipient: Address,
     pub poll_interval: Duration,
+    // This node's own settlement pubkey (matches OrderBook::assign_node's
+    // entries, see main.rs's MEX_SETTLEMENT_NODE_PUBKEY /
+    // MEX_SETTLEMENT_ACTIVE_NODES docs). A chunk is only submitted here if
+    // every trade in it -- SettlementBatcher::build_batch now guarantees
+    // this is homogeneous per chunk, see its own docs -- is assigned to
+    // this pubkey; chunks assigned to another active node are silently
+    // skipped, not errored, since submitting them is that OTHER node's job.
+    pub own_settlement_pubkey: [u8; 32],
 }
 
 pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: SettlementConfig) {
@@ -81,6 +89,22 @@ pub async fn run_settlement_loop(state: Arc<RwLock<AppState>>, config: Settlemen
             {
                 let chunk = &batch.trades[idx..idx + count];
                 idx += count;
+
+                // build_batch groups trades by assigned_node before
+                // chunking, so every trade in a chunk shares the same
+                // assigned_node -- checking the first is checking all of
+                // them. An empty chunk can't reach here (build_batch skips
+                // those), so this is always Some.
+                let chunk_assigned_node = chunk[0].assigned_node;
+                if chunk_assigned_node != config.own_settlement_pubkey {
+                    tracing::debug!(
+                        assigned_node = %hex::encode(chunk_assigned_node),
+                        own = %hex::encode(config.own_settlement_pubkey),
+                        count,
+                        "skipping settlement chunk assigned to a different node"
+                    );
+                    continue;
+                }
 
                 match build_settlement_trades(&state, &chain_sync, chunk) {
                     Some(settlement_trades) => {

@@ -18,6 +18,25 @@
 //                             to configure the OrderBook's active-node set
 //                             so matches actually get assigned to a real,
 //                             active node instead of the zero sentinel.
+//   MEX_SETTLEMENT_ACTIVE_NODES  Optional, comma-separated hex pubkeys,
+//                             e.g. "aa..,bb..,cc..". The full round-robin
+//                             assignment set for OrderBook::assign_node --
+//                             every replica that's meant to share
+//                             settlement-submission duty MUST be launched
+//                             with the exact SAME list in the exact SAME
+//                             order (assign_node's round-robin cursor is
+//                             purely positional, so a divergent order or
+//                             membership makes replicas assign the same
+//                             match to different nodes). Unset defaults to
+//                             a single-element list containing just this
+//                             node's own MEX_SETTLEMENT_NODE_PUBKEY --
+//                             reproduces the pre-P3c-4 behavior exactly
+//                             (every match trivially "assigned" to
+//                             whichever single node is running). This
+//                             node's own pubkey must appear somewhere in
+//                             the list if set, or it will never be the
+//                             assigned submitter for anything (fails loud
+//                             at startup).
 //   MEX_SETTLEMENT_POLL_SECS Defaults to 5.
 //   MEX_FEE_BASE_GAS_PRICE   Optional, gwei. Feeds FeeCalculator's gas-price
 //                            term. Unset means FeeCalculator::default(),
@@ -210,8 +229,32 @@ async fn main() {
     };
     let receipt_pubkey_hex = hex::encode(receipt_signing_key.verifying_key().to_bytes());
 
+    let active_nodes: Vec<[u8; 32]> = match std::env::var("MEX_SETTLEMENT_ACTIVE_NODES") {
+        Ok(list) if !list.trim().is_empty() => {
+            let parsed: Vec<[u8; 32]> = list
+                .split(',')
+                .map(|entry| {
+                    let bytes = hex::decode(entry.trim().trim_start_matches("0x")).unwrap_or_else(|e| {
+                        eprintln!("MEX_SETTLEMENT_ACTIVE_NODES entry '{entry}' is not valid hex: {e}");
+                        std::process::exit(1);
+                    });
+                    bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+                        eprintln!("MEX_SETTLEMENT_ACTIVE_NODES entry '{entry}' must be exactly 32 bytes, got {}", v.len());
+                        std::process::exit(1);
+                    })
+                })
+                .collect();
+            if !parsed.contains(&node_pubkey) {
+                eprintln!("MEX_SETTLEMENT_ACTIVE_NODES is set but does not contain this node's own MEX_SETTLEMENT_NODE_PUBKEY -- this node would never be assigned any settlement submissions");
+                std::process::exit(1);
+            }
+            parsed
+        }
+        _ => vec![node_pubkey],
+    };
+
     let mut order_book = OrderBook::new(symbol.clone());
-    order_book.set_active_nodes(vec![node_pubkey]);
+    order_book.set_active_nodes(active_nodes);
     order_book.set_fee_calculator(fee_calculator);
 
     // Populated inside the match arm below, if a mesh gets constructed --
@@ -435,6 +478,7 @@ async fn main() {
         registry_address,
         fee_recipient,
         poll_interval: Duration::from_secs(poll_secs),
+        own_settlement_pubkey: node_pubkey,
     };
     tokio::spawn(api::run_settlement_loop(Arc::clone(&state), settlement_config));
 

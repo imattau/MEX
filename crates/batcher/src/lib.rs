@@ -197,6 +197,18 @@ impl SettlementBatcher {
     // dropped before proving, with a warning, instead of silently proving
     // over a fabricated balance.
     //
+    // Trades are first grouped by assigned_node, THEN chunked to
+    // MAX_BATCH_TRADES within each group -- never mixed across nodes within
+    // one chunk. This matters because one chunk shares exactly one proof
+    // and is submitted or rolled back as an atomic unit (see the two-phase
+    // debit below); a settlement-submission loop that only submits chunks
+    // assigned to itself (Stage P3c-4) can only gate at chunk granularity,
+    // so a chunk straddling two nodes' assignments would be unsettlable by
+    // either. This does mean average chunk fill drops as the active-node
+    // count grows (each node's share of a batch is proven separately), a
+    // real but accepted tradeoff for making per-node submission gating
+    // sound.
+    //
     // The ledger may be shared with a concurrently-running chain-sync
     // service (see SettlementBatcher::with_ledger), so the balance read
     // here and the debit below aren't atomic with each other -- a real
@@ -214,7 +226,18 @@ impl SettlementBatcher {
         let mut trade_batches = Vec::new();
         let mut total_value: u64 = 0;
 
-        for chunk in trades.chunks(MAX_BATCH_TRADES) {
+        let mut by_node: std::collections::BTreeMap<[u8; 32], Vec<Match>> = std::collections::BTreeMap::new();
+        for trade in trades {
+            by_node.entry(trade.assigned_node).or_default().push(trade);
+        }
+
+        for chunk in by_node.into_values().flat_map(|group| {
+            group
+                .chunks(MAX_BATCH_TRADES)
+                .map(|c| c.to_vec())
+                .collect::<Vec<_>>()
+        }) {
+            let chunk = chunk.as_slice();
             let mut chunk_trades = Vec::with_capacity(chunk.len());
             let mut chunk_maker_balances = Vec::with_capacity(chunk.len());
             let mut chunk_taker_balances = Vec::with_capacity(chunk.len());
@@ -523,6 +546,60 @@ mod tests {
             BACKEND.verify_proof(proof, trade_batch),
             "a batch this crate just produced and proved must pass independent re-verification against itself"
         );
+    }
+
+    // Stage P3c-4: settlement-submission gating by assigned_node only
+    // works if a proof chunk's trades all share one assigned_node (a
+    // node can only submit/skip a WHOLE chunk, since its debit/credit and
+    // proof are atomic per-chunk -- see build_batch's own docs). This
+    // proves that invariant directly: trades from two different assigned
+    // nodes, interleaved on enqueue, must never end up sharing a proof
+    // chunk, even when neither group alone fills MAX_BATCH_TRADES.
+    #[test]
+    fn test_proof_chunks_never_mix_assigned_nodes() {
+        let mut batcher = SettlementBatcher::new();
+        let node_a = [0xAAu8; 32];
+        let node_b = [0xBBu8; 32];
+        // Fewer than MAX_BATCH_TRADES per node, so a node-agnostic packer
+        // would have combined them into a single chunk.
+        let per_node = 3;
+        let n = per_node * 2;
+        batcher.standard_batch_size = n;
+
+        for i in 0..n {
+            let maker = [(i * 2) as u8; 32];
+            let taker = [(i * 2 + 1) as u8; 32];
+            batcher.deposit(taker, "BTC-USD", 1_000_000);
+            batcher.enqueue(Match {
+                maker_order_id: [i as u8; 32],
+                taker_order_id: [(i + 200) as u8; 32],
+                maker_trader: maker,
+                taker_trader: taker,
+                price: 100,
+                amount: 10,
+                timestamp_us: 0,
+                settlement_tier: SettlementPreference::Standard,
+                fee_basis_points: SettlementPreference::Standard.fee_basis_points(),
+                seller: taker,
+                fee_payer: taker,
+                symbol: "BTC-USD".to_string(),
+                // Interleaved: even trades to node_a, odd to node_b.
+                assigned_node: if i % 2 == 0 { node_a } else { node_b },
+                settlement_deadline: 0,
+            });
+        }
+
+        let batches = batcher.process_batches();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.trades.len(), n);
+        assert_eq!(batch.proofs.len(), 2, "one chunk per assigned_node, since neither group alone hits MAX_BATCH_TRADES");
+
+        for trade_batch in &batch.trade_batches {
+            let nodes: std::collections::HashSet<[u8; 32]> =
+                trade_batch.trades.iter().map(|t| t.assigned_node).collect();
+            assert_eq!(nodes.len(), 1, "every trade in a single proof chunk must share the same assigned_node");
+        }
     }
 
     #[test]

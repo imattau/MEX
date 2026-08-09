@@ -333,6 +333,48 @@ mod tests {
         assert_eq!(matches_a[0].amount, matches_b[0].amount);
     }
 
+    // Stage P3c-4: the property settlement-submission gating depends on --
+    // two SEPARATE replicas, each configured with the identical
+    // active_nodes list (in the identical order, as MEX_SETTLEMENT_
+    // ACTIVE_NODES requires every real replica to be) and fed the
+    // identical order sequence, must independently compute the identical
+    // assigned_node for every match. No extra coordination is needed for
+    // the assignment decision itself -- only for agreeing on the match
+    // sequence, which P3c-1/P3c-3 already cover.
+    #[test]
+    fn test_assigned_node_is_identical_across_separate_replicas_given_identical_active_nodes() {
+        let node_a = [0xAAu8; 32];
+        let node_b = [0xBBu8; 32];
+        let node_c = [0xCCu8; 32];
+        let active_nodes = vec![node_a, node_b, node_c];
+
+        let mut replica_1 = OrderBook::new("ETH-USD".to_string());
+        replica_1.set_active_nodes(active_nodes.clone());
+        let mut replica_2 = OrderBook::new("ETH-USD".to_string());
+        replica_2.set_active_nodes(active_nodes.clone());
+
+        let mut matches_1 = Vec::new();
+        let mut matches_2 = Vec::new();
+        for i in 0..6u8 {
+            let buy = create_test_order(i * 2 + 1, OrderSide::Buy, 3000, 10);
+            let sell = create_test_order(i * 2 + 2, OrderSide::Sell, 3000, 10);
+            replica_1.add_order_at(buy.clone(), 1_700_000_000_000_000);
+            matches_1.extend(replica_1.add_order_at(sell.clone(), 1_700_000_000_000_000));
+            replica_2.add_order_at(buy, 1_700_000_000_000_000);
+            matches_2.extend(replica_2.add_order_at(sell, 1_700_000_000_000_000));
+        }
+
+        assert_eq!(matches_1.len(), 6);
+        assert_eq!(matches_1.len(), matches_2.len());
+        for (m1, m2) in matches_1.iter().zip(&matches_2) {
+            assert_eq!(m1.assigned_node, m2.assigned_node, "two replicas with identical active_nodes config must assign the same match to the same node");
+        }
+        // Confirms the round-robin genuinely rotated across all three
+        // nodes, not just trivially agreeing on a constant.
+        let assigned: std::collections::HashSet<[u8; 32]> = matches_1.iter().map(|m| m.assigned_node).collect();
+        assert_eq!(assigned, [node_a, node_b, node_c].into_iter().collect());
+    }
+
     // Backward-compatibility regression check: plain add_order (still
     // used by every existing caller that doesn't need cross-replica
     // determinism -- tests, the simulator, agent-sim, etc.) must keep
