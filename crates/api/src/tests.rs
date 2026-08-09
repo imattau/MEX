@@ -1346,4 +1346,219 @@ mod tests {
             "the recovered match must still be in the batcher's queue, ready to actually settle"
         );
     }
+
+    // Stage P4-6d live validation: the actual point of extending the
+    // fetch endpoints -- after some order_log/match_log history has
+    // been archived (Stage P4-6c) and the rest stays hot, GET
+    // /api/v1/order_log/entries and /match_log/entries must still
+    // return the FULL requested range, transparently spanning the
+    // archive/hot boundary, and /root's `len` must reflect the true
+    // total rather than just what's left in the hot window.
+    #[tokio::test]
+    async fn test_log_entries_endpoint_spans_the_archive_hot_boundary() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use engine::OrderBook;
+        use rand::rngs::OsRng;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::persistence::PersistenceLog::open(dir.path()).unwrap();
+        let (tx, _) = broadcast::channel(100);
+        let state = Arc::new(RwLock::new(AppState {
+            node_id: common::NodeId(0),
+            order_book: OrderBook::new("ETH-USD".to_string()),
+            validator: OrderValidator::new(100),
+            ws_broadcast: tx,
+            reputation: reputation::ReputationEngine::new(),
+            pending_commits: std::collections::HashMap::new(),
+            confirmed_trade_hashes: std::collections::HashMap::new(),
+            batcher: batcher::SettlementBatcher::new(),
+            receipt_signing_key: SigningKey::generate(&mut OsRng),
+            order_log: orderlog::HashChainLog::new(),
+            match_log: orderlog::HashChainLog::new(),
+            mesh: None,
+            order_sequencer: None,
+            pending_order_data: std::collections::HashMap::new(),
+            applied_order_ids: std::collections::HashSet::new(),
+            persistence: Some(log.clone()),
+        }));
+        let app = app(Arc::clone(&state));
+
+        fn build_and_sign(
+            sk: &SigningKey,
+            trader: [u8; 32],
+            side: common::OrderSide,
+            price: u64,
+            amount: u64,
+            nonce: u64,
+        ) -> serde_json::Value {
+            let mut order_id = [0u8; 32];
+            order_id[0..16].copy_from_slice(&trader[0..16]);
+            order_id[16..24].copy_from_slice(&nonce.to_be_bytes());
+            let unsigned = common::Order {
+                id: order_id,
+                trader,
+                symbol: "ETH-USD".to_string(),
+                side,
+                price,
+                amount,
+                signature: Vec::new(),
+                nonce,
+                expiry: 0,
+                settlement_preference: common::SettlementPreference::Standard,
+                settlement_requester: common::SettlementRequester::Seller,
+            };
+            let msg = OrderValidator::serialize_order_message(&unsigned);
+            let signature = sk.sign(&msg).to_vec();
+            serde_json::json!({
+                "trader": trader, "symbol": "ETH-USD", "side": side,
+                "price": price, "amount": amount, "signature": signature,
+                "nonce": nonce, "expiry": 0,
+            })
+        }
+
+        async fn post_order(app: &axum::Router, body: &serde_json::Value) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(http::Method::POST)
+                        .uri("/api/v1/order")
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::from(serde_json::to_vec(body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let submit_resp: SubmitOrderResponse = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(submit_resp.success, "{:?}", submit_resp.error);
+        }
+
+        // 3 crossing pairs -- 6 order_log entries, 3 match_log entries.
+        let mut csprng = OsRng;
+        for i in 0..3u8 {
+            let sk_seller = SigningKey::generate(&mut csprng);
+            let pk_seller = sk_seller.verifying_key().to_bytes();
+            let sk_buyer = SigningKey::generate(&mut csprng);
+            let pk_buyer = sk_buyer.verifying_key().to_bytes();
+            post_order(
+                &app,
+                &build_and_sign(
+                    &sk_seller,
+                    pk_seller,
+                    common::OrderSide::Sell,
+                    3000 + i as u64,
+                    5,
+                    1,
+                ),
+            )
+            .await;
+            post_order(
+                &app,
+                &build_and_sign(
+                    &sk_buyer,
+                    pk_buyer,
+                    common::OrderSide::Buy,
+                    3000 + i as u64,
+                    5,
+                    1,
+                ),
+            )
+            .await;
+        }
+
+        let full_order_log_before: Vec<orderlog::LogEntry<orderlog::OrderReceipt>> = {
+            let guard = state.read().unwrap();
+            assert_eq!(guard.order_log.len(), 6);
+            assert_eq!(guard.match_log.len(), 3);
+            guard.order_log.entries().to_vec()
+        };
+
+        // Archive down to a hot window of 2 for each log -- forcing
+        // order_log's fetch to span the boundary (4 archived, 2 hot)
+        // and match_log's to span it too (1 archived, 2 hot).
+        {
+            let mut guard = state.write().unwrap();
+            crate::snapshot_loop::archive_and_trim_order_log(&mut guard, &log, 2);
+            crate::snapshot_loop::archive_and_trim_match_log(&mut guard, &log, 2);
+            assert_eq!(
+                guard.order_log.len(),
+                2,
+                "hot window should now hold only 2 order_log entries"
+            );
+            assert_eq!(
+                guard.match_log.len(),
+                2,
+                "hot window should now hold only 2 match_log entries"
+            );
+        }
+
+        async fn get_json<T: serde::de::DeserializeOwned>(
+            app: &axum::Router,
+            uri: &str,
+        ) -> (StatusCode, T) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("X-API-Key", "dev-default-key")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        // /root must report the TRUE total, not just the hot window.
+        let (status, root_resp): (_, crate::types::LogRootResponse) =
+            get_json(&app, "/api/v1/order_log/root").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            root_resp.len, 6,
+            "len must reflect the full archived+hot total, not just the 2 remaining hot entries"
+        );
+
+        // /entries?since=0 must return the FULL range, spanning the
+        // archive/hot boundary transparently.
+        let (status, entries_resp): (_, Vec<orderlog::LogEntry<orderlog::OrderReceipt>>) =
+            get_json(&app, "/api/v1/order_log/entries?since=0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            entries_resp.len(),
+            6,
+            "must return all 6 entries, 4 archived + 2 hot"
+        );
+        assert!(
+            orderlog::verify_chain(&entries_resp),
+            "the combined archived+hot entries must still verify as one unbroken chain"
+        );
+        for (original, fetched) in full_order_log_before.iter().zip(&entries_resp) {
+            assert_eq!(original.entry_hash, fetched.entry_hash);
+        }
+
+        // A `since` that lands entirely within the hot window must
+        // still work correctly (no archive fetch needed at all).
+        let (status, hot_only_resp): (_, Vec<orderlog::LogEntry<orderlog::OrderReceipt>>) =
+            get_json(&app, "/api/v1/order_log/entries?since=5").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hot_only_resp.len(), 1, "seq 5 is the last entry");
+
+        // match_log: same transparent spanning, via the sibling endpoint.
+        let (status, match_entries_resp): (_, Vec<orderlog::LogEntry<engine::Match>>) =
+            get_json(&app, "/api/v1/match_log/entries?since=0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(match_entries_resp.len(), 3);
+        assert!(orderlog::verify_chain(&match_entries_resp));
+    }
 }

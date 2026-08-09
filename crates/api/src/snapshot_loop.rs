@@ -108,7 +108,7 @@ pub async fn run_snapshot_loop(
 // is committed to `guard` until the archive write itself has already
 // succeeded, so a failure here just means retrying with the log
 // completely unchanged, never partial data loss.
-fn archive_and_trim_order_log(
+pub(crate) fn archive_and_trim_order_log(
     guard: &mut AppState,
     log: &crate::persistence::PersistenceLog,
     hot_window_size: usize,
@@ -133,7 +133,7 @@ fn archive_and_trim_order_log(
     }
 }
 
-fn archive_and_trim_match_log(
+pub(crate) fn archive_and_trim_match_log(
     guard: &mut AppState,
     log: &crate::persistence::PersistenceLog,
     hot_window_size: usize,

@@ -797,41 +797,98 @@ struct SinceQuery {
     since: u64,
 }
 
+// Stage P4-6c/d: len must reflect the TOTAL chain length (archived
+// prefix included), not just how many entries this node's own hot
+// window happens to hold in memory right now -- next_seq() (base_seq +
+// hot len) is that total; root already always reflected the true
+// current tip regardless of archival, only len was at risk of silently
+// under-reporting once entries started moving to cold storage.
 async fn order_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
     let guard = state.read().unwrap();
     Json(LogRootResponse {
         root: guard.order_log.root(),
-        len: guard.order_log.len() as u64,
+        len: guard.order_log.next_seq(),
     })
 }
 
 // Fetches order receipts from `since` (inclusive) onward -- an auditor
 // fetches the whole log this way, verifies the hash chain
-// (orderlog::verify_chain), and replays it through a fresh
+// (orderlog::verify_chain, or verify_chain_segment for a range that
+// doesn't start at genesis), and replays it through a fresh
 // engine::OrderBook to compute what price-time-priority matching should
 // have produced, then diffs that against /api/v1/match_log/entries.
+//
+// Stage P4-6d: transparently spans the archive/hot-window boundary --
+// a caller never needs to know or care whether part of what they asked
+// for has been moved to cold storage (Stage P4-6c). Returns 500 rather
+// than silently degrading to a hot-only (and therefore INCOMPLETE)
+// result if the archive fetch itself fails: an auditor trusting an
+// unexpectedly-short response to mean "that's everything" would be
+// worse than a request that visibly failed.
 async fn order_log_entries(
     State(state): State<Arc<RwLock<AppState>>>,
     Query(q): Query<SinceQuery>,
-) -> Json<Vec<LogEntry<OrderReceipt>>> {
-    let guard = state.read().unwrap();
-    Json(guard.order_log.entries_since(q.since).to_vec())
+) -> Result<Json<Vec<LogEntry<OrderReceipt>>>, StatusCode> {
+    let (hot_entries, hot_base_seq, persistence_log) = {
+        let guard = state.read().unwrap();
+        let hot_base_seq = guard.order_log.next_seq() - guard.order_log.len() as u64;
+        (
+            guard.order_log.entries_since(q.since).to_vec(),
+            hot_base_seq,
+            guard.persistence.clone(),
+        )
+    };
+
+    if q.since >= hot_base_seq {
+        return Ok(Json(hot_entries));
+    }
+    let Some(log) = persistence_log else {
+        // Nothing archived yet if persistence was never enabled at all
+        // -- the hot window IS the whole log.
+        return Ok(Json(hot_entries));
+    };
+    let mut archived = log.archived_order_log_entries_since(q.since).map_err(|e| {
+        tracing::error!(error = %e, "failed to fetch archived order_log entries");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    archived.extend(hot_entries);
+    Ok(Json(archived))
 }
 
 async fn match_log_root(State(state): State<Arc<RwLock<AppState>>>) -> Json<LogRootResponse> {
     let guard = state.read().unwrap();
     Json(LogRootResponse {
         root: guard.match_log.root(),
-        len: guard.match_log.len() as u64,
+        len: guard.match_log.next_seq(),
     })
 }
 
 async fn match_log_entries(
     State(state): State<Arc<RwLock<AppState>>>,
     Query(q): Query<SinceQuery>,
-) -> Json<Vec<LogEntry<Match>>> {
-    let guard = state.read().unwrap();
-    Json(guard.match_log.entries_since(q.since).to_vec())
+) -> Result<Json<Vec<LogEntry<Match>>>, StatusCode> {
+    let (hot_entries, hot_base_seq, persistence_log) = {
+        let guard = state.read().unwrap();
+        let hot_base_seq = guard.match_log.next_seq() - guard.match_log.len() as u64;
+        (
+            guard.match_log.entries_since(q.since).to_vec(),
+            hot_base_seq,
+            guard.persistence.clone(),
+        )
+    };
+
+    if q.since >= hot_base_seq {
+        return Ok(Json(hot_entries));
+    }
+    let Some(log) = persistence_log else {
+        return Ok(Json(hot_entries));
+    };
+    let mut archived = log.archived_match_log_entries_since(q.since).map_err(|e| {
+        tracing::error!(error = %e, "failed to fetch archived match_log entries");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    archived.extend(hot_entries);
+    Ok(Json(archived))
 }
 
 // Called by a trader (or their TraderClient) right after they've
