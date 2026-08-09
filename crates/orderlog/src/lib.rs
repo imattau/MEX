@@ -254,6 +254,36 @@ impl<T: Serialize + Clone> HashChainLog<T> {
         }
     }
 
+    // Stage P4-6c: splits this log's entries at `keep_from_seq` into an
+    // archived prefix (returned as a plain Vec, for the caller to
+    // durably move to cold storage) and a resumed hot-window log
+    // continuing from exactly where that prefix leaves off (via
+    // resume_from's own mechanism -- see its docs). Does NOT modify
+    // self or consume it: callers only commit to this split (replacing
+    // their own log with the resumed one) once the archived prefix has
+    // actually been durably archived elsewhere -- if that fails, the
+    // caller simply keeps using the original, unmodified log and
+    // retries the whole split next cycle, with nothing lost in the
+    // meantime.
+    pub fn split_off_archived(&self, keep_from_seq: u64) -> (Vec<LogEntry<T>>, HashChainLog<T>) {
+        let local_cutoff = keep_from_seq
+            .saturating_sub(self.base_seq)
+            .min(self.entries.len() as u64) as usize;
+        let archived = self.entries[..local_cutoff].to_vec();
+        let hot_entries = self.entries[local_cutoff..].to_vec();
+        let new_base_prev_hash = archived
+            .last()
+            .map(|e| e.entry_hash)
+            .unwrap_or(self.base_prev_hash);
+        let new_base_seq = self.base_seq + local_cutoff as u64;
+        let resumed = HashChainLog {
+            base_seq: new_base_seq,
+            base_prev_hash: new_base_prev_hash,
+            entries: hot_entries,
+        };
+        (archived, resumed)
+    }
+
     pub fn append(&mut self, payload: T) -> &LogEntry<T> {
         let seq = self.next_seq();
         let prev_hash = self
@@ -681,6 +711,53 @@ mod tests {
         // history it never held) clamps to everything it DOES have,
         // not an out-of-bounds panic.
         assert_eq!(hot.entries_since(0).len(), 3);
+    }
+
+    // Stage P4-6c: the actual point of split_off_archived -- the
+    // resumed hot log it returns must validly continue the archived
+    // prefix it also returns (same guarantee resume_from's own test
+    // proves, but exercised via the split path a real archival step
+    // would actually use), and self must be left completely untouched
+    // (borrow, not consume) so a caller can safely retry after a failed
+    // archive write.
+    #[test]
+    fn test_split_off_archived_produces_a_validly_continuing_pair() {
+        let mut log: HashChainLog<u64> = HashChainLog::new();
+        for i in 0..6u64 {
+            log.append(i);
+        }
+        let original_root = log.root();
+
+        let (archived, hot) = log.split_off_archived(3);
+        assert_eq!(archived.len(), 3);
+        assert_eq!(hot.len(), 3);
+        assert!(verify_chain_segment(0, [0u8; 32], &archived));
+        assert!(verify_chain_segment(
+            3,
+            archived.last().unwrap().entry_hash,
+            hot.entries()
+        ));
+        assert_eq!(
+            hot.root(),
+            original_root,
+            "the hot window's root must match what the whole log's root was before splitting"
+        );
+
+        // self must be entirely unaffected.
+        assert_eq!(log.len(), 6);
+        assert_eq!(log.root(), original_root);
+    }
+
+    #[test]
+    fn test_split_off_archived_with_nothing_to_archive_yet() {
+        let mut log: HashChainLog<u64> = HashChainLog::new();
+        log.append(1);
+        log.append(2);
+
+        let (archived, hot) = log.split_off_archived(0);
+        assert!(archived.is_empty());
+        assert_eq!(hot.len(), 2);
+        assert_eq!(hot.root(), log.root());
     }
 
     #[test]

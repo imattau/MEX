@@ -166,16 +166,24 @@
 //                             just on clean shutdown: the whole point is
 //                             bounding boot time after a CRASH, which
 //                             doesn't give a process a chance to
-//                             snapshot on its way out. order_log/
-//                             match_log are captured in full inside every
-//                             snapshot (not summarized -- see
-//                             persistence::Snapshot's own docs on why
-//                             that would silently break their
-//                             audit-completeness guarantee), so this
-//                             bounds boot time, not total disk/memory
-//                             growth from historical order volume --
-//                             that remains a known, deliberately
-//                             deferred limitation.
+//                             snapshot on its way out.
+//   MEX_HOT_LOG_WINDOW       Optional, only used if MEX_PERSISTENCE_PATH
+//                             is set. Defaults to 10000. Every snapshot
+//                             cycle, order_log/match_log entries beyond
+//                             this many (per log) move from live memory
+//                             into durable, NEVER-deleted cold storage
+//                             (see PersistenceLog::archive_order_log_
+//                             entries/archive_match_log_entries) --
+//                             nothing is summarized or dropped, see
+//                             orderlog::HashChainLog::split_off_archived
+//                             and verify_chain_segment for how the
+//                             archived prefix and the live "hot window"
+//                             stay independently verifiable as one
+//                             unbroken chain. Bounds live memory and
+//                             per-snapshot size; does NOT bound total
+//                             on-disk archive growth, which is
+//                             unavoidable if order_log/match_log are to
+//                             remain a genuinely complete audit trail.
 //   MEX_MESH_STAKE_QUORUM_THRESHOLD  Required if MEX_MESH_REQUIRE_STAKE
 //                            is set (ignored otherwise). Minimum COMBINED
 //                            on-chain stake, across at least 2 distinct
@@ -559,9 +567,14 @@ async fn main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(300);
+        let hot_log_window: usize = std::env::var("MEX_HOT_LOG_WINDOW")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
         tokio::spawn(api::run_snapshot_loop(
             Arc::clone(&state),
             Duration::from_secs(snapshot_interval_secs),
+            hot_log_window,
         ));
     }
 

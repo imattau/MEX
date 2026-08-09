@@ -35,7 +35,7 @@
 
 use common::Order;
 use engine::Match;
-use orderlog::{HashChainLog, OrderReceipt};
+use orderlog::{HashChainLog, LogEntry as OrderlogEntry, OrderReceipt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -285,6 +285,85 @@ impl PersistenceLog {
         }
         self.entries.flush().map_err(|e| e.to_string())?;
         Ok(removed)
+    }
+
+    // Stage P4-6c: durable, never-deleted cold storage for order_log/
+    // match_log entries a snapshot no longer carries in its "hot
+    // window" (see orderlog::HashChainLog::split_off_archived and
+    // snapshot_loop's own docs on how this fits into the periodic
+    // snapshot cycle). Separate trees per log, keyed by each entry's
+    // own absolute seq -- entries within a tree are always contiguous
+    // (nothing is ever archived out of order), so a plain big-endian-key
+    // range scan is enough to fetch a given range back, same pattern as
+    // the WAL's own `entries` tree.
+    pub fn archive_order_log_entries(
+        &self,
+        entries: &[OrderlogEntry<OrderReceipt>],
+    ) -> Result<(), String> {
+        let tree = self
+            .db
+            .open_tree("order_log_archive")
+            .map_err(|e| e.to_string())?;
+        for entry in entries {
+            let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+            tree.insert(entry.seq.to_be_bytes(), bytes)
+                .map_err(|e| e.to_string())?;
+        }
+        tree.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn archive_match_log_entries(
+        &self,
+        entries: &[OrderlogEntry<Match>],
+    ) -> Result<(), String> {
+        let tree = self
+            .db
+            .open_tree("match_log_archive")
+            .map_err(|e| e.to_string())?;
+        for entry in entries {
+            let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+            tree.insert(entry.seq.to_be_bytes(), bytes)
+                .map_err(|e| e.to_string())?;
+        }
+        tree.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // Every archived order_log entry with seq >= `since` -- an external
+    // auditor (or this node's own fetch API, see Stage P4-6d) combines
+    // this with the live hot window's own entries_since to reconstruct
+    // any range spanning the archive/hot boundary.
+    pub fn archived_order_log_entries_since(
+        &self,
+        since: u64,
+    ) -> Result<Vec<OrderlogEntry<OrderReceipt>>, String> {
+        let tree = self
+            .db
+            .open_tree("order_log_archive")
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for kv in tree.range(since.to_be_bytes().to_vec()..) {
+            let (_, v) = kv.map_err(|e| e.to_string())?;
+            out.push(serde_json::from_slice(&v).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn archived_match_log_entries_since(
+        &self,
+        since: u64,
+    ) -> Result<Vec<OrderlogEntry<Match>>, String> {
+        let tree = self
+            .db
+            .open_tree("match_log_archive")
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for kv in tree.range(since.to_be_bytes().to_vec()..) {
+            let (_, v) = kv.map_err(|e| e.to_string())?;
+            out.push(serde_json::from_slice(&v).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
     }
 }
 
@@ -539,5 +618,127 @@ mod tests {
             };
             assert!(order.id == [4u8; 32] || order.id == [5u8; 32]);
         }
+    }
+
+    fn make_match(seed: u8) -> Match {
+        Match {
+            maker_order_id: [seed; 32],
+            taker_order_id: [seed + 1; 32],
+            maker_trader: [seed + 2; 32],
+            taker_trader: [seed + 3; 32],
+            price: 100,
+            amount: 10,
+            timestamp_us: 0,
+            settlement_tier: SettlementPreference::Standard,
+            fee_basis_points: 5,
+            seller: [seed + 3; 32],
+            fee_payer: [seed + 3; 32],
+            symbol: "ETH-USD".to_string(),
+            assigned_node: [0u8; 32],
+            settlement_deadline: 0,
+        }
+    }
+
+    #[test]
+    fn test_archive_and_fetch_order_log_entries_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let mut order_log: HashChainLog<OrderReceipt> = HashChainLog::new();
+        for seed in 1..=4u8 {
+            let order = make_order(seed);
+            order_log.append(make_receipt(&order));
+        }
+        let entries = order_log.entries().to_vec();
+
+        log.archive_order_log_entries(&entries).unwrap();
+        let fetched = log.archived_order_log_entries_since(0).unwrap();
+        assert_eq!(fetched.len(), 4);
+        for (original, fetched) in entries.iter().zip(&fetched) {
+            assert_eq!(original.seq, fetched.seq);
+            assert_eq!(original.entry_hash, fetched.entry_hash);
+            assert_eq!(original.payload.order_id, fetched.payload.order_id);
+        }
+    }
+
+    #[test]
+    fn test_archive_and_fetch_match_log_entries_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let mut match_log: HashChainLog<Match> = HashChainLog::new();
+        for seed in 1..=4u8 {
+            match_log.append(make_match(seed));
+        }
+        let entries = match_log.entries().to_vec();
+
+        log.archive_match_log_entries(&entries).unwrap();
+        let fetched = log.archived_match_log_entries_since(0).unwrap();
+        assert_eq!(fetched.len(), 4);
+        for (original, fetched) in entries.iter().zip(&fetched) {
+            assert_eq!(original.entry_hash, fetched.entry_hash);
+            assert_eq!(
+                original.payload.maker_order_id,
+                fetched.payload.maker_order_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_archived_entries_since_only_returns_entries_at_or_after_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let mut order_log: HashChainLog<OrderReceipt> = HashChainLog::new();
+        for seed in 1..=5u8 {
+            let order = make_order(seed);
+            order_log.append(make_receipt(&order));
+        }
+        log.archive_order_log_entries(order_log.entries()).unwrap();
+
+        let all = log.archived_order_log_entries_since(0).unwrap();
+        assert_eq!(all.len(), 5);
+        let from_third = log.archived_order_log_entries_since(2).unwrap();
+        assert_eq!(
+            from_third.len(),
+            3,
+            "seqs 2, 3, 4 -- everything from the third entry onward"
+        );
+        let none = log.archived_order_log_entries_since(100).unwrap();
+        assert!(none.is_empty());
+    }
+
+    // Stage P4-6c's whole point, proven end to end at the persistence
+    // layer: split a log via split_off_archived, archive the prefix,
+    // and confirm the archived prefix plus the resumed hot window's own
+    // entries still verify as one unbroken chain from genesis -- the
+    // same guarantee orderlog's own tests prove in memory, now proven
+    // to survive an actual durable round trip through sled.
+    #[test]
+    fn test_archived_prefix_and_resumed_hot_window_still_verify_as_one_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = PersistenceLog::open(dir.path()).unwrap();
+
+        let mut order_log: HashChainLog<OrderReceipt> = HashChainLog::new();
+        for seed in 1..=6u8 {
+            let order = make_order(seed);
+            order_log.append(make_receipt(&order));
+        }
+
+        let (archived, hot) = order_log.split_off_archived(3);
+        log.archive_order_log_entries(&archived).unwrap();
+
+        let fetched_archive = log.archived_order_log_entries_since(0).unwrap();
+        assert_eq!(fetched_archive.len(), 3);
+        assert!(orderlog::verify_chain_segment(
+            0,
+            [0u8; 32],
+            &fetched_archive
+        ));
+        assert!(orderlog::verify_chain_segment(
+            3,
+            fetched_archive.last().unwrap().entry_hash,
+            hot.entries()
+        ));
     }
 }
