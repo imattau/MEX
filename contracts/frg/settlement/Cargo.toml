@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "frg-settlement"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# cdylib for the real wasm32-unknown-unknown deploy artifact, rlib so
+# `cargo test` can exercise the pure verification logic on the host target
+# (see src/groth16.rs's tests -- host builds skip the wasm-only entrypoints
+# in src/lib.rs entirely).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[dependencies]
+# Versions pinned to match crates/prover's, which produces the proofs this
+# contract verifies -- an arkworks version drift between prover and here
+# could change field/point encoding in ways that silently break
+# compatibility.
+ark-bn254 = { version = "=0.4.0", default-features = false, features = ["curve"] }
+ark-ec = { version = "=0.4.2", default-features = false }
+ark-ff = { version = "=0.4.2", default-features = false }
+
+[dev-dependencies]
+# Path deps into the main MEX workspace purely for tests: this crate is
+# deliberately NOT a member of that workspace (it's a deploy artifact for a
+# different chain, not linked into any MEX binary), but its test suite
+# wants to generate real proofs with the real prover to check this
+# contract's verification math against them.
+prover = { path = "../../../crates/prover" }
+engine = { path = "../../../crates/engine" }
+common = { path = "../../../crates/common" }
