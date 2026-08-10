@@ -138,7 +138,17 @@ impl ChainAdapter for FrgAdapter {
             ));
         }
 
-        let mut body = Vec::with_capacity(65 + 32 * trades.len() + 256);
+        // The selector must be the first 4 bytes of the raw calldata
+        // itself, not passed as FrgWalletClient::call_contract's separate
+        // `function` param -- frg-wallet's /contracts/call prioritizes
+        // call_data_hex over function whenever both are set (see
+        // cmd/frg-wallet/main.go's contractCallData), so passing both (as
+        // an earlier version of this function did) silently discarded the
+        // selector and sent this payload as raw calldata, corrupting
+        // contract.go's own 4-byte selector/payload split on the other
+        // end. Confirmed against a live FRG devnet.
+        let mut body = Vec::with_capacity(4 + 65 + 32 * trades.len() + 256);
+        body.extend_from_slice(SETTLE_FUNCTION.as_bytes());
         body.extend_from_slice(&calldata.public_inputs[0]);
         body.extend_from_slice(&calldata.public_inputs[1]);
         body.push(trades.len() as u8);
@@ -155,12 +165,7 @@ impl ChainAdapter for FrgAdapter {
         body.extend_from_slice(&calldata.c[1]);
 
         self.wallet()?
-            .call_contract(
-                self.settlement_contract()?,
-                Some(SETTLE_FUNCTION),
-                Some(&body),
-                "0",
-            )
+            .call_contract(self.settlement_contract()?, None, Some(&body), "0")
             .await
     }
 
@@ -207,8 +212,21 @@ impl ChainAdapter for FrgAdapter {
 
     // FRG pubkeys are already 32 bytes (Ed25519), so unlike the 20-byte EVM
     // address, OnChainAccount needs no padding/unpadding here.
+    //
+    // Saturates u128 quanta down to u64: ChainAdapter::get_node_stake's
+    // return type is a shared trait signature (used by every chain
+    // adapter), not something to widen unilaterally from here, but a real
+    // FRG bond routinely exceeds u64::MAX (see FrgClient::validator_bond's
+    // docs) -- saturating avoids a hard error for every real validator,
+    // at the cost of precision above ~18.4 quintillion quanta (~18.4 FRG,
+    // well past the point where relative differences between large bonds
+    // still matter for whatever compares this value). Callers that need
+    // the exact figure should go through FrgClient::validator_bond
+    // (u128) or FrgWalletClient::validators() (decimal string) directly
+    // instead of this trait method.
     async fn get_node_stake(&self, pubkey: OnChainAccount) -> Result<u64, String> {
-        self.client.validator_bond(pubkey).await
+        let quanta = self.client.validator_bond(pubkey).await?;
+        Ok(quanta.min(u64::MAX as u128) as u64)
     }
 
     async fn is_node_active(&self, pubkey: OnChainAccount) -> Result<bool, String> {

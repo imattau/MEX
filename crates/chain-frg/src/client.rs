@@ -21,12 +21,18 @@ impl FrgClient {
         Ok(Self { inner })
     }
 
-    pub async fn validator_bond(&self, pubkey: OnChainAccount) -> Result<u64, String> {
+    // u128, not u64: FRG bonds are quanta (1 FRG = 10^18 quanta), and the
+    // protocol minimum bond alone is 1,000 FRG = 10^21 quanta -- already
+    // ~54x past u64::MAX (~1.8*10^19, i.e. ~18.4 FRG). u64 can't represent
+    // any real validator's bond. Confirmed live against a real devnet:
+    // parsing this as u64 failed outright for the genesis validator's
+    // bond. u128 covers the full range with room to spare.
+    pub async fn validator_bond(&self, pubkey: OnChainAccount) -> Result<u128, String> {
         let entry = self.find_validator(pubkey).await?;
         match entry {
             Some(v) => v
                 .bond
-                .parse::<u64>()
+                .parse::<u128>()
                 .map_err(|e| format!("chain-frg: unparsable bond {:?}: {e}", v.bond)),
             None => Ok(0),
         }
