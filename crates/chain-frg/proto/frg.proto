@@ -1,0 +1,140 @@
+// Vendored from https://github.com/imattau/FRG proto/frg.proto.
+// FRG is a separate Go project with its own release cadence; this file is a
+// point-in-time copy so chain-frg can build offline. Re-sync by hand if the
+// upstream service definition changes.
+syntax = "proto3";
+
+package frg;
+
+option go_package = "github.com/imattau/frg/proto";
+
+service FRG {
+  // SubmitTx accepts FRG's Go-side serialized, signed transaction bytes.
+  // The transaction wire format and signing preimage are intentionally not
+  // defined in this proto; clients that need to construct signed transactions
+  // must use FRG wallet/Go-side transaction code until that format is specified.
+  rpc SubmitTx(RawBytes) returns (SubmitResponse);
+  // SubmitBatch accepts a batch of the same opaque signed transaction bytes.
+  rpc SubmitBatch(RawBytesArray) returns (SubmitResponse);
+  rpc SubscribeBlocks(Empty) returns (stream RawBytes);
+  rpc GetStatus(Empty) returns (StatusResponse);
+  rpc GetAccount(AccountRequest) returns (AccountResponse);
+  rpc GetContractState(ContractStateRequest) returns (ContractStateResponse);
+  rpc ListValidators(Empty) returns (ValidatorList);
+  rpc ListMempool(Empty) returns (MempoolList);
+  rpc GetBlockTelemetry(BlockTelemetryRequest) returns (BlockTelemetryResponse);
+}
+
+message RawBytes {
+  bytes data = 1;
+}
+
+message RawBytesArray {
+  repeated bytes data = 1;
+}
+
+message SubmitResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+message Empty {}
+
+message StatusResponse {
+  uint64 height = 1;
+  bytes state_root = 2;
+  uint64 peer_count = 3;
+  uint64 mempool_len = 4;
+  uint64 validator_count = 5;
+  uint32 consensus_round = 6;
+  string consensus_phase = 7;
+  bool grpc_only = 8;
+}
+
+message AccountRequest {
+  bytes pubkey = 1;
+}
+
+message AccountResponse {
+  bytes pubkey = 1;
+  string balance = 2;
+  uint64 nonce = 3;
+}
+
+message ContractStateRequest {
+  bytes contract_address = 1;
+  bytes key = 2;
+}
+
+message ContractStateResponse {
+  bytes contract_address = 1;
+  bool exists = 2;
+  bytes state_root = 3;
+  bytes key = 4;
+  bool found = 5;
+  bytes value = 6;
+}
+
+message ValidatorEntry {
+  bytes pubkey = 1;
+  string bond = 2;
+}
+
+message ValidatorList {
+  repeated ValidatorEntry validators = 1;
+}
+
+message MempoolEntry {
+  bytes txid = 1;
+  string sender = 2;
+  uint64 nonce = 3;
+}
+
+message MempoolList {
+  repeated MempoolEntry entries = 1;
+}
+
+message BlockTelemetryRequest {
+  // Height zero means the latest committed block.
+  uint64 height = 1;
+}
+
+message TxTypeCount {
+  uint32 type = 1;
+  string name = 2;
+  uint64 count = 3;
+}
+
+message SignatureCount {
+  uint32 signature = 1;
+  string name = 2;
+  uint64 count = 3;
+}
+
+message RGLevelTelemetry {
+  uint32 level = 1;
+  uint32 scale = 2;
+  uint64 node_count = 3;
+  repeated SignatureCount signature_counts = 4;
+  double contract_density = 5;
+  repeated uint64 volatile_regions = 6;
+  repeated uint64 stagnant_regions = 7;
+  string total_volume = 8;
+  string variance = 9;
+  uint64 contract_tx_count = 10;
+  uint64 contract_node_count = 11;
+}
+
+message BlockTelemetryResponse {
+  uint64 height = 1;
+  bytes state_root = 2;
+  bytes proposer_pubkey = 3;
+  uint64 tx_count = 4;
+  string total_value = 5;
+  string mean_value = 6;
+  string variance = 7;
+  repeated TxTypeCount tx_types = 8;
+  repeated RGLevelTelemetry levels = 9;
+  bool contract_state_included = 10;
+  string warning = 11;
+}

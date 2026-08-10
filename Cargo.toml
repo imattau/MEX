@@ -24,6 +24,7 @@ members = [
     "crates/chain-ethereum",
     "crates/chain-solana",
     "crates/chain-cosmwasm",
+    "crates/chain-frg",
     "crates/batcher",
     "crates/reputation",
     "crates/orderlog",
