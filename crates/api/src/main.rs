@@ -9,12 +9,52 @@
 //                             warning if unset in a debug build only.
 //   MEX_API_PORT              Defaults to 8080.
 //   MEX_API_SYMBOL            Defaults to "ETH-USD".
-//   MEX_RPC_URL               Required. Ethereum JSON-RPC endpoint.
-//   MEX_NODE_PRIVATE_KEY      Required. This settlement node's own key --
-//                             must already be registered in NodeRegistry
-//                             (see scripts/deploy.js / register_node).
-//   MEX_FACTORY_ADDRESS       Required. SettlementFactory address.
-//   MEX_REGISTRY_ADDRESS      Required. NodeRegistry address.
+//   MEX_SETTLEMENT_CHAIN      Optional, "ethereum" (default) or "frg".
+//                             Selects which run_settlement_loop* this node
+//                             runs -- see api::settlement's module docs on
+//                             why exactly one runs, never both (they'd
+//                             race draining the same batcher queue).
+//                             Switches which block of env vars below is
+//                             required: the MEX_RPC_URL/MEX_NODE_PRIVATE_
+//                             KEY/MEX_FACTORY_ADDRESS/MEX_REGISTRY_ADDRESS
+//                             group for "ethereum", the MEX_FRG_* group
+//                             for "frg". The Ethereum group is ALSO
+//                             required whenever MEX_MESH_REQUIRE_STAKE is
+//                             set, regardless of this setting -- that
+//                             feature queries NodeRegistry directly, not
+//                             through settlement.
+//   MEX_RPC_URL               Required if MEX_SETTLEMENT_CHAIN=ethereum
+//                             (the default) or MEX_MESH_REQUIRE_STAKE is
+//                             set. Ethereum JSON-RPC endpoint.
+//   MEX_NODE_PRIVATE_KEY      Required under the same condition as
+//                             MEX_RPC_URL. This settlement node's own key
+//                             -- must already be registered in
+//                             NodeRegistry (see scripts/deploy.js /
+//                             register_node).
+//   MEX_FACTORY_ADDRESS       Required under the same condition as
+//                             MEX_RPC_URL. SettlementFactory address.
+//   MEX_REGISTRY_ADDRESS      Required under the same condition as
+//                             MEX_RPC_URL. NodeRegistry address.
+//   MEX_FRG_GRPC_ENDPOINT     Required if MEX_SETTLEMENT_CHAIN=frg. FRG
+//                             node's gRPC admin API address, e.g.
+//                             http://127.0.0.1:50051.
+//   MEX_FRG_WALLET_URL        Required if MEX_SETTLEMENT_CHAIN=frg.
+//                             frg-wallet's local HTTP API base URL, e.g.
+//                             http://127.0.0.1:8090 -- see
+//                             crates/chain-frg/src/wallet.rs.
+//   MEX_FRG_SETTLEMENT_CONTRACT  Required if MEX_SETTLEMENT_CHAIN=frg,
+//                             hex. Address of a deployed
+//                             contracts/frg/settlement instance (see that
+//                             crate's README for how to build/deploy one).
+//   MEX_FRG_FEE_RECIPIENT_PUBKEY  Required if MEX_SETTLEMENT_CHAIN=frg,
+//                             hex. FRG account credited settlement fees --
+//                             unused today (contracts/frg/settlement
+//                             doesn't implement fee transfers yet, see its
+//                             README's Scope section), but required now so
+//                             enabling fees later doesn't need a new,
+//                             previously-optional env var silently
+//                             defaulting to the zero account for anyone
+//                             who didn't set it.
 //   MEX_SETTLEMENT_NODE_PUBKEY  Required, hex. This node's own 32-byte
 //                             pubkey as registered in NodeRegistry -- used
 //                             to configure the OrderBook's active-node set
@@ -223,8 +263,9 @@
 //                            inactive gate rather than real stake
 //                            weighting, so this fails loud instead.
 
+use alloy::primitives::Address;
 use api::server::{AppState, MeshHandle};
-use api::settlement::SettlementConfig;
+use api::settlement::{FrgSettlementConfig, SettlementConfig};
 use common::FeeCalculator;
 use ed25519_dalek::SigningKey;
 use engine::OrderBook;
@@ -234,6 +275,17 @@ use std::time::Duration;
 fn require_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         eprintln!("required environment variable {name} not set");
+        std::process::exit(1);
+    })
+}
+
+fn parse_frg_account(env_var_name: &str, hex_value: &str) -> chain::OnChainAccount {
+    let bytes = hex::decode(hex_value.trim_start_matches("0x")).unwrap_or_else(|e| {
+        eprintln!("{env_var_name} is not valid hex: {e}");
+        std::process::exit(1);
+    });
+    bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+        eprintln!("{env_var_name} must be exactly 32 bytes, got {}", v.len());
         std::process::exit(1);
     })
 }
@@ -248,10 +300,49 @@ async fn main() {
         .unwrap_or(8080);
     let symbol = std::env::var("MEX_API_SYMBOL").unwrap_or_else(|_| "ETH-USD".to_string());
 
-    let rpc_url = require_env("MEX_RPC_URL");
-    let node_private_key = require_env("MEX_NODE_PRIVATE_KEY");
-    let factory_address = require_env("MEX_FACTORY_ADDRESS");
-    let registry_address = require_env("MEX_REGISTRY_ADDRESS");
+    let settlement_chain =
+        std::env::var("MEX_SETTLEMENT_CHAIN").unwrap_or_else(|_| "ethereum".to_string());
+    if settlement_chain != "ethereum" && settlement_chain != "frg" {
+        eprintln!("MEX_SETTLEMENT_CHAIN must be \"ethereum\" or \"frg\", got {settlement_chain:?}");
+        std::process::exit(1);
+    }
+    // Mirrors the parse at MEX_MESH_REQUIRE_STAKE's real use site below --
+    // needed here too since that feature requires the Ethereum env var
+    // group regardless of MEX_SETTLEMENT_CHAIN (see this file's top docs).
+    let mesh_require_stake = std::env::var("MEX_MESH_REQUIRE_STAKE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let need_ethereum_vars = settlement_chain == "ethereum" || mesh_require_stake;
+
+    let (rpc_url, node_private_key, factory_address, registry_address) = if need_ethereum_vars {
+        (
+            require_env("MEX_RPC_URL"),
+            require_env("MEX_NODE_PRIVATE_KEY"),
+            require_env("MEX_FACTORY_ADDRESS"),
+            require_env("MEX_REGISTRY_ADDRESS"),
+        )
+    } else {
+        (String::new(), String::new(), String::new(), String::new())
+    };
+
+    let frg_settlement_config = if settlement_chain == "frg" {
+        let grpc_endpoint = require_env("MEX_FRG_GRPC_ENDPOINT");
+        let wallet_base_url = require_env("MEX_FRG_WALLET_URL");
+        let settlement_contract_hex = require_env("MEX_FRG_SETTLEMENT_CONTRACT");
+        let fee_recipient_hex = require_env("MEX_FRG_FEE_RECIPIENT_PUBKEY");
+        let settlement_contract =
+            parse_frg_account("MEX_FRG_SETTLEMENT_CONTRACT", &settlement_contract_hex);
+        let fee_recipient = parse_frg_account("MEX_FRG_FEE_RECIPIENT_PUBKEY", &fee_recipient_hex);
+        Some((
+            grpc_endpoint,
+            wallet_base_url,
+            settlement_contract,
+            fee_recipient,
+        ))
+    } else {
+        None
+    };
+
     let node_pubkey_hex = require_env("MEX_SETTLEMENT_NODE_PUBKEY");
     let node_pubkey_bytes =
         hex::decode(node_pubkey_hex.trim_start_matches("0x")).unwrap_or_else(|e| {
@@ -271,14 +362,20 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    let deployer_signer: alloy::signers::local::PrivateKeySigner = node_private_key
-        .trim_start_matches("0x")
-        .parse()
-        .unwrap_or_else(|e| {
-            eprintln!("MEX_NODE_PRIVATE_KEY is not a valid private key: {e}");
-            std::process::exit(1);
-        });
-    let fee_recipient = deployer_signer.address();
+    // Only meaningful (and only required to parse) when the Ethereum env
+    // var group above was actually populated -- see need_ethereum_vars.
+    let fee_recipient = if need_ethereum_vars {
+        let deployer_signer: alloy::signers::local::PrivateKeySigner = node_private_key
+            .trim_start_matches("0x")
+            .parse()
+            .unwrap_or_else(|e| {
+                eprintln!("MEX_NODE_PRIVATE_KEY is not a valid private key: {e}");
+                std::process::exit(1);
+            });
+        deployer_signer.address()
+    } else {
+        Address::ZERO
+    };
 
     let fee_base_gas_price: u64 = std::env::var("MEX_FEE_BASE_GAS_PRICE")
         .ok()
@@ -655,20 +752,41 @@ async fn main() {
         tracing::info!(window_ms, quorum_timeout_ms, "order sequencing enabled");
     }
 
-    let settlement_config = SettlementConfig {
-        rpc_url: rpc_url.clone(),
-        node_private_key,
-        factory_address,
-        registry_address,
-        fee_recipient,
-        poll_interval: Duration::from_secs(poll_secs),
-        own_settlement_pubkey: node_pubkey,
-    };
-    tokio::spawn(api::run_settlement_loop(
-        Arc::clone(&state),
-        settlement_config,
-        reconciliation_candidates,
-    ));
+    // Exactly one settlement loop runs -- see api::settlement's module
+    // docs on why running both against the same AppState would race.
+    match frg_settlement_config {
+        Some((grpc_endpoint, wallet_base_url, settlement_contract, frg_fee_recipient)) => {
+            let settlement_config = FrgSettlementConfig {
+                grpc_endpoint,
+                wallet_base_url,
+                settlement_contract,
+                fee_recipient: frg_fee_recipient,
+                poll_interval: Duration::from_secs(poll_secs),
+                own_settlement_pubkey: node_pubkey,
+            };
+            tokio::spawn(api::run_settlement_loop_frg(
+                Arc::clone(&state),
+                settlement_config,
+                reconciliation_candidates,
+            ));
+        }
+        None => {
+            let settlement_config = SettlementConfig {
+                rpc_url: rpc_url.clone(),
+                node_private_key,
+                factory_address,
+                registry_address,
+                fee_recipient,
+                poll_interval: Duration::from_secs(poll_secs),
+                own_settlement_pubkey: node_pubkey,
+            };
+            tokio::spawn(api::run_settlement_loop(
+                Arc::clone(&state),
+                settlement_config,
+                reconciliation_candidates,
+            ));
+        }
+    }
 
     let router = api::app(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

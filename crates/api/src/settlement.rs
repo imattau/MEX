@@ -3,17 +3,26 @@
 // matches) and ChainAdapter::submit_settlement_batch (submits a proven
 // batch on-chain). Runs as a background loop: periodically drains ready
 // batches from AppState's batcher, resolves each trade's off-chain pubkeys
-// to real Ethereum addresses (via a live ChainSync), and submits each
-// proof chunk with settleBatchWithFees.
+// to real on-chain accounts, and submits each proof chunk.
 //
 // This is infra-signed, not trader-signed -- it uses the settlement
 // node's own key (see chain::ChainAdapter's docs for why commitTrade and
 // claimSlash are deliberately NOT part of this path).
+//
+// Two chain backends exist -- run_settlement_loop (Ethereum) and
+// run_settlement_loop_frg (FRG) -- sharing everything downstream of "which
+// chain and how do we resolve a trader's on-chain account" via
+// process_ready_batches/TraderAddressResolver below. Exactly one of these
+// should run against a given AppState, never both: SettlementBatcher's
+// queue is drained (not peeked) by process_batches(), so two loops racing
+// to drain the same batcher would non-deterministically split or duplicate
+// settlement, not settle to two chains at once. MEX_SETTLEMENT_CHAIN
+// (main.rs) enforces that at startup.
 
 use crate::server::AppState;
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
-use chain::{ChainAdapter, SettlementFeeConfig, SettlementTrade, Token};
+use chain::{ChainAdapter, OnChainAccount, SettlementFeeConfig, SettlementTrade, Token};
 use chain_ethereum::{address_to_account, ChainSync, EthereumAdapter, TokenRegistry};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -33,6 +42,40 @@ pub struct SettlementConfig {
     // this pubkey; chunks assigned to another active node are silently
     // skipped, not errored, since submitting them is that OTHER node's job.
     pub own_settlement_pubkey: [u8; 32],
+}
+
+pub struct FrgSettlementConfig {
+    pub grpc_endpoint: String,
+    pub wallet_base_url: String,
+    pub settlement_contract: OnChainAccount,
+    pub fee_recipient: OnChainAccount,
+    pub poll_interval: Duration,
+    // Same role as SettlementConfig::own_settlement_pubkey above.
+    pub own_settlement_pubkey: [u8; 32],
+}
+
+// Turns an off-chain trader pubkey into this chain's on-chain account,
+// without hardcoding how each chain does that. Ethereum needs a live
+// lookup (ChainSync watches TraderEscrow deposit events to learn which
+// address a pubkey deployed its escrow to); FRG needs no lookup at all --
+// an FRG account already IS its 32-byte Ed25519 pubkey (see
+// chain_frg::FrgAdapter's docs on OnChainAccount).
+trait TraderAddressResolver {
+    fn resolve(&self, pubkey: [u8; 32]) -> Option<OnChainAccount>;
+}
+
+impl<P: Provider> TraderAddressResolver for ChainSync<P> {
+    fn resolve(&self, pubkey: [u8; 32]) -> Option<OnChainAccount> {
+        resolve_address(self, pubkey).map(address_to_account)
+    }
+}
+
+struct IdentityResolver;
+
+impl TraderAddressResolver for IdentityResolver {
+    fn resolve(&self, pubkey: [u8; 32]) -> Option<OnChainAccount> {
+        Some(pubkey)
+    }
 }
 
 pub async fn run_settlement_loop(
@@ -97,6 +140,7 @@ pub async fn run_settlement_loop(
     }
 
     tracing::info!("settlement loop started");
+    let fee_recipient = address_to_account(config.fee_recipient);
 
     loop {
         tokio::time::sleep(config.poll_interval).await;
@@ -110,165 +154,240 @@ pub async fn run_settlement_loop(
             guard.batcher.process_batches()
         };
 
-        for batch in batches {
-            let mut idx = 0;
-            for ((proof, &count), trade_batch) in batch
-                .proofs
-                .iter()
-                .zip(&batch.proof_trade_counts)
-                .zip(&batch.trade_batches)
-            {
-                let chunk = &batch.trades[idx..idx + count];
-                idx += count;
+        process_ready_batches(
+            &state,
+            &chain_adapter,
+            &chain_sync,
+            config.own_settlement_pubkey,
+            fee_recipient,
+            batches,
+        )
+        .await;
+    }
+}
 
-                // build_batch groups trades by assigned_node before
-                // chunking, so every trade in a chunk shares the same
-                // assigned_node -- checking the first is checking all of
-                // them. An empty chunk can't reach here (build_batch skips
-                // those), so this is always Some.
-                let chunk_assigned_node = chunk[0].assigned_node;
-                if chunk_assigned_node != config.own_settlement_pubkey {
-                    tracing::debug!(
-                        assigned_node = %hex::encode(chunk_assigned_node),
-                        own = %hex::encode(config.own_settlement_pubkey),
-                        count,
-                        "skipping settlement chunk assigned to a different node"
-                    );
-                    continue;
+// FRG counterpart of run_settlement_loop above -- see this module's top
+// docs on why exactly one of the two should ever run against a given
+// AppState. No ChainSync-equivalent polling step: FRG needs no address
+// resolution at all (IdentityResolver), so there's nothing to keep synced
+// between ticks.
+pub async fn run_settlement_loop_frg(
+    state: Arc<RwLock<AppState>>,
+    config: FrgSettlementConfig,
+    reconciliation_candidates: Vec<(engine::Match, [u8; 32])>,
+) {
+    let chain_adapter = match chain_frg::FrgAdapter::connect(&config.grpc_endpoint).await {
+        Ok(adapter) => adapter
+            .with_wallet(config.wallet_base_url.clone())
+            .with_settlement_contract(config.settlement_contract),
+        Err(e) => {
+            tracing::error!(error = %e, "frg settlement loop: failed to construct FrgAdapter, not starting");
+            return;
+        }
+    };
+    let resolver = IdentityResolver;
+
+    if !reconciliation_candidates.is_empty() {
+        reconcile_replayed_confirmations(
+            &state,
+            &chain_adapter,
+            &resolver,
+            reconciliation_candidates,
+        )
+        .await;
+    }
+
+    tracing::info!("frg settlement loop started");
+
+    loop {
+        tokio::time::sleep(config.poll_interval).await;
+
+        let batches = {
+            let mut guard = state.write().unwrap();
+            guard.batcher.process_batches()
+        };
+
+        process_ready_batches(
+            &state,
+            &chain_adapter,
+            &resolver,
+            config.own_settlement_pubkey,
+            config.fee_recipient,
+            batches,
+        )
+        .await;
+    }
+}
+
+// The chain-agnostic core of both settlement loops: for every ready batch
+// chunk, run the watchtower pre-flight checks, resolve trader accounts,
+// and submit to whichever ChainAdapter/resolver was passed in. Shared so
+// the Ethereum and FRG loops above can't drift out of sync on this logic
+// (persistence checkpointing, retry-on-failure, proof broadcast) the way
+// two independently-maintained copies eventually would.
+async fn process_ready_batches<A: ChainAdapter>(
+    state: &Arc<RwLock<AppState>>,
+    chain_adapter: &A,
+    resolver: &impl TraderAddressResolver,
+    own_settlement_pubkey: [u8; 32],
+    fee_recipient: OnChainAccount,
+    batches: Vec<batcher::SettlementBatch>,
+) {
+    for batch in batches {
+        let mut idx = 0;
+        for ((proof, &count), trade_batch) in batch
+            .proofs
+            .iter()
+            .zip(&batch.proof_trade_counts)
+            .zip(&batch.trade_batches)
+        {
+            let chunk = &batch.trades[idx..idx + count];
+            idx += count;
+
+            // build_batch groups trades by assigned_node before
+            // chunking, so every trade in a chunk shares the same
+            // assigned_node -- checking the first is checking all of
+            // them. An empty chunk can't reach here (build_batch skips
+            // those), so this is always Some.
+            let chunk_assigned_node = chunk[0].assigned_node;
+            if chunk_assigned_node != own_settlement_pubkey {
+                tracing::debug!(
+                    assigned_node = %hex::encode(chunk_assigned_node),
+                    own = %hex::encode(own_settlement_pubkey),
+                    count,
+                    "skipping settlement chunk assigned to a different node"
+                );
+                continue;
+            }
+
+            // Watchtower pre-flight, run against the real chain adapter
+            // right before we'd otherwise spend gas submitting this
+            // chunk. See watchtower::WatchtowerClient's docs on why
+            // these are plain detection calls, not the mock-based
+            // dispute/slash flow: this deployment's actual contracts
+            // reject an invalid proof atomically inside
+            // submit_settlement_batch itself (no separate dispute step to
+            // raise), and there is no on-chain "slash a trader" call to
+            // make for a fee mismatch -- so the only real, safe action
+            // available here is to skip a chunk we already know is
+            // wrong (saving the doomed transaction's gas/fuel and getting
+            // a loud log instead of a silent on-chain revert/trap) and,
+            // for a genuinely missed deadline, actually report it
+            // on-chain via submit_missed_deadline_report -- previously
+            // implemented but never called from anywhere in this binary.
+            if !chain_adapter.prover().verify_proof(proof, trade_batch) {
+                tracing::error!(
+                    assigned_node = %hex::encode(chunk_assigned_node),
+                    count,
+                    "watchtower: locally-generated proof failed local verification -- refusing to submit this chunk, this indicates a bug in this node's own batching/proving pipeline, not a chain issue"
+                );
+                continue;
+            }
+
+            let fee_violations = watchtower::WatchtowerClient::fee_violations(trade_batch);
+            if !fee_violations.is_empty() {
+                tracing::error!(
+                    assigned_node = %hex::encode(chunk_assigned_node),
+                    violating_trades = ?fee_violations,
+                    "watchtower: chunk contains trades whose fee_basis_points doesn't match their settlement_tier -- refusing to submit, this indicates a bug upstream of settlement (matching/batching), not a chain issue"
+                );
+                continue;
+            }
+
+            let now_secs = std::time::UNIX_EPOCH
+                .elapsed()
+                .unwrap_or_default()
+                .as_secs();
+            let deadline_violations =
+                watchtower::WatchtowerClient::deadline_violations(trade_batch, now_secs);
+            if !deadline_violations.is_empty() {
+                // settleBatchWithFees/`sett` validates every trade in the
+                // chunk inside one transaction -- one expired trade
+                // reverts/traps the WHOLE chunk, not just itself, so
+                // submitting anyway would just waste gas/fuel on a
+                // guaranteed-failing tx every interval until something
+                // external (the trader's own claimSlash, on Ethereum)
+                // removes it. Skipping here, like the fee-violation case
+                // above, is the safe choice: an expired trade was never
+                // going to settle through this path again regardless.
+                // Reporting it on-chain first is still real, useful work
+                // where it's actually wired up (Ethereum's
+                // NodeRegistry.recordMissedDeadline); on FRG this
+                // currently just logs and skips, since there's no
+                // FRG-side registry to report against yet (see
+                // chain_frg::FrgAdapter's docs).
+                tracing::warn!(
+                    assigned_node = %hex::encode(chunk_assigned_node),
+                    violating_trades = ?deadline_violations,
+                    "watchtower: chunk contains trades whose settlement_deadline has already passed -- reporting a missed deadline for the assigned node and skipping this chunk's submission"
+                );
+                if let Err(e) = chain_adapter
+                    .submit_missed_deadline_report(chunk_assigned_node)
+                    .await
+                {
+                    tracing::error!(error = %e, assigned_node = %hex::encode(chunk_assigned_node), "watchtower: failed to report missed deadline on-chain");
                 }
+                continue;
+            }
 
-                // Watchtower pre-flight, run against the real chain adapter
-                // right before we'd otherwise spend gas submitting this
-                // chunk. See watchtower::WatchtowerClient's docs on why
-                // these are plain detection calls, not the mock-based
-                // dispute/slash flow: this deployment's actual contracts
-                // reject an invalid proof atomically inside
-                // settleBatchWithFees itself (no separate dispute step to
-                // raise), and there is no on-chain "slash a trader" call to
-                // make for a fee mismatch -- so the only real, safe action
-                // available here is to skip a chunk we already know is
-                // wrong (saving the doomed transaction's gas and getting a
-                // loud log instead of a silent on-chain revert) and, for a
-                // genuinely missed deadline, actually report it on-chain
-                // via submit_missed_deadline_report -- previously
-                // implemented but never called from anywhere in this
-                // binary.
-                if !chain_adapter.prover().verify_proof(proof, trade_batch) {
-                    tracing::error!(
-                        assigned_node = %hex::encode(chunk_assigned_node),
-                        count,
-                        "watchtower: locally-generated proof failed local verification -- refusing to submit this chunk, this indicates a bug in this node's own batching/proving pipeline, not a chain issue"
-                    );
-                    continue;
-                }
-
-                let fee_violations = watchtower::WatchtowerClient::fee_violations(trade_batch);
-                if !fee_violations.is_empty() {
-                    tracing::error!(
-                        assigned_node = %hex::encode(chunk_assigned_node),
-                        violating_trades = ?fee_violations,
-                        "watchtower: chunk contains trades whose fee_basis_points doesn't match their settlement_tier -- refusing to submit, this indicates a bug upstream of settlement (matching/batching), not a chain issue"
-                    );
-                    continue;
-                }
-
-                let now_secs = std::time::UNIX_EPOCH
-                    .elapsed()
-                    .unwrap_or_default()
-                    .as_secs();
-                let deadline_violations =
-                    watchtower::WatchtowerClient::deadline_violations(trade_batch, now_secs);
-                if !deadline_violations.is_empty() {
-                    // settleBatchWithFees validates every trade in the
-                    // chunk inside one transaction (require per trade in a
-                    // loop) -- one expired trade reverts the WHOLE chunk,
-                    // not just itself, so submitting anyway would just
-                    // waste gas on a guaranteed-failing tx every interval
-                    // until something external (the trader's own
-                    // claimSlash) removes it. Skipping here, like the fee-
-                    // violation case above, is the safe choice: an expired
-                    // trade was never going to settle through this path
-                    // again regardless (see SettlementFactory.claimSlash's
-                    // docs -- that's the trader-initiated path for a
-                    // missed deadline, not this node re-attempting
-                    // settlement). Reporting it on-chain first is still
-                    // real, useful work: this is the one piece of this
-                    // check that DOES have a genuine on-chain action
-                    // (NodeRegistry.recordMissedDeadline, implemented but
-                    // never actually called from anywhere until now).
-                    tracing::warn!(
-                        assigned_node = %hex::encode(chunk_assigned_node),
-                        violating_trades = ?deadline_violations,
-                        "watchtower: chunk contains trades whose settlement_deadline has already passed -- reporting a missed deadline for the assigned node and skipping this chunk's submission"
-                    );
-                    if let Err(e) = chain_adapter
-                        .submit_missed_deadline_report(chunk_assigned_node)
+            match build_settlement_trades(state, resolver, chunk) {
+                Some(settlement_trades) => {
+                    let fee_config = SettlementFeeConfig {
+                        fee_recipient,
+                        tier: 0,
+                    };
+                    match chain_adapter
+                        .submit_settlement_batch(&settlement_trades, proof, fee_config)
                         .await
                     {
-                        tracing::error!(error = %e, assigned_node = %hex::encode(chunk_assigned_node), "watchtower: failed to report missed deadline on-chain");
-                    }
-                    continue;
-                }
-
-                match build_settlement_trades(&state, &chain_sync, chunk) {
-                    Some(settlement_trades) => {
-                        let fee_config = SettlementFeeConfig {
-                            fee_recipient: address_to_account(config.fee_recipient),
-                            tier: 0,
-                        };
-                        match chain_adapter
-                            .submit_settlement_batch(&settlement_trades, proof, fee_config)
-                            .await
-                        {
-                            Ok(tx) => {
-                                tracing::info!(
-                                    tx,
-                                    trades = settlement_trades.len(),
-                                    "settled a batch chunk on-chain"
-                                );
-                                // Stage P4-2: checkpoint every trade in
-                                // this chunk as fully settled BEFORE
-                                // broadcasting the proof -- so a crash
-                                // right after a real on-chain submission
-                                // doesn't leave replay believing these
-                                // are still awaiting settlement (which
-                                // would attempt a duplicate submission
-                                // next restart). Doesn't need AppState's
-                                // write lock: PersistenceLog::append does
-                                // its own I/O, and the causal ordering
-                                // this relies on (a CommitConfirmed entry
-                                // always precedes the BatchSubmitted
-                                // checkpoint for the same key) is already
-                                // guaranteed by AppState's lock
-                                // serializing confirm_committed against
-                                // this loop's own batcher.process_batches
-                                // call above. A checkpoint-write failure
-                                // is logged, not retried here -- see
-                                // MEX_PERSISTENCE_PATH's own docs on the
-                                // remaining crash window this can't close
-                                // alone.
-                                let persistence_log = state.read().unwrap().persistence.clone();
-                                if let Some(log) = persistence_log {
-                                    let keys: Vec<([u8; 32], [u8; 32])> = settlement_trades
-                                        .iter()
-                                        .map(|t| (t.maker_order_id, t.taker_order_id))
-                                        .collect();
-                                    if let Err(e) = log.append_batch_submitted(keys) {
-                                        tracing::error!(error = %e, "failed to durably checkpoint a successful settlement submission -- a crash before this recovers could attempt a duplicate on-chain submission next restart");
-                                    }
+                        Ok(tx) => {
+                            tracing::info!(
+                                tx,
+                                trades = settlement_trades.len(),
+                                "settled a batch chunk on-chain"
+                            );
+                            // Stage P4-2: checkpoint every trade in
+                            // this chunk as fully settled BEFORE
+                            // broadcasting the proof -- so a crash
+                            // right after a real on-chain submission
+                            // doesn't leave replay believing these
+                            // are still awaiting settlement (which
+                            // would attempt a duplicate submission
+                            // next restart). Doesn't need AppState's
+                            // write lock: PersistenceLog::append does
+                            // its own I/O, and the causal ordering
+                            // this relies on (a CommitConfirmed entry
+                            // always precedes the BatchSubmitted
+                            // checkpoint for the same key) is already
+                            // guaranteed by AppState's lock
+                            // serializing confirm_committed against
+                            // this loop's own batcher.process_batches
+                            // call above. A checkpoint-write failure
+                            // is logged, not retried here -- see
+                            // MEX_PERSISTENCE_PATH's own docs on the
+                            // remaining crash window this can't close
+                            // alone.
+                            let persistence_log = state.read().unwrap().persistence.clone();
+                            if let Some(log) = persistence_log {
+                                let keys: Vec<([u8; 32], [u8; 32])> = settlement_trades
+                                    .iter()
+                                    .map(|t| (t.maker_order_id, t.taker_order_id))
+                                    .collect();
+                                if let Err(e) = log.append_batch_submitted(keys) {
+                                    tracing::error!(error = %e, "failed to durably checkpoint a successful settlement submission -- a crash before this recovers could attempt a duplicate on-chain submission next restart");
                                 }
-                                broadcast_settlement_proof(&state, trade_batch, proof).await;
                             }
-                            Err(e) => {
-                                tracing::error!(error = %e, trades = settlement_trades.len(), "settleBatchWithFees failed for a chunk -- re-queueing every trade in it for retry next interval");
-                                let mut guard = state.write().unwrap();
-                                restore_failed_chunk(&mut guard, chunk, &settlement_trades);
-                            }
+                            broadcast_settlement_proof(state, trade_batch, proof).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, trades = settlement_trades.len(), "settlement submission failed for a chunk -- re-queueing every trade in it for retry next interval");
+                            let mut guard = state.write().unwrap();
+                            restore_failed_chunk(&mut guard, chunk, &settlement_trades);
                         }
                     }
-                    None => {
-                        tracing::warn!("skipping a batch chunk: missing trade_hash or unresolvable trader address for at least one trade in it");
-                    }
+                }
+                None => {
+                    tracing::warn!("skipping a batch chunk: missing trade_hash or unresolvable trader account for at least one trade in it");
                 }
             }
         }
@@ -298,7 +417,7 @@ pub async fn run_settlement_loop(
 async fn reconcile_replayed_confirmations(
     state: &Arc<RwLock<AppState>>,
     chain_adapter: &impl ChainAdapter,
-    chain_sync: &ChainSync<impl Provider>,
+    resolver: &impl TraderAddressResolver,
     candidates: Vec<(engine::Match, [u8; 32])>,
 ) {
     for (m, trade_hash) in candidates {
@@ -310,11 +429,10 @@ async fn reconcile_replayed_confirmations(
         } else {
             m.taker_trader
         };
-        let Some(payer_addr) = resolve_address(chain_sync, payer_pubkey) else {
-            tracing::debug!(order_id = ?m.maker_order_id, "reconciliation: payer's escrow not yet resolvable, leaving as pending");
+        let Some(payer_account) = resolver.resolve(payer_pubkey) else {
+            tracing::debug!(order_id = ?m.maker_order_id, "reconciliation: payer's on-chain account not yet resolvable, leaving as pending");
             continue;
         };
-        let payer_account = address_to_account(payer_addr);
 
         match chain_adapter
             .is_trade_settled(payer_account, trade_hash)
@@ -428,12 +546,14 @@ fn restore_failed_chunk(
 
 // Builds the on-chain TradeEntry-equivalent for every trade in a chunk, or
 // None if any single trade in it can't be resolved yet (missing
-// confirmed_trade_hash, or a trader whose escrow hasn't been observed by
-// chain_sync yet) -- the whole chunk shares one proof, so it's all-or-
-// nothing, same as the proof itself.
+// confirmed_trade_hash, or a trader whose on-chain account isn't
+// resolvable yet -- on Ethereum, meaning its escrow hasn't been observed
+// by ChainSync yet; on FRG, IdentityResolver never fails this way) -- the
+// whole chunk shares one proof, so it's all-or-nothing, same as the proof
+// itself.
 fn build_settlement_trades(
     state: &Arc<RwLock<AppState>>,
-    chain_sync: &ChainSync<impl Provider>,
+    resolver: &impl TraderAddressResolver,
     chunk: &[engine::Match],
 ) -> Option<Vec<SettlementTrade>> {
     let mut out = Vec::with_capacity(chunk.len());
@@ -452,8 +572,8 @@ fn build_settlement_trades(
             (m.taker_trader, m.maker_trader)
         };
 
-        let payer_addr = resolve_address(chain_sync, payer_pubkey)?;
-        let counterparty_addr = resolve_address(chain_sync, counterparty_pubkey)?;
+        let payer_account = resolver.resolve(payer_pubkey)?;
+        let counterparty_account = resolver.resolve(counterparty_pubkey)?;
 
         let notional = m.price * m.amount;
         let fee = notional * m.fee_basis_points as u64 / 10_000;
@@ -461,8 +581,8 @@ fn build_settlement_trades(
         out.push(SettlementTrade {
             maker_order_id: m.maker_order_id,
             taker_order_id: m.taker_order_id,
-            trader: address_to_account(payer_addr),
-            counterparty: address_to_account(counterparty_addr),
+            trader: payer_account,
+            counterparty: counterparty_account,
             token: Token::Native,
             amount: notional,
             fee,

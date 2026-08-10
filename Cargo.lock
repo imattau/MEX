@@ -886,6 +886,7 @@ dependencies = [
  "batcher",
  "chain",
  "chain-ethereum",
+ "chain-frg",
  "common",
  "ed25519-dalek",
  "engine",
